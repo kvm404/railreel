@@ -1,0 +1,45 @@
+{
+  "expo": {
+    "name": "RailReel",
+    "slug": "railreel",
+    "scheme": "railreel",
+    "version": "0.1.0",
+    "orientation": "default",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.kvm404.railreel",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "RailReel uses your local network to discover nearby friends and share the movie over the host's hotspot. No internet is used.",
+        "NSBonjourServices": [
+          "_railreel._tcp"
+        ],
+        "UIBackgroundModes": [
+          "audio"
+        ]
+      }
+    },
+    "android": {
+      "package": "com.kvm404.railreel",
+      "adaptiveIcon": {
+        "backgroundColor": "#0B0B0F",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.ACCESS_WIFI_STATE",
+        "android.permission.CHANGE_WIFI_MULTICAST_STATE"
+      ],
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": [
+      "expo-dev-client",
+      "expo-font"
+    ]
+  }
+}
