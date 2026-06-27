@@ -4,7 +4,7 @@
 
 **A private movie theater that travels with you.**
 
-Watch a movie together, in perfect sync, on everyone's own phone — with **no internet**.
+Watch a movie together, tightly in sync, on everyone's own phone — with **no internet**.
 
 </div>
 
