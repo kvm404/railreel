@@ -17,7 +17,7 @@ import { useTheme } from '@/theme/ThemeProvider'
 /**
  * The night-train window: cold light-streaks drifting at parallax depths behind
  * everything, under a cinema vignette. The empty mid-screen IS the window — its life
- * comes from the moving streaks + a single fading horizon hairline, never a painted box.
+ * comes from the moving streaks, never a painted box.
  * `intensity` scales it (Home high, Player low; 0 = off). Halts under reduce-motion.
  * See docs/design-language.md.
  */

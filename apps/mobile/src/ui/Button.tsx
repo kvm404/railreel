@@ -1,6 +1,7 @@
-import type { ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import { Pressable, StyleSheet, View, type ViewStyle } from 'react-native'
 import Animated, {
+  cancelAnimation,
   useAnimatedStyle,
   useReducedMotion,
   useSharedValue,
@@ -53,6 +54,15 @@ export function Button({
       ? []
       : [{ scale: 1 - pressed.value * 0.02 }, { translateY: pressed.value * 2 }],
   }))
+
+  // If the button is disabled mid-press, Pressable may never fire onPressOut —
+  // release the depressed state so it doesn't stick.
+  useEffect(() => {
+    if (disabled) {
+      cancelAnimation(pressed)
+      pressed.value = 0
+    }
+  }, [disabled, pressed])
 
   const onIn = () => {
     pressed.value = withTiming(1, { duration: motion.fast })

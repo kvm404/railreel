@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { StyleSheet, useWindowDimensions, View } from 'react-native'
 import Animated, {
   cancelAnimation,
@@ -20,8 +20,8 @@ import { motion } from '@/theme/tokens'
 const H_PADDING = 24
 
 /**
- * Home / Landing — the hero. Streaks drift, RAILREEL flips in letter-by-letter,
- * a warm bloom ignites behind "Host a session". See docs/design-language.md.
+ * Home / Landing — the hero. The night-window streaks drift, RAILREEL flips in
+ * letter-by-letter, then the actions rise in. See docs/design-language.md.
  */
 export function HomeScreen({
   onHost,
@@ -40,16 +40,23 @@ export function HomeScreen({
 
   // The action group rises in after the wordmark has clattered into place.
   const rise = useSharedValue(reduced ? 1 : 0)
+  const [introReady, setIntroReady] = useState(reduced)
   useEffect(() => {
     if (reduced) {
       rise.value = 1
+      setIntroReady(true)
       return
     }
     rise.value = withDelay(
       750,
       withTiming(1, { duration: motion.slow, easing: Easing.bezier(...motion.expoOut) }),
     )
-    return () => cancelAnimation(rise)
+    // Keep the still-invisible actions out of the a11y tree until they've arrived.
+    const id = setTimeout(() => setIntroReady(true), 750 + motion.slow)
+    return () => {
+      clearTimeout(id)
+      cancelAnimation(rise)
+    }
   }, [reduced, rise])
 
   const riseStyle = useAnimatedStyle(() => ({
@@ -73,7 +80,11 @@ export function HomeScreen({
           </Text>
         </View>
 
-        <Animated.View style={[styles.actions, riseStyle]}>
+        <Animated.View
+          style={[styles.actions, riseStyle]}
+          accessibilityElementsHidden={!introReady}
+          importantForAccessibility={introReady ? 'auto' : 'no-hide-descendants'}
+        >
           <Button
             title="Host a session"
             subtitle="Share your movie with the cabin"
