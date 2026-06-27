@@ -1,0 +1,26 @@
+{
+  "name": "railreel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "bun run --cwd apps/mobile typecheck",
+    "test": "bun run --cwd apps/mobile test",
+    "mobile:start": "bun run --cwd apps/mobile start",
+    "mobile:android": "bun run --cwd apps/mobile android",
+    "mobile:ios": "bun run --cwd apps/mobile ios",
+    "mobile:test": "bun run --cwd apps/mobile test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "eslint": "^9.39.4",
+    "globals": "^17.4.0",
+    "typescript": "~5.9.2",
+    "typescript-eslint": "^8.58.0"
+  }
+}
