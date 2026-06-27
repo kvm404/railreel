@@ -22,7 +22,7 @@ export function JoinSessionScreen() {
   const nav = useNavigation()
 
   return (
-    <Screen title="JOIN">
+    <Screen title="JOIN" scroll>
       <View style={styles.body}>
         <View style={styles.searching}>
           <Radar size={18} color={t.palette.cyan} strokeWidth={2.25} />

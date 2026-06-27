@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Pressable, StyleSheet, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { ChevronLeft } from 'lucide-react-native'
 import { Text } from '@/ui'
@@ -14,10 +14,13 @@ export function Screen({
   title,
   children,
   showBack = true,
+  scroll = false,
 }: {
   title?: string
   children: ReactNode
   showBack?: boolean
+  /** Wrap the body in a ScrollView so tall content stays reachable on small screens / large fonts. */
+  scroll?: boolean
 }) {
   const t = useTheme()
   const insets = useSafeAreaInsets()
@@ -48,7 +51,17 @@ export function Screen({
           <View style={styles.backSpacer} />
         </View>
       )}
-      <View style={styles.body}>{children}</View>
+      {scroll ? (
+        <ScrollView
+          style={styles.body}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+        >
+          {children}
+        </ScrollView>
+      ) : (
+        <View style={styles.body}>{children}</View>
+      )}
     </View>
   )
 }
@@ -66,4 +79,5 @@ const styles = StyleSheet.create({
   },
   backSpacer: { width: 40, height: 40 },
   body: { flex: 1 },
+  scrollContent: { flexGrow: 1 },
 })

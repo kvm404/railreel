@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { StyleSheet, View } from 'react-native'
 import { Screen } from '@/components/Screen'
 import { FilamentRing } from '@/components/FilamentRing'
@@ -25,23 +25,35 @@ export function LobbyScreen({ params }: { params?: NavParams }) {
   const t = useTheme()
   const title = (params?.title as string) ?? 'Dune · Part Two'
   const [people, setPeople] = useState<Person[]>(INITIAL)
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // Simulate everyone buffering up to ready.
   useEffect(() => {
-    const id = setInterval(() => {
-      setPeople((prev) => {
-        if (prev.every((p) => p.progress >= 1)) return prev
-        return prev.map((p) => ({ ...p, progress: Math.min(1, p.progress + p.speed) }))
-      })
+    intervalRef.current = setInterval(() => {
+      setPeople((prev) =>
+        prev.every((p) => p.progress >= 1)
+          ? prev
+          : prev.map((p) => ({ ...p, progress: Math.min(1, p.progress + p.speed) })),
+      )
     }, 600)
-    return () => clearInterval(id)
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current)
+    }
   }, [])
 
   const aboard = people.filter((p) => p.progress >= 1).length
   const ready = aboard === people.length
 
+  // Stop waking JS once everyone is aboard.
+  useEffect(() => {
+    if (ready && intervalRef.current) {
+      clearInterval(intervalRef.current)
+      intervalRef.current = null
+    }
+  }, [ready])
+
   return (
-    <Screen title="LOBBY">
+    <Screen title="LOBBY" scroll>
       <View style={styles.body}>
         <View style={styles.head}>
           <Text variant="title" numberOfLines={1}>

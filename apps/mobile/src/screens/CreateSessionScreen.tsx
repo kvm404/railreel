@@ -31,7 +31,7 @@ export function CreateSessionScreen() {
   const joinUrl = encodeJoinUrl(MOCK_PAYLOAD)
 
   return (
-    <Screen title="NEW SESSION">
+    <Screen title="NEW SESSION" scroll>
       <View style={styles.body}>
         {/* now sharing */}
         <View style={[styles.movie, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}>
@@ -44,20 +44,13 @@ export function CreateSessionScreen() {
               Dune · Part Two
             </Text>
           </View>
-          <Text variant="data" tone="tertiary">
-            CHANGE
-          </Text>
         </View>
 
         {/* invite panel — film/ticket frame around the QR */}
         <View style={[styles.invite, { borderColor: t.palette.hairline }]}>
+          {/* dark modules on a light "ticket" tile with a quiet zone — scans reliably */}
           <View style={styles.qrWrap}>
-            <QRCode
-              value={joinUrl}
-              size={168}
-              color={t.palette.textPrimary}
-              backgroundColor="transparent"
-            />
+            <QRCode value={joinUrl} size={172} color="#0A0E16" backgroundColor="#F5F3EC" />
           </View>
           <Text variant="eyebrow" tone="tertiary" style={{ marginTop: 18 }}>
             JOIN CODE
@@ -105,7 +98,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 22,
   },
-  qrWrap: { padding: 12 },
+  qrWrap: { padding: 16, backgroundColor: '#F5F3EC', borderRadius: 14 },
   step: {
     flexDirection: 'row',
     alignItems: 'center',

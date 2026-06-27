@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType }
 import { BackHandler, StyleSheet, View } from 'react-native'
 import Animated, {
   Easing,
+  runOnJS,
   useAnimatedStyle,
   useReducedMotion,
   useSharedValue,
@@ -26,30 +27,52 @@ const makeEntry = (name: RouteName, params?: NavParams): Entry => ({
  * Custom stack navigator. Renders the top screen over a persistent WindowAtmosphere;
  * each navigation slides the new screen in (direction-aware) and respects the Android
  * back button + reduce-motion.
+ *
+ * v1 note: only the top route is mounted — going back remounts the previous screen
+ * (Home replays its intro; no form/discovery state is retained). Fine while screens are
+ * stateless/mock; revisit when a screen needs to preserve state across navigation.
  */
 export function Navigator({ routes, initial }: { routes: Routes; initial: RouteName }) {
   const [stack, setStack] = useState<Entry[]>(() => [makeEntry(initial)])
-  const dir = useRef<1 | -1>(1) // 1 = forward (push), -1 = back (pop)
   const reduced = useReducedMotion()
   const anim = useSharedValue(1)
+  const dirSv = useSharedValue<1 | -1>(1) // 1 = forward (push), -1 = back (pop)
+  const transitioning = useRef(false)
 
   const top = stack[stack.length - 1]!
   const canGoBack = stack.length > 1
 
-  const navigate = useCallback((name: RouteName, params?: NavParams) => {
-    dir.current = 1
-    setStack((s) => [...s, makeEntry(name, params)])
+  // One navigation at a time — blocks double-tap double-push and rapid multi-pop.
+  const begin = useCallback(
+    (d: 1 | -1) => {
+      if (transitioning.current) return false
+      transitioning.current = true
+      dirSv.value = d
+      if (!reduced) anim.value = 0 // reset BEFORE the new screen paints (no flash)
+      return true
+    },
+    [reduced, anim, dirSv],
+  )
+  const endTransition = useCallback(() => {
+    transitioning.current = false
   }, [])
 
-  const replace = useCallback((name: RouteName, params?: NavParams) => {
-    dir.current = 1
-    setStack((s) => [...s.slice(0, -1), makeEntry(name, params)])
-  }, [])
-
+  const navigate = useCallback(
+    (name: RouteName, params?: NavParams) => {
+      if (begin(1)) setStack((s) => [...s, makeEntry(name, params)])
+    },
+    [begin],
+  )
+  const replace = useCallback(
+    (name: RouteName, params?: NavParams) => {
+      if (begin(1)) setStack((s) => [...s.slice(0, -1), makeEntry(name, params)])
+    },
+    [begin],
+  )
   const goBack = useCallback(() => {
-    dir.current = -1
-    setStack((s) => (s.length > 1 ? s.slice(0, -1) : s))
-  }, [])
+    if (stack.length <= 1) return
+    if (begin(-1)) setStack((s) => s.slice(0, -1))
+  }, [stack.length, begin])
 
   // Android hardware back.
   useEffect(() => {
@@ -63,19 +86,26 @@ export function Navigator({ routes, initial }: { routes: Routes; initial: RouteN
     return () => sub.remove()
   }, [stack.length, goBack])
 
-  // Animate whenever the visible screen changes.
+  // Animate whenever the visible screen changes, then release the transition lock.
   useEffect(() => {
     if (reduced) {
       anim.value = 1
+      transitioning.current = false
       return
     }
     anim.value = 0
-    anim.value = withTiming(1, { duration: motion.slow, easing: Easing.bezier(...motion.expoOut) })
-  }, [top.key, reduced, anim])
+    anim.value = withTiming(
+      1,
+      { duration: motion.slow, easing: Easing.bezier(...motion.expoOut) },
+      (finished) => {
+        if (finished) runOnJS(endTransition)()
+      },
+    )
+  }, [top.key, reduced, anim, endTransition])
 
   const screenStyle = useAnimatedStyle(() => ({
     opacity: anim.value,
-    transform: [{ translateX: (1 - anim.value) * 28 * dir.current }],
+    transform: [{ translateX: (1 - anim.value) * 28 * dirSv.value }],
   }))
 
   const api = useMemo(() => ({ navigate, replace, goBack, canGoBack }), [navigate, replace, goBack, canGoBack])

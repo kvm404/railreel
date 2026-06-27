@@ -1,5 +1,7 @@
+import { useEffect } from 'react'
 import { Pressable, StyleSheet, View } from 'react-native'
 import Animated, {
+  cancelAnimation,
   useAnimatedStyle,
   useReducedMotion,
   useSharedValue,
@@ -39,6 +41,14 @@ export function SessionCard({
     transform: reduced ? [] : [{ scale: 1 - pressed.value * 0.02 }],
   }))
 
+  // Don't let the press state stick if the card is disabled mid-press.
+  useEffect(() => {
+    if (disabled) {
+      cancelAnimation(pressed)
+      pressed.value = 0
+    }
+  }, [disabled, pressed])
+
   return (
     <Pressable
       onPressIn={() => (pressed.value = withTiming(1, { duration: motion.fast }))}
@@ -50,6 +60,7 @@ export function SessionCard({
       }}
       disabled={disabled}
       accessibilityRole="button"
+      accessibilityState={{ disabled }}
       accessibilityLabel={`${host}. ${title}. ${status}`}
     >
       <Animated.View

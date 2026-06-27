@@ -36,17 +36,22 @@ export function FilamentRing({
   const p = useSharedValue(0)
   const r = (size - stroke * 2) / 2
   const c = 2 * Math.PI * r
-  const ready = progress >= 1
+  const clamped = Math.max(0, Math.min(1, progress))
+  const ready = clamped >= 1
+  const pct = Math.round(clamped * 100)
 
   useEffect(() => {
-    const target = Math.max(0, Math.min(1, progress))
-    p.value = reduced ? target : withTiming(target, { duration: 700, easing: Easing.out(Easing.cubic) })
-  }, [progress, reduced, p])
+    p.value = reduced ? clamped : withTiming(clamped, { duration: 700, easing: Easing.out(Easing.cubic) })
+  }, [clamped, reduced, p])
 
   const animatedProps = useAnimatedProps(() => ({ strokeDashoffset: c * (1 - p.value) }))
 
   return (
-    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+    <View
+      style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}
+      accessible
+      accessibilityLabel={ready ? 'ready' : `${pct} percent`}
+    >
       <Svg width={size} height={size} style={{ position: 'absolute' }}>
         <Defs>
           <LinearGradient id="filament" x1="0" y1="0" x2="1" y2="1">
@@ -89,7 +94,7 @@ export function FilamentRing({
           <Check size={size * 0.34} color={t.palette.amber} strokeWidth={2.5} />
         ) : (
           <Text variant="data" tone="secondary">
-            {Math.round(progress * 100)}
+            {pct}
           </Text>
         ))}
     </View>
