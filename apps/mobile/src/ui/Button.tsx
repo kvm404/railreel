@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { Pressable, StyleSheet, View, type ViewStyle } from 'react-native'
 import Animated, {
   useAnimatedStyle,
@@ -9,30 +10,35 @@ import Animated, {
 import { LinearGradient } from 'expo-linear-gradient'
 import * as Haptics from 'expo-haptics'
 import { Text } from './Text'
-import { Bloom } from '@/components/Bloom'
 import { useTheme } from '@/theme/ThemeProvider'
 import { motion } from '@/theme/tokens'
 
 /**
- * Primary action control. `amber` = filled tungsten CTA (warm, human); `cyan` = ghost
- * outline (connection/secondary). Press = scale + a filament-glow bloom (rendered as an
- * SVG sibling so it isn't clipped, and works identically on iOS + Android) + a light
- * haptic. Respects reduce-motion. See docs/design-language.md.
+ * Primary action control. `amber` = filled tungsten CTA (warm, human, primary);
+ * `cyan` = ghost outline (connection/secondary, recedes). Hierarchy comes from weight
+ * and material, not light. Press = a small scale + downward "depress" + light haptic.
+ * Respects reduce-motion. See docs/design-language.md.
  */
 
 export type ButtonProps = {
   title: string
   subtitle?: string
   intent?: 'amber' | 'cyan'
+  icon?: ReactNode
+  height?: number
   onPress?: () => void
   disabled?: boolean
   style?: ViewStyle
 }
 
+const RADIUS = 24
+
 export function Button({
   title,
   subtitle,
   intent = 'amber',
+  icon,
+  height = 66,
   onPress,
   disabled = false,
   style,
@@ -43,11 +49,9 @@ export function Button({
   const isAmber = intent === 'amber'
 
   const cardStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: reduced ? 1 : 1 - pressed.value * 0.04 }],
-  }))
-  const glowStyle = useAnimatedStyle(() => ({
-    opacity: 0.55 + pressed.value * 0.45,
-    transform: [{ scale: 1 + pressed.value * 0.06 }],
+    transform: reduced
+      ? []
+      : [{ scale: 1 - pressed.value * 0.02 }, { translateY: pressed.value * 2 }],
   }))
 
   const onIn = () => {
@@ -73,32 +77,27 @@ export function Button({
       accessibilityState={{ disabled }}
       style={style}
     >
-      <View style={[styles.frame, disabled && styles.disabled]}>
-        {/* Filament glow — SVG sibling behind the card, never clipped. */}
-        <Animated.View style={[styles.glow, glowStyle]} pointerEvents="none">
-          <Bloom
-            size={260}
-            color={isAmber ? t.palette.amberGlow : t.palette.cyan}
-            intensity={isAmber ? 0.45 : 0.22}
+      <Animated.View
+        style={[
+          styles.card,
+          cardStyle,
+          { minHeight: height, borderRadius: RADIUS },
+          isAmber
+            ? { borderBottomWidth: 2, borderBottomColor: 'rgba(0,0,0,0.22)' }
+            : { borderWidth: 1, borderColor: 'rgba(87,210,230,0.35)', backgroundColor: 'rgba(87,210,230,0.05)' },
+          disabled && styles.disabled,
+        ]}
+      >
+        {isAmber ? (
+          <LinearGradient
+            colors={t.gradients.amberFill}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={[StyleSheet.absoluteFill, { borderRadius: RADIUS }]}
           />
-        </Animated.View>
-
-        <Animated.View
-          style={[
-            styles.card,
-            cardStyle,
-            { borderRadius: t.radii.lg },
-            !isAmber && { borderWidth: 1, borderColor: t.palette.cyanDeep, backgroundColor: 'rgba(87,210,230,0.06)' },
-          ]}
-        >
-          {isAmber ? (
-            <LinearGradient
-              colors={t.gradients.amberFill}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={StyleSheet.absoluteFill}
-            />
-          ) : null}
+        ) : null}
+        <View style={styles.row}>
+          {icon ? <View style={styles.icon}>{icon}</View> : null}
           <View style={styles.labels}>
             <Text variant="cardTitle" tone={isAmber ? 'onAmber' : 'cyan'}>
               {title}
@@ -113,31 +112,22 @@ export function Button({
               </Text>
             ) : null}
           </View>
-        </Animated.View>
-      </View>
+        </View>
+      </Animated.View>
     </Pressable>
   )
 }
 
 const styles = StyleSheet.create({
-  frame: { alignItems: 'stretch', justifyContent: 'center' },
-  glow: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   card: {
-    minHeight: 64,
-    paddingHorizontal: 22,
+    paddingHorizontal: 20,
     paddingVertical: 14,
     justifyContent: 'center',
     overflow: 'hidden',
   },
-  labels: { gap: 2 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  icon: { width: 24, alignItems: 'center', justifyContent: 'center' },
+  labels: { gap: 2, flexShrink: 1 },
   subtitle: { opacity: 0.85 },
   disabled: { opacity: 0.4 },
 })

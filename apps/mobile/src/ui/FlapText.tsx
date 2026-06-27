@@ -54,7 +54,7 @@ export function FlapText({
   const chars = value.split('')
   return (
     <View
-      style={[styles.row, { gap: Math.max(2, size * 0.12) }, style]}
+      style={[styles.row, { gap: Math.max(2, size * 0.1) }, style]}
       accessibilityLabel={value}
       accessible
     >
@@ -155,8 +155,8 @@ function FlapCell({
     transform: [{ perspective: 600 }, { rotateX: `${interpolate(progress.value, [0.5, 1], [90, 0], 'clamp')}deg` }],
   }))
 
-  const cellW = size * 0.82
-  const cellH = size * 1.18
+  const cellW = size * 0.84
+  const cellH = size * 1.26
   const cell = {
     width: cellW,
     height: cellH,
@@ -165,10 +165,22 @@ function FlapCell({
 
   return (
     <View
-      style={[styles.cell, cell, { backgroundColor: t.palette.void, borderColor: t.palette.hairline }]}
+      style={[
+        styles.cell,
+        cell,
+        {
+          backgroundColor: '#0C111B', // top-half base (cooler/lighter)
+          borderColor: t.palette.hairline,
+          borderTopColor: 'rgba(255,255,255,0.07)', // top bevel highlight
+          borderBottomColor: 'rgba(0,0,0,0.55)', // bottom bevel shadow
+        },
+      ]}
       importantForAccessibility="no-hide-descendants"
       accessibilityElementsHidden
     >
+      {/* Bottom half sits in darker material — gives each tile physical depth. */}
+      <View style={[styles.bottomShade, { backgroundColor: 'rgba(0,0,0,0.35)' }]} />
+
       {/* Resting state: the upper shows the target, the lower shows old until the flap falls. */}
       <Half which="top" char={curr} size={size} cellW={cellW} cellH={cellH} color={color} />
       <Half which="bottom" char={flipping ? prev : curr} size={size} cellW={cellW} cellH={cellH} color={color} />
@@ -184,8 +196,9 @@ function FlapCell({
         </>
       ) : null}
 
-      {/* The split-flap seam. */}
-      <View style={[styles.seam, { borderBottomColor: 'rgba(0,0,0,0.6)' }]} />
+      {/* The split-flap hinge: a dark seam with a thin highlight beneath. */}
+      <View style={[styles.hinge, { backgroundColor: 'rgba(0,0,0,0.7)' }]} />
+      <View style={[styles.hingeHighlight, { backgroundColor: 'rgba(255,255,255,0.05)' }]} />
     </View>
   )
 }
@@ -251,12 +264,7 @@ const styles = StyleSheet.create({
   },
   top: { top: 0 },
   bottom: { bottom: 0 },
-  seam: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    top: '50%',
-    height: StyleSheet.hairlineWidth,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
+  bottomShade: { position: 'absolute', left: 0, right: 0, bottom: 0, height: '50%' },
+  hinge: { position: 'absolute', left: 0, right: 0, top: '50%', height: 1, marginTop: -0.5 },
+  hingeHighlight: { position: 'absolute', left: 0, right: 0, top: '50%', height: 1, marginTop: 0.5 },
 })
