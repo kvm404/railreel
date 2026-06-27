@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
-import { StyleSheet, View } from 'react-native'
+import { StyleSheet, useWindowDimensions, View } from 'react-native'
 import Animated, {
+  cancelAnimation,
   Easing,
   useAnimatedStyle,
   useReducedMotion,
@@ -14,6 +15,8 @@ import { WindowAtmosphere } from '@/components/WindowAtmosphere'
 import { Bloom } from '@/components/Bloom'
 import { useTheme } from '@/theme/ThemeProvider'
 import { motion } from '@/theme/tokens'
+
+const H_PADDING = 24
 
 /**
  * Home / Landing — the hero. Streaks drift, RAILREEL flips in letter-by-letter,
@@ -29,6 +32,10 @@ export function HomeScreen({
   const t = useTheme()
   const insets = useSafeAreaInsets()
   const reduced = useReducedMotion()
+  const { width } = useWindowDimensions()
+
+  // Fit "RAILREEL" (8 cells) to the available width; cap at the design size.
+  const logoSize = Math.max(22, Math.min(40, Math.floor((width - H_PADDING * 2) / 8.4)))
 
   // The action group rises in after the wordmark has clattered into place.
   const rise = useSharedValue(reduced ? 1 : 0)
@@ -38,9 +45,10 @@ export function HomeScreen({
       return
     }
     rise.value = withDelay(
-      650,
+      750,
       withTiming(1, { duration: motion.slow, easing: Easing.bezier(...motion.expoOut) }),
     )
+    return () => cancelAnimation(rise)
   }, [reduced, rise])
 
   const riseStyle = useAnimatedStyle(() => ({
@@ -53,12 +61,12 @@ export function HomeScreen({
       <WindowAtmosphere intensity={1} />
 
       <View style={[styles.content, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 28 }]}>
-        <Text variant="eyebrow" tone="tertiary">
+        <Text variant="eyebrow" tone="secondary">
           OFFLINE · IN SYNC · TOGETHER
         </Text>
 
         <View style={styles.hero}>
-          <FlapText value="RAILREEL" size={38} tone="primary" stagger={55} />
+          <FlapText value="RAILREEL" size={logoSize} tone="primary" stagger={55} />
           <Text variant="eyebrow" tone="secondary" style={styles.tagline}>
             THE THEATER THAT TRAVELS
           </Text>
@@ -66,12 +74,8 @@ export function HomeScreen({
 
         <Animated.View style={[styles.actions, riseStyle]}>
           <View style={styles.hostWrap}>
-            <Bloom
-              size={320}
-              color={t.palette.amberGlow}
-              intensity={0.35}
-              style={styles.bloom}
-            />
+            {/* Bloom is a preceding sibling, so it naturally paints behind the button. */}
+            <Bloom size={320} color={t.palette.amberGlow} intensity={0.32} style={styles.bloom} />
             <Button
               title="Host a session"
               subtitle="Share your movie with the cabin"
@@ -80,15 +84,10 @@ export function HomeScreen({
             />
           </View>
 
-          <Button
-            title="Join a session"
-            subtitle="Find friends nearby"
-            intent="cyan"
-            onPress={onJoin}
-          />
+          <Button title="Join a session" subtitle="Find friends nearby" intent="cyan" onPress={onJoin} />
 
           <View style={styles.footer}>
-            <Text variant="eyebrow" tone="tertiary">
+            <Text variant="eyebrow" tone="secondary">
               NO INTERNET NEEDED
             </Text>
             <View style={styles.dots}>
@@ -105,12 +104,12 @@ export function HomeScreen({
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
-  content: { flex: 1, paddingHorizontal: 24, justifyContent: 'space-between' },
+  content: { flex: 1, paddingHorizontal: H_PADDING, justifyContent: 'space-between' },
   hero: { flex: 1, justifyContent: 'center', gap: 18 },
   tagline: { marginLeft: 4 },
   actions: { gap: 14 },
   hostWrap: { position: 'relative' },
-  bloom: { position: 'absolute', top: -128, left: -24, zIndex: -1 },
+  bloom: { position: 'absolute', top: -128, left: -24 },
   footer: {
     marginTop: 10,
     flexDirection: 'row',

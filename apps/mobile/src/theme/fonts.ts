@@ -21,5 +21,9 @@ export function useAppFonts(): boolean {
     SpaceMono_400Regular,
     SpaceMono_700Bold,
   })
+  if (error) {
+    // Don't block the app on a font failure, but make it visible.
+    console.warn('[RailReel] font load failed, falling back to system fonts:', error)
+  }
   return loaded || error !== null
 }
