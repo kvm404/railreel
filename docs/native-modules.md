@@ -44,6 +44,16 @@ backpressure/memory limits (codex P1).
 use react-native-tcp-socket in JS — but it is **not** the production data plane; don't let it
 calcify.
 
+> **✅ Spike result (2026-06-27, two physical Android phones on a hotspot).** Confirmed
+> empirically — see `docs/data-plane-module.md` for the full write-up:
+> - Client reached host over the hotspot (no AP isolation). Connectivity works.
+> - Clock sync handshake worked through `lib/sync/clock`; **RTT ~44ms** → sub-100ms sync is realistic.
+> - `react-native-tcp-socket` runs on the New Architecture via interop (servers bind fine).
+> - **JS-bridge data plane caps at ~1.8 Mbps** (16 MB took 70s) — far too slow for video. The
+>   bottleneck is the JS bridge, not the WiFi. **→ the production data plane MUST be native.**
+> - Host backgrounding (screen sleep) **pauses the JS server** mid-transfer. **→ the host needs a
+>   foreground service + keep-awake** (confirms `docs/architecture.md` §9).
+
 ## 3. Control plane — WebSocket
 
 - **Client side:** React Native ships a **WebSocket client** built in — no module needed.
