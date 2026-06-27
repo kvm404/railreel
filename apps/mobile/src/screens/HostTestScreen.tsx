@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, TextInput, View } from 'react-native'
-import * as Network from 'expo-network'
 import { File, Paths } from 'expo-file-system'
 import { Screen } from '@/components/Screen'
 import { Button, Text } from '@/ui'
@@ -20,7 +19,6 @@ const SIZE_MB = 64
 export function HostTestScreen() {
   const t = useTheme()
   const [mode, setMode] = useState<'host' | 'client'>('host')
-  const [ip, setIp] = useState<string | null>(null)
   const [clientIp, setClientIp] = useState('10.63.238.250')
   const [log, setLog] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
@@ -29,7 +27,6 @@ export function HostTestScreen() {
   const addLog = useCallback((l: string) => setLog((p) => [...p.slice(-30), l]), [])
 
   useEffect(() => {
-    Network.getIpAddressAsync().then(setIp).catch(() => setIp(null))
     return () => {
       RailReelHost.stop().catch(() => {})
     }
@@ -90,7 +87,6 @@ export function HostTestScreen() {
 
         {mode === 'host' ? (
           <>
-            <Row label="THIS DEVICE IP" value={ip ?? '…'} />
             <Row label="SERVE" value={`${SIZE_MB} MB · :${PORT}`} />
             <Button
               title={serving.current ? 'Stop host' : busy ? 'Starting…' : 'Start host'}
