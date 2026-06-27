@@ -47,15 +47,25 @@ We do **not** live-stream video from host to clients. Instead:
 - During playback, **each phone plays its own local copy.** The host only sends tiny
   **sync messages** (play / pause / seek / clock heartbeat) over a WebSocket.
 
-Why: stalls depend on whether download throughput exceeds the video bitrate, not on real-time
-streaming. Over a phone hotspot, throughput (~30–50 Mbps) is ~5× a typical movie bitrate
-(~5–10 Mbps), so the buffer runs *ahead* of playback. This fixes the three real-world risks:
+Why: stalls depend on whether download throughput keeps up with playback, not on real-time
+streaming. **Important (corrected):** the host sends a *separate* copy to each client, so the
+demand is **aggregate = N × bitrate**, not a single stream. A 1080p ~8–10 Mbps movie to 5
+clients needs ~40–50 Mbps of usable hotspot throughput — which is at/near the ceiling of many
+phone hotspots. So:
+
+- For **moderate bitrate / smaller groups** (e.g. 720p ~3 Mbps × 4 clients ≈ 12 Mbps), the
+  buffer comfortably runs ahead and progressive start is great.
+- For **high bitrate × full groups**, the safe path is **full pre-cache before play** (and/or
+  capping supported bitrate by group size). The app measures real throughput with everyone
+  connected and chooses progressive-start vs. pre-cache accordingly, showing an ETA.
+
+This still fixes the real-world risks, with honest framing:
 
 | Risk | How this design handles it |
 | --- | --- |
-| Hotspot bandwidth | ~Zero network during playback; transfer happens once, up front. |
-| Host battery/heat | Host isn't transcoding/streaming during the movie — just sending clock pings. |
-| Sync precision | Sync is clock alignment, not pixel delivery → sub-100ms achievable. |
+| Hotspot bandwidth | Transfer is decoupled from frame timing; for high bitrate × big groups we pre-cache before play and surface an ETA rather than promising real-time. |
+| Host battery/heat | Host isn't transcoding or re-encoding; it serves bytes (native data plane) + sends clock pings. Host must stay foreground/awake/charged (see §8). |
+| Sync precision | Sync is clock alignment, not pixel delivery → tight *perceived* sync (target ~sub-100ms), actuated with scheduled start + ready-ACKs (see architecture §5). |
 
 See [`docs/architecture.md`](../architecture.md) for the full networking, sync, and buffering design.
 
@@ -64,15 +74,26 @@ See [`docs/architecture.md`](../architecture.md) for the full networking, sync, 
 **In scope**
 
 - Manual hotspot onboarding (guided — apps can't toggle hotspot on iOS/Android).
-- mDNS/Bonjour discovery for **tap-to-join**, with a 4-digit code fallback.
+- **Discovery:** mDNS/Bonjour for tap-to-join convenience; **robust fallback is a QR code /
+  link** that encodes host IP + ports + session id + a **secret join token** (a 4-digit code
+  alone can't resolve the host's IP offline, so it's only a human confirmation, not transport).
 - Event create → request-to-join → **host approves each person** → readiness lobby.
-- HTTP range-based progressive file transfer (host → clients).
-- Local playback with **adaptive start gate** + **group buffer floor / auto-pause** (§7).
-- NTP-style clock sync, **sub-100ms** target.
+- **Native** HTTP data-plane server with `Range` support (not a JS-bridge server) → file
+  transfer; **all WS + HTTP access requires the session token**, bytes served only to approved
+  clients.
+- Local playback fed through a **caching player source** (ExoPlayer `CacheDataSource` /
+  iOS resource-loader or a local proxy) — never point the player at a partially-written file.
+- **Adaptive start gate** (aggregate-throughput aware) + **group buffer floor with hysteresis
+  & a host "continue without client" / evict option** (§7).
+- Clock sync from **monotonic** clocks; resume actuated by **scheduling a future host time +
+  ready-ACKs**; tight perceived sync (~sub-100ms target), likely with native timing help.
 - **Host-only controls**; participants send requests to host (no delegation in v1).
 - **Floating emoji reactions** over the video + group chat.
-- Media: **H.264 (AVC) + AAC in MP4 only**; remux container when codecs are fine; clearly
-  reject incompatible files (no on-device transcoding in v1).
+- Media: **already-compatible H.264 (AVC) + AAC MP4 only**, with a verified `moov`/fragment
+  layout. Container remux and any transcoding are **deferred** (too many edge cases for v1:
+  MKV+AC3/DTS, multi-track, Annex B, VFR, edit lists, storage). Reject others with a clear msg.
+- **Preflight checks:** measure real aggregate throughput with all clients connected; host
+  battery/thermal/storage check; pick progressive-start vs. full pre-cache accordingly.
 - Reconnection: a dropped client rejoins and resyncs to the host's timestamp.
 - iOS + Android.
 
@@ -89,11 +110,17 @@ See [`docs/architecture.md`](../architecture.md) for the full networking, sync, 
 Not a flat preload. Two mechanisms:
 
 1. **Adaptive start gate** — start only when *every* client has buffered ~60s ahead **and**
-   measured download rate comfortably exceeds the video bitrate. Clears in seconds on a good
-   hotspot; waits longer (with a friendly reason) only for marginal connections.
-2. **Group buffer floor** — the host polls each client's "seconds buffered ahead of playhead"
-   a few times per second. If any client drops below ~15s, the host **auto-pauses everyone**
-   ("Waiting for {name}…") and **auto-resumes** on recovery. The group stays locked together.
+   the **aggregate** measured throughput will let the slowest client finish before playback
+   catches the download edge: `remainingBytes / clientMbps < remainingPlayTime − margin`. If
+   that doesn't hold for high-bitrate × big groups, switch to **full pre-cache before play**
+   (show ETA). Clears in seconds on a good hotspot; waits (with a friendly reason) otherwise.
+2. **Group buffer floor (with hysteresis)** — the host polls each client's "seconds buffered
+   ahead" a few times per second. If any client drops below ~15s, the host **auto-pauses
+   everyone** ("Waiting for {name}…"); it **auto-resumes** only after the laggard recovers to a
+   higher mark (~30s) and ACKs ready — hysteresis prevents pause/resume flapping. A persistently
+   slow client triggers a host choice: **keep waiting** or **continue without them** (they
+   rejoin in catch-up mode once they reach target + lead). One bad device can't hold the group
+   hostage indefinitely.
 
 ## 8. Constraints & non-functional requirements
 
@@ -101,6 +128,14 @@ Not a flat preload. Two mechanisms:
 - **DRM-free files only.** Only movies the host legitimately owns as plain files; encrypted
   store downloads (Netflix/Prime) can't be shared — surfaced clearly in-app.
 - **Cross-platform parity.** Host and client roles work on both iOS and Android.
+- **Host is the session's lifeline (explicit v1 constraint).** While hosting, the host phone
+  must stay **foreground, awake (keep-awake on), powered enough, and on the hotspot**. The app
+  does a battery/thermal/storage preflight and states clearly: *if the host leaves/locks/kills
+  the app or the hotspot drops, the session ends.* No background-hosting reliability promise
+  (especially on iOS).
+- **Security.** Each session has a high-entropy secret; WS control and HTTP byte-serving both
+  require it, and bytes go only to host-approved clients. Anyone merely on the hotspot can't
+  pull the movie. Include file hash/size metadata so clients verify integrity.
 - **Polished, production-grade UX.** This is a portfolio-grade, open-source app — invest in
   edge cases (reconnection, errors, empty/loading states) and a genuinely impressive UI.
 - **Storage:** clients need ~1–4 GB free for the local movie copy; surface this up front.

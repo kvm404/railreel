@@ -30,17 +30,25 @@ There is no server beyond the host's phone. Everything is on the LAN.
 
 - **Transport:** the host's WiFi hotspot puts everyone on one LAN. The OS will not let an app
   toggle the hotspot, so onboarding *guides* the host to enable it manually.
-- **Discovery:** mDNS/Bonjour — `NSD` on Android, `Bonjour`/`NWBrowser` on iOS — so clients
-  see the host as a tappable name. Fallback: host shows a 4-digit code; client enters it to
-  resolve `host-ip:port` directly.
-- **Control plane:** a WebSocket server on the host. Small JSON messages (see §5).
-- **Data plane:** an HTTP server on the host serving the movie with `Range` support so clients
-  can stream-to-disk progressively and resume after drops.
+- **Discovery:** mDNS/Bonjour — `NSD` on Android, `Bonjour`/`NWBrowser` on iOS — for the
+  tap-to-join *convenience* path. It is **best-effort**: iOS gates local networking behind the
+  Local Network permission (blocked until granted; Bonjour types must be in `Info.plist`), and
+  Android NSD is async/lifecycle-sensitive.
+  **Robust fallback = QR code / link** encoding `host-ip`, ports, session id, and the **secret
+  join token**. (A bare 4-digit code can't resolve the host's IP offline — it's only a human
+  confirmation, never transport or auth.)
+- **Control plane:** a WebSocket server on the host. Small JSON messages (see §6). **The
+  session token is required to connect.**
+- **Data plane:** a **native** HTTP server (Swift/Kotlin) serving the movie with `Range`
+  support, bounded buffers, per-client throttling, cancellation, and `sendfile`-style reads —
+  *not* a JS-bridge server (multi-GB range reads to 4–5 clients would drown the bridge). Byte
+  serving requires the token and an approved client; supports resume after drops.
 
 > Native modules required (hence Expo **custom dev client**, not Expo Go): mDNS advertise/
-> browse, and the embedded HTTP + WebSocket servers. Investigate community modules first
-> (e.g. react-native-zeroconf, react-native-tcp-socket / a RN http server lib); wrap or write
-> our own thin native module where needed.
+> browse, the embedded HTTP + WebSocket servers (data plane in native code), and likely native
+> timing for sync actuation. Investigate community modules first (e.g. react-native-zeroconf,
+> react-native-tcp-socket); but the data plane and sync timing should be thin native modules we
+> control.
 
 ## 3. Session lifecycle
 
@@ -57,25 +65,33 @@ Host: end session → cleanup
 
 ## 4. Buffering & start/stall control
 
-The danger is a client whose download can't keep up. Throughput on a LAN usually far exceeds
-movie bitrate, so the buffer normally runs ahead — the controls below cover the edges.
+The danger is a client whose download can't keep up. **Crucial correction:** the host serves a
+*separate copy per client*, so demand is **aggregate = N × bitrate**, not one stream. A phone
+hotspot at ~30–50 Mbps serving five 8–10 Mbps copies is at its ceiling — the buffer does *not*
+automatically run ahead for high bitrate × big groups. The gate is throughput-aware and may
+choose full pre-cache.
 
 **Adaptive start gate** (when can the host press play?)
-- Every client reports: `bufferedAheadSec` and a measured `downloadMbps`.
-- Gate passes when, for *all* clients: `bufferedAheadSec ≥ START_LEAD` (≈60s) **and**
-  `downloadMbps ≥ SAFETY × videoBitrateMbps` (SAFETY ≈ 1.2).
-- If a client is marginal, the gate holds and the lobby explains why ("building a safe buffer
-  for {name}…"). No fixed multi-minute wait when conditions are good.
+- Every client reports: `bufferedAheadSec` and a measured `downloadMbps` (under *simultaneous*
+  download, i.e. real aggregate conditions).
+- Progressive start is allowed only if, for *all* clients, the download finishes before the
+  playhead reaches the download edge:
+  `remainingBytes / clientMbps < remainingPlayTimeSec − MARGIN` **and**
+  `bufferedAheadSec ≥ START_LEAD` (≈60s).
+- Otherwise → **full pre-cache before play** (download everything first, show ETA), and/or cap
+  supported bitrate by group size. The lobby explains the wait. No silent over-promise.
 
-**Group buffer floor** (during playback)
+**Group buffer floor with hysteresis** (during playback)
 - Clients send `bufferedAheadSec` heartbeats ~3–5×/sec over the WS.
 - If any client `< CRITICAL_LEAD` (≈15s): host broadcasts `pause(reason: waiting, who)`.
-  Overlay: "Waiting for {name}…".
-- When the lagging client recovers `≥ RESUME_LEAD` (≈30s): host broadcasts `resume`.
-- The whole group stays time-locked; nobody silently drifts or stalls alone.
+- Resume only when the laggard recovers `≥ RESUME_LEAD` (≈30s, strictly > critical) **and**
+  ACKs ready — the gap prevents pause/resume flapping. Enforce a `MIN_PAUSE` duration too.
+- A persistently slow client → host decision: **keep waiting** or **continue without them**
+  (strike/evict). The evicted client rejoins in **catch-up mode** (downloads/seeks to target +
+  lead, then re-locks). One bad device can't hold the group hostage.
 
-Constants (`START_LEAD`, `SAFETY`, `CRITICAL_LEAD`, `RESUME_LEAD`) live in one config module
-so they're tunable from real-device testing.
+Constants (`START_LEAD`, `MARGIN`, `CRITICAL_LEAD`, `RESUME_LEAD`, `MIN_PAUSE`, strike counts)
+live in one config module so they're tunable from real-device testing.
 
 ## 5. Sync protocol (clock alignment)
 
@@ -84,23 +100,37 @@ so they're tunable from real-device testing.
 client →  {t1}                    (client send time)
 host   →  {t1, t2, t3}            (host recv, host send)
 client    t4 = now
-offset = ((t2 - t1) + (t3 - t4)) / 2
+offset = ((t2 - t1) + (t3 - t4)) / 2      // = hostTime − clientTime
 rtt    =  (t4 - t1) - (t3 - t2)
 ```
-Keep the offset from the lowest-RTT samples. Now the client can convert host-time ↔ local-time.
+Keep the offset from the lowest-RTT samples. **All of `t1..t4` must come from a MONOTONIC clock
+(`CACurrentMediaTime`/`mach_absolute_time` on iOS, `elapsedRealtimeNanos` on Android) — never
+`Date.now()`**, which jumps with NTP/user changes. Timestamp at the native socket edge, not in
+JS, to avoid bridge jitter. (The pure math in `lib/sync/clock.ts` is clock-source agnostic; the
+*caller* must feed it monotonic values.)
 
 **Playback state.** The host is the source of truth:
 ```
 PlaybackState { positionSec, rate, isPlaying, hostTimestamp }
 ```
-A client computes its target position as
+A client computes target as
 `target = positionSec + (isPlaying ? (hostNow - hostTimestamp) : 0)` (converted via offset),
 and corrects:
-- drift `< ~250ms` → nudge `playbackRate` slightly (imperceptible catch-up).
-- drift `≥ ~250ms` → hard `seek` to target.
+- drift `< ~50ms` → hold.
+- `~50ms ≤ drift < ~250ms` → small bounded `playbackRate` nudge (PLL-style, imperceptible).
+- drift `≥ ~250ms` (sustained) or discontinuity → hard `seek` to target.
 
-**Target:** sub-100ms perceived sync. Each viewer is on their own headphones, so cross-phone
-lip-sync perfection isn't required — moment-to-moment togetherness (for reactions/chat) is.
+**Actuation is the hard part (not the math).** `play()`/`seek()`/decoder-ready latencies on
+AVPlayer & ExoPlayer can exceed 100ms, so:
+- **Schedule** start/resume for a *future host time* and have each client arm locally → all fire
+  together rather than "resume now" racing the network.
+- Require **"seek-complete / ready" ACKs** from clients before the group resumes after a seek.
+- Keep rate nudges small and bounded to avoid oscillation; hard-seek only on sustained error.
+- This timing likely lives in a **native module**, not JS.
+
+**Target:** tight *perceived* sync (~sub-100ms). Each viewer is on their own headphones, so
+cross-phone lip-sync perfection isn't required — moment-to-moment togetherness (for reactions/
+chat) is.
 
 ## 6. Control & messaging (WebSocket)
 
@@ -134,12 +164,17 @@ type ClientMsg =
 
 ## 7. Media pipeline (v1)
 
-- On import, **probe** the file. Accept only **H.264 + AAC**. If the container isn't MP4 but
-  codecs are compatible, **remux** to (fragmented) MP4 — fast, no re-encode. Otherwise reject
-  with a clear message (transcoding is a later version).
-- Fragmented MP4 (fMP4) plays well while still downloading (progressive friendly).
-- Player: a single RN video component on each phone playing the local file; the sync layer
-  drives its position/rate/play state.
+- On import, **probe** the file. v1 accepts **only already-compatible H.264 + AAC MP4** with a
+  valid `moov`/fragment layout. **Container remux and transcoding are deferred** — "non-MP4 but
+  compatible codecs → remux" sounds simple but breaks on real files: MKV with AC3/DTS, multiple
+  audio tracks / subtitles, H.264 Annex B → AVCC, unsupported profiles/levels, VFR, edit lists,
+  huge files, and 2× temporary storage. Reject non-conforming files with a clear message.
+- **Progressive playback must not point the player at a partially-written file.** A growing
+  file with a changing length/index is unreliable across players. Instead feed playback through
+  a **caching source**: ExoPlayer `CacheDataSource` on Android, an `AVAssetResourceLoader`
+  delegate (or a localhost proxy) on iOS — the player requests ranges, the cache layer satisfies
+  them from disk or fetches-and-stores. The fully-downloaded file is persisted separately.
+- For **full pre-cache** mode the file is complete before play, so a plain local file URL is fine.
 
 ## 8. App architecture (client app, both roles)
 
@@ -164,10 +199,45 @@ apps/mobile/modules/   native modules (mDNS, embedded servers) as needed
 probe rules as **pure functions** in `lib/`, tested against fixtures — same philosophy as the
 reference project's SMS-parser corpus.
 
-## 9. Open technical questions (to validate on-device)
+## 9. Host as single point of failure (explicit v1 stance)
 
-- Best cross-platform native modules for mDNS + embedded HTTP/WS, or do we write thin ones.
-- Real hotspot throughput with 4–6 clients on representative phones (tune §4 constants).
-- iOS background-audio/networking limits while the screen is on but app backgrounded.
-- fMP4 remux on-device performance and which input containers we can remux vs. must reject.
-- Local Network permission prompts (iOS) and how they affect the tap-to-join flow.
+The host phone *is* the infrastructure. v1 does **not** try to survive the host
+backgrounding / locking / getting a call / OS-killing the app / hotspot toggling off /
+battery or thermal shutdown. Instead:
+
+- **Preflight:** check battery %, thermal state, and free storage before allowing hosting;
+  warn/refuse if marginal.
+- **Keep-awake** on while hosting; encourage the host to stay plugged in.
+- **Honest UX:** "Your session ends if you leave the app or turn off the hotspot." No
+  background-hosting reliability promise (worse on iOS).
+- Clients handle host disappearance gracefully (clear "host left — session ended" state).
+
+## 10. Security model (v1)
+
+- On session create, generate a **high-entropy session secret** (token).
+- The token is distributed *only* via the QR/link or to approved clients — never broadcast.
+- **Both** the WS control plane and the HTTP data plane require the token; the data plane
+  additionally serves bytes only to clients the host has **approved**. Rate-limit pairing.
+- Movie metadata includes **file hash + size** so clients verify integrity of what they got.
+- Rotate the secret per session. Result: being on the hotspot is not enough to pull the movie.
+
+## 11. Open technical questions (to validate on-device)
+
+- Best cross-platform libs for mDNS; confirm we own the native data-plane (HTTP range) + sync
+  timing modules rather than relying on JS-bridge servers.
+- Real **aggregate** hotspot throughput with 4–6 clients downloading simultaneously on
+  representative phones; tune §4 constants and the progressive-vs-pre-cache threshold.
+- iOS Local Network permission flow + background-audio/networking limits while screen is on.
+- Caching-player-source approach per platform (ExoPlayer `CacheDataSource` / iOS
+  resource-loader / local proxy) and how seek interacts with a partially-cached asset.
+- AP/client isolation on some hotspots (can clients reach the host's server at all?).
+- Real-device **soak testing** (full 2h movie, mixed OS, lock/call/background, reconnect).
+
+## Appendix: design review (codex, 2026-06-27)
+
+This architecture was reviewed by codex (principal-engineer role). Key findings folded in:
+aggregate-throughput correction (§4), monotonic clocks + scheduled-resume/ready-ACK actuation
+(§5), caching player source instead of partial-file playback (§7), native data plane + token
+auth (§2, §10), tightened media scope (§7), buffer-floor hysteresis + evict (§4), host-as-SPOF
+constraints (§9). Verdict: the core "distribute bytes once, sync state not pixels" direction is
+sound; the risks are mobile-platform edges and optimistic constants — addressed above.
