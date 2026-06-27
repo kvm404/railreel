@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { StyleSheet, useWindowDimensions, View } from 'react-native'
+import { Pressable, StyleSheet, useWindowDimensions, View } from 'react-native'
 import Animated, {
   cancelAnimation,
   Easing,
@@ -97,9 +97,12 @@ export function HomeScreen() {
           />
 
           <View style={styles.footer}>
-            <Text variant="eyebrow" tone="secondary">
-              NO INTERNET NEEDED
-            </Text>
+            {/* dev backdoor: opens the M1 host-throughput harness (remove later) */}
+            <Pressable onLongPress={() => nav.navigate('HostTest')} delayLongPress={600}>
+              <Text variant="eyebrow" tone="secondary">
+                NO INTERNET NEEDED
+              </Text>
+            </Pressable>
             <SyncDots />
           </View>
         </Animated.View>
