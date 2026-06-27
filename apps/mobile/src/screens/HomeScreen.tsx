@@ -12,8 +12,8 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { RadioTower, Radar } from 'lucide-react-native'
 import { Button, FlapText, Text } from '@/ui'
-import { WindowAtmosphere } from '@/components/WindowAtmosphere'
 import { SyncDots } from '@/components/SyncDots'
+import { useNavigation } from '@/navigation/context'
 import { useTheme } from '@/theme/ThemeProvider'
 import { motion } from '@/theme/tokens'
 
@@ -23,17 +23,12 @@ const H_PADDING = 24
  * Home / Landing — the hero. The night-window streaks drift, RAILREEL flips in
  * letter-by-letter, then the actions rise in. See docs/design-language.md.
  */
-export function HomeScreen({
-  onHost,
-  onJoin,
-}: {
-  onHost?: () => void
-  onJoin?: () => void
-}) {
+export function HomeScreen() {
   const t = useTheme()
   const insets = useSafeAreaInsets()
   const reduced = useReducedMotion()
   const { width } = useWindowDimensions()
+  const nav = useNavigation()
 
   // Fit "RAILREEL" (8 cells) to the available width; cap at the design size.
   const logoSize = Math.max(22, Math.min(40, Math.floor((width - H_PADDING * 2) / 8.4)))
@@ -66,8 +61,6 @@ export function HomeScreen({
 
   return (
     <View style={styles.fill}>
-      <WindowAtmosphere intensity={1} />
-
       <View style={[styles.content, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 46 }]}>
         <Text variant="eyebrow" tone="secondary">
           OFFLINE · IN SYNC · TOGETHER
@@ -91,7 +84,7 @@ export function HomeScreen({
             intent="amber"
             height={74}
             icon={<RadioTower size={22} color={t.palette.onAmber} strokeWidth={2.25} />}
-            onPress={onHost}
+            onPress={() => nav.navigate('CreateSession')}
           />
 
           <Button
@@ -100,7 +93,7 @@ export function HomeScreen({
             intent="cyan"
             height={66}
             icon={<Radar size={22} color={t.palette.cyan} strokeWidth={2.25} />}
-            onPress={onJoin}
+            onPress={() => nav.navigate('JoinSession')}
           />
 
           <View style={styles.footer}>
