@@ -13,11 +13,16 @@
     "test": "vitest run src/test"
   },
   "dependencies": {
+    "@expo-google-fonts/space-grotesk": "^0.4.1",
+    "@expo-google-fonts/space-mono": "^0.4.2",
+    "@expo-google-fonts/unbounded": "^0.4.1",
     "expo": "~56.0.12",
     "expo-dev-client": "~56.0.20",
     "expo-font": "~56.0.7",
     "expo-haptics": "~56.0.3",
     "expo-linear-gradient": "~56.0.4",
+    "expo-sensors": "~56.0.6",
+    "expo-splash-screen": "~56.0.10",
     "expo-status-bar": "~56.0.4",
     "react": "19.2.3",
     "react-native": "0.85.3",

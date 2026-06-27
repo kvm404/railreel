@@ -1,2 +1,6 @@
 export { Text } from './Text'
 export type { TextProps } from './Text'
+export { Button } from './Button'
+export type { ButtonProps } from './Button'
+export { FlapText } from './FlapText'
+export type { FlapTextProps } from './FlapText'

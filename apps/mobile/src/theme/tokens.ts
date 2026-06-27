@@ -1,40 +1,75 @@
 /**
- * RailReel design tokens — the single source of truth for the visual system.
+ * RailReel design tokens — "The Night Train Window".
+ * Dark-mode only. See docs/design-language.md for the rationale behind every value.
  *
- * This is a FOUNDATION palette (cinematic dark). The full, WOW-grade visual
- * direction is defined with the user before the UI build; refine here, not inline.
+ * Warm tungsten (people, CTAs) on cold blue-night (the world streaking past).
  */
 
 export const palette = {
-  // Surfaces — deep "lights-down" cinema blacks
-  bg: '#0B0B0F',
-  surface: '#15151C',
-  surfaceElevated: '#1D1D27',
-  border: '#2A2A36',
+  // Night — "the world outside the window"
+  void: '#05070C',
+  base: '#0A0E16',
+  raised: '#121826',
+  overlay: '#1A2233',
+  hairline: '#28324A',
 
-  // Text
-  text: '#F4F4F7',
-  textMuted: '#A0A0B0',
-  textFaint: '#6B6B7B',
+  // Text — cool platform whites
+  textPrimary: '#E9EEF7',
+  textSecondary: '#97A3B8',
+  textTertiary: '#58647A',
 
-  // Brand accent — "projector" warm/electric pairing (placeholder)
-  accent: '#FF5C72',
-  accentAlt: '#7C5CFF',
+  // Filament Amber — warmth, people, primary actions
+  amberGlow: '#FFC78A',
+  amber: '#FFB266',
+  amberCore: '#FF9B45',
+  amberDeep: '#C76E26',
+  onAmber: '#1A1206', // text on filled-amber (AA)
+
+  // Exterior Cyan — sync / connection / scanning ONLY
+  cyan: '#57D2E6',
+  cyanDeep: '#2A93A8',
 
   // Status
-  success: '#3BD17A',
-  warning: '#FFC24B',
-  danger: '#FF5247',
+  danger: '#FF6B5E',
 
-  // Pure
   black: '#000000',
   white: '#FFFFFF',
 } as const
 
 export const gradients = {
-  accent: ['#FF5C72', '#7C5CFF'] as const,
-  hero: ['#1D1D27', '#0B0B0F'] as const,
+  /** Soft horizontal light streak (cold). */
+  streakCyan: ['transparent', 'rgba(87,210,230,0.22)', 'transparent'] as const,
+  /** Soft horizontal light streak (warm). */
+  streakAmber: ['transparent', 'rgba(255,178,102,0.16)', 'transparent'] as const,
+  /** Radial filament glow behind CTAs (use as overlay). */
+  filament: ['rgba(255,199,138,0.40)', 'rgba(255,199,138,0.0)'] as const,
+  /** Amber CTA fill. */
+  amberFill: ['#FFC78A', '#FF9B45'] as const,
+  /** Cinematic top/bottom darken. */
+  vignette: ['#05070C', 'transparent', '#05070C'] as const,
 }
+
+/** Font family names — must match the loaded @expo-google-fonts exports (see fonts.ts). */
+export const fonts = {
+  displayBold: 'Unbounded_700Bold',
+  displaySemi: 'Unbounded_600SemiBold',
+  bodyRegular: 'SpaceGrotesk_400Regular',
+  bodyMedium: 'SpaceGrotesk_500Medium',
+  bodyBold: 'SpaceGrotesk_700Bold',
+  monoRegular: 'SpaceMono_400Regular',
+  monoBold: 'SpaceMono_700Bold',
+} as const
+
+export const typography = {
+  displayXl: { fontFamily: fonts.displayBold, fontSize: 56, lineHeight: 60, letterSpacing: -1.1 },
+  displayL: { fontFamily: fonts.displaySemi, fontSize: 34, lineHeight: 38, letterSpacing: -0.34 },
+  title: { fontFamily: fonts.bodyBold, fontSize: 22, lineHeight: 28 },
+  cardTitle: { fontFamily: fonts.bodyMedium, fontSize: 17, lineHeight: 22 },
+  body: { fontFamily: fonts.bodyRegular, fontSize: 15, lineHeight: 22 },
+  caption: { fontFamily: fonts.bodyMedium, fontSize: 13, lineHeight: 18 },
+  eyebrow: { fontFamily: fonts.monoBold, fontSize: 12, lineHeight: 16, letterSpacing: 1.4 },
+  data: { fontFamily: fonts.monoRegular, fontSize: 14, lineHeight: 18, letterSpacing: 0.6 },
+} as const
 
 export const spacing = {
   xs: 4,
@@ -54,22 +89,17 @@ export const radii = {
   pill: 999,
 } as const
 
-export const typography = {
-  display: { fontSize: 40, lineHeight: 46, fontWeight: '800' as const, letterSpacing: -0.5 },
-  title: { fontSize: 26, lineHeight: 32, fontWeight: '700' as const, letterSpacing: -0.3 },
-  heading: { fontSize: 20, lineHeight: 26, fontWeight: '700' as const },
-  body: { fontSize: 16, lineHeight: 22, fontWeight: '500' as const },
-  label: { fontSize: 14, lineHeight: 18, fontWeight: '600' as const },
-  caption: { fontSize: 12, lineHeight: 16, fontWeight: '500' as const },
-} as const
-
-/** Motion durations (ms) and easings — keep animations consistent and smooth. */
 export const motion = {
   fast: 150,
   base: 250,
-  slow: 400,
-  spring: { damping: 18, stiffness: 180, mass: 1 },
+  slow: 420,
+  /** Default UI spring. */
+  spring: { stiffness: 200, damping: 22, mass: 1 },
+  /** Snappy spring for split-flap cells. */
+  flapSpring: { stiffness: 260, damping: 18, mass: 1 },
+  /** expo-out bezier control points (use with Easing.bezier). */
+  expoOut: [0.16, 1, 0.3, 1] as const,
 } as const
 
-export const tokens = { palette, gradients, spacing, radii, typography, motion }
+export const tokens = { palette, gradients, fonts, typography, spacing, radii, motion }
 export type Tokens = typeof tokens
