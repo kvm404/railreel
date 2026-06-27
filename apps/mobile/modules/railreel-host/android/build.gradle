@@ -1,0 +1,23 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.railreelhost'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.railreelhost"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+  lint {
+    abortOnError false
+  }
+}
+
+dependencies {
+  // Embedded HTTP server with byte-range support for the host data plane.
+  implementation 'org.nanohttpd:nanohttpd:2.3.1'
+}

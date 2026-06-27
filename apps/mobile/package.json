@@ -18,6 +18,7 @@
     "@expo-google-fonts/unbounded": "^0.4.1",
     "expo": "~56.0.12",
     "expo-dev-client": "~56.0.20",
+    "expo-file-system": "~56.0.8",
     "expo-font": "~56.0.7",
     "expo-haptics": "~56.0.3",
     "expo-linear-gradient": "~56.0.4",
