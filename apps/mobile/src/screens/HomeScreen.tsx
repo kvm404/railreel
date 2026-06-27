@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { StyleSheet, useWindowDimensions, View } from 'react-native'
 import Animated, {
   cancelAnimation,
@@ -10,17 +10,18 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { RadioTower, Radar } from 'lucide-react-native'
 import { Button, FlapText, Text } from '@/ui'
 import { WindowAtmosphere } from '@/components/WindowAtmosphere'
-import { Bloom } from '@/components/Bloom'
+import { SyncDots } from '@/components/SyncDots'
 import { useTheme } from '@/theme/ThemeProvider'
 import { motion } from '@/theme/tokens'
 
 const H_PADDING = 24
 
 /**
- * Home / Landing — the hero. Streaks drift, RAILREEL flips in letter-by-letter,
- * a warm bloom ignites behind "Host a session". See docs/design-language.md.
+ * Home / Landing — the hero. The night-window streaks drift, RAILREEL flips in
+ * letter-by-letter, then the actions rise in. See docs/design-language.md.
  */
 export function HomeScreen({
   onHost,
@@ -39,16 +40,23 @@ export function HomeScreen({
 
   // The action group rises in after the wordmark has clattered into place.
   const rise = useSharedValue(reduced ? 1 : 0)
+  const [introReady, setIntroReady] = useState(reduced)
   useEffect(() => {
     if (reduced) {
       rise.value = 1
+      setIntroReady(true)
       return
     }
     rise.value = withDelay(
       750,
       withTiming(1, { duration: motion.slow, easing: Easing.bezier(...motion.expoOut) }),
     )
-    return () => cancelAnimation(rise)
+    // Keep the still-invisible actions out of the a11y tree until they've arrived.
+    const id = setTimeout(() => setIntroReady(true), 750 + motion.slow)
+    return () => {
+      clearTimeout(id)
+      cancelAnimation(rise)
+    }
   }, [reduced, rise])
 
   const riseStyle = useAnimatedStyle(() => ({
@@ -60,7 +68,7 @@ export function HomeScreen({
     <View style={styles.fill}>
       <WindowAtmosphere intensity={1} />
 
-      <View style={[styles.content, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 28 }]}>
+      <View style={[styles.content, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 46 }]}>
         <Text variant="eyebrow" tone="secondary">
           OFFLINE · IN SYNC · TOGETHER
         </Text>
@@ -72,29 +80,34 @@ export function HomeScreen({
           </Text>
         </View>
 
-        <Animated.View style={[styles.actions, riseStyle]}>
-          <View style={styles.hostWrap}>
-            {/* Bloom is a preceding sibling, so it naturally paints behind the button. */}
-            <Bloom size={320} color={t.palette.amberGlow} intensity={0.32} style={styles.bloom} />
-            <Button
-              title="Host a session"
-              subtitle="Share your movie with the cabin"
-              intent="amber"
-              onPress={onHost}
-            />
-          </View>
+        <Animated.View
+          style={[styles.actions, riseStyle]}
+          accessibilityElementsHidden={!introReady}
+          importantForAccessibility={introReady ? 'auto' : 'no-hide-descendants'}
+        >
+          <Button
+            title="Host a session"
+            subtitle="Share your movie with the cabin"
+            intent="amber"
+            height={74}
+            icon={<RadioTower size={22} color={t.palette.onAmber} strokeWidth={2.25} />}
+            onPress={onHost}
+          />
 
-          <Button title="Join a session" subtitle="Find friends nearby" intent="cyan" onPress={onJoin} />
+          <Button
+            title="Join a session"
+            subtitle="Find friends nearby"
+            intent="cyan"
+            height={66}
+            icon={<Radar size={22} color={t.palette.cyan} strokeWidth={2.25} />}
+            onPress={onJoin}
+          />
 
           <View style={styles.footer}>
             <Text variant="eyebrow" tone="secondary">
               NO INTERNET NEEDED
             </Text>
-            <View style={styles.dots}>
-              <View style={[styles.dot, { backgroundColor: t.palette.hairline }]} />
-              <View style={[styles.dot, { backgroundColor: t.palette.hairline }]} />
-              <View style={[styles.dot, { backgroundColor: t.palette.amberCore }]} />
-            </View>
+            <SyncDots />
           </View>
         </Animated.View>
       </View>
@@ -108,14 +121,10 @@ const styles = StyleSheet.create({
   hero: { flex: 1, justifyContent: 'center', gap: 18 },
   tagline: { marginLeft: 4 },
   actions: { gap: 14 },
-  hostWrap: { position: 'relative' },
-  bloom: { position: 'absolute', top: -128, left: -24 },
   footer: {
-    marginTop: 10,
+    marginTop: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  dots: { flexDirection: 'row', gap: 6 },
-  dot: { width: 6, height: 6, borderRadius: 3 },
 })

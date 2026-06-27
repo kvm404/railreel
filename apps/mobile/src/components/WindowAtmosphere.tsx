@@ -16,9 +16,10 @@ import { useTheme } from '@/theme/ThemeProvider'
 
 /**
  * The night-train window: cold light-streaks drifting at parallax depths behind
- * everything, under a cinema vignette (radial edge darken + top/bottom letterbox).
- * Ambient brand atmosphere — `intensity` scales it (Home high, Player low; 0 = off).
- * Halts under reduce-motion. See docs/design-language.md.
+ * everything, under a cinema vignette. The empty mid-screen IS the window — its life
+ * comes from the moving streaks, never a painted box.
+ * `intensity` scales it (Home high, Player low; 0 = off). Halts under reduce-motion.
+ * See docs/design-language.md.
  */
 
 type Streak = {
@@ -31,12 +32,15 @@ type Streak = {
   opacity: number
 }
 
+// Concentrated through the mid-band (~30–70%) so the space between the wordmark and the
+// CTAs reads as the window — the world rushing past — rather than dead space.
 const STREAKS: Streak[] = [
-  { topPct: 0.14, height: 2, widthPct: 0.8, durationMs: 9000, delayMs: 0, warm: false, opacity: 0.9 },
-  { topPct: 0.33, height: 1, widthPct: 0.6, durationMs: 14000, delayMs: 1800, warm: true, opacity: 0.7 },
-  { topPct: 0.5, height: 4, widthPct: 0.95, durationMs: 6500, delayMs: 600, warm: false, opacity: 1 },
-  { topPct: 0.68, height: 1, widthPct: 0.55, durationMs: 15000, delayMs: 2600, warm: true, opacity: 0.6 },
-  { topPct: 0.84, height: 2, widthPct: 0.75, durationMs: 11000, delayMs: 1200, warm: false, opacity: 0.8 },
+  { topPct: 0.16, height: 1, widthPct: 0.55, durationMs: 15000, delayMs: 2200, warm: true, opacity: 0.5 },
+  { topPct: 0.32, height: 1, widthPct: 0.7, durationMs: 13000, delayMs: 0, warm: false, opacity: 0.7 },
+  { topPct: 0.44, height: 2, widthPct: 0.9, durationMs: 8000, delayMs: 1200, warm: false, opacity: 0.95 },
+  { topPct: 0.55, height: 1, widthPct: 0.6, durationMs: 16500, delayMs: 600, warm: true, opacity: 0.6 },
+  { topPct: 0.63, height: 3, widthPct: 0.97, durationMs: 6500, delayMs: 2400, warm: false, opacity: 1 },
+  { topPct: 0.72, height: 1, widthPct: 0.65, durationMs: 11000, delayMs: 1500, warm: false, opacity: 0.55 },
 ]
 
 export function WindowAtmosphere({ intensity = 1 }: { intensity?: number }) {
@@ -44,9 +48,7 @@ export function WindowAtmosphere({ intensity = 1 }: { intensity?: number }) {
   const active = intensity > 0
   return (
     <View style={[StyleSheet.absoluteFill, { backgroundColor: t.palette.base }]} pointerEvents="none">
-      {active
-        ? STREAKS.map((s, i) => <StreakBar key={i} streak={s} intensity={intensity} />)
-        : null}
+      {active ? STREAKS.map((s, i) => <StreakBar key={i} streak={s} intensity={intensity} />) : null}
 
       {/* Radial edge/corner darken — the glass curving into the dark. */}
       <Svg style={StyleSheet.absoluteFill}>

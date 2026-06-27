@@ -18,12 +18,12 @@ export const palette = {
   textSecondary: '#97A3B8',
   textTertiary: '#58647A',
 
-  // Filament Amber — warmth, people, primary actions
+  // Filament Amber — warmth, people, primary actions (richer tungsten, less peach)
   amberGlow: '#FFC78A',
-  amber: '#FFB266',
-  amberCore: '#FF9B45',
+  amber: '#FFB25C',
+  amberCore: '#FF9F3F',
   amberDeep: '#C76E26',
-  onAmber: '#1A1206', // text on filled-amber (AA)
+  onAmber: '#201309', // text on filled-amber (AA)
 
   // Exterior Cyan — sync / connection / scanning ONLY
   cyan: '#57D2E6',
@@ -43,8 +43,8 @@ export const gradients = {
   streakAmber: ['transparent', 'rgba(255,178,102,0.16)', 'transparent'] as const,
   /** Radial filament glow behind CTAs (use as overlay). */
   filament: ['rgba(255,199,138,0.40)', 'rgba(255,199,138,0.0)'] as const,
-  /** Amber CTA fill. */
-  amberFill: ['#FFC78A', '#FF9B45'] as const,
+  /** Amber CTA fill (tungsten). */
+  amberFill: ['#FFB25C', '#FF9F3F'] as const,
   /** Cinematic top/bottom darken. */
   vignette: ['#05070C', 'transparent', '#05070C'] as const,
 }
@@ -67,8 +67,8 @@ export const typography = {
   cardTitle: { fontFamily: fonts.bodyMedium, fontSize: 17, lineHeight: 22 },
   body: { fontFamily: fonts.bodyRegular, fontSize: 15, lineHeight: 22 },
   caption: { fontFamily: fonts.bodyMedium, fontSize: 13, lineHeight: 18 },
-  eyebrow: { fontFamily: fonts.monoBold, fontSize: 12, lineHeight: 16, letterSpacing: 1.4 },
-  data: { fontFamily: fonts.monoRegular, fontSize: 14, lineHeight: 18, letterSpacing: 0.6 },
+  eyebrow: { fontFamily: fonts.monoBold, fontSize: 12, lineHeight: 16, letterSpacing: 1.1 },
+  data: { fontFamily: fonts.monoRegular, fontSize: 14, lineHeight: 18, letterSpacing: 0.5 },
 } as const
 
 export const spacing = {
