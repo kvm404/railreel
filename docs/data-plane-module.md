@@ -13,17 +13,39 @@ hotspot, 2026-06-27). See `docs/architecture.md` and `docs/native-modules.md`.
 | **JS-bridge file transfer** | ❌ **~1.8 Mbps** (16 MB / 70s) | **too slow for video → host data plane must be native** |
 | Host screen sleep during transfer | ❌ JS paused, transfer stalled | **host needs a foreground service + keep-awake** |
 
-## 2. The key simplification: only the HOST needs custom native code
+## 2. v1 = FULL PRE-CACHE (this is what keeps the client native-free)
 
-The client side does **not** need a custom native module:
+**Important scoping decision (per codex review):** the "client needs no custom native code" claim
+holds **only for full pre-cache** — download the whole movie, *then* play a complete local file.
+For **progressive** playback (playing while still downloading) the client *would* need native
+player-cache plumbing (ExoPlayer `CacheDataSource` / iOS `AVAssetResourceLoader`), because you
+must never point a player at a partially-written file (see `architecture.md` §7).
 
-- **Download:** the client pulls the movie with **`expo-file-system`** (`createDownloadResumable`)
-  — a *native*, resumable, progress-reporting HTTP download straight to disk, with `Range`
-  support. Full native speed, no bridge bottleneck, already New-Arch compatible.
+So **v1 ships full pre-cache** (the lobby's readiness rings already fit this: everyone downloads
+to 100%, then Start). **Progressive playback is a later phase** that adds a client-side native
+player cache. With pre-cache, the client stays native-free:
+
+- **Download:** the client pulls the movie with **`expo-file-system`** — a *native*, resumable,
+  progress-reporting HTTP download straight to disk. In **SDK 56 use the new `File`/`DownloadTask`
+  API** (the legacy `createDownloadResumable` moved to `expo-file-system/legacy`). Full native
+  speed, no bridge bottleneck.
 - **Control/sync:** the client uses React Native's **built-in WebSocket client** for the tiny
   control channel (play/pause/seek, clock ping/pong, chat, reactions).
+- **Caveat:** clients must stay in-app with **keep-awake on** during download (an Expo-only
+  download has no client foreground service); if we later allow locking the screen mid-download,
+  that needs a client-side service too.
 
-So the only thing we must build natively is the **host server**. That's a big de-risk.
+So the only thing we must build natively for v1 is the **host server**. That's the big de-risk.
+
+## 2a. Cleartext LAN config (required before M1 works on a real build)
+
+`http://<hotspot-ip>` and `ws://<hotspot-ip>` are **blocked by default** on release/standalone
+builds. Must add:
+- **Android:** `usesCleartextTraffic` (or a network-security-config allowing cleartext to the
+  dynamic LAN IP range) via `app.json` `expo.android`.
+- **iOS:** `NSAppTransportSecurity.NSAllowsArbitraryLoadsInLocalNetworking = true` in `infoPlist`.
+Test **both** the `expo-file-system` download and the RN WebSocket over `http`/`ws` (the spike
+used raw sockets, which bypassed this).
 
 ```
 HOST (custom native module)            CLIENT (no custom native)
@@ -48,14 +70,28 @@ phones are Android; iOS port follows once proven).
    clients carrying the session token).
 
 ### 3.2 Android (Kotlin) approach
-- **HTTP server:** **NanoHTTPD** (single dependency, supports `Range`, dead simple) for v1.
-  Serve from `RandomAccessFile`/`FileChannel` with bounded buffers; honor cancellation. (Upgrade
-  to Ktor/`sendfile` only if NanoHTTPD throughput is insufficient — the spike says even modest
-  native throughput will dwarf 1.8 Mbps.)
-- **Foreground service:** a started+foreground `Service` holding the server + a `WifiLock`
-  (`WIFI_MODE_FULL_HIGH_PERF`) and a partial `WakeLock`; ongoing notification.
-- **WebSocket:** NanoHTTPD has `NanoWSD`, or run a tiny WS within the service. Decide in M3.
-- Permissions: `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC` (Android 14+), `WAKE_LOCK`
+- **HTTP server (swappable engine):** start with **NanoHTTPD** (single dep, `Range`, simple),
+  streaming from a seekable source with bounded buffers + cancellation. Keep the engine behind an
+  interface so we can swap to **Ktor** if we want one HTTP+WS stack / better lifecycle. Acceptance
+  bar before committing to NanoHTTPD: **4–5 simultaneous clients, a real movie-sized file,
+  sustained aggregate Mbps, no heap growth.**
+- **Range compliance is not just "supports Range":** must do correct `206`, `416`,
+  `Content-Range`, `Accept-Ranges`, `Content-Length`, **`HEAD`**, cancellation, and a stable
+  validator (`ETag`/`Last-Modified`) — iOS `URLSession`/Android resume are picky about validators.
+  **Add a range-compliance check before any throughput number counts.**
+- **File source:** the picked movie is typically a **`content://` URI** (Storage Access
+  Framework), not a filesystem path. Stream ranges from a **seekable `ParcelFileDescriptor`/SAF**
+  source, OR import-copy into app storage *with a free-space preflight* (copy doubles storage).
+  The native API takes a **URI + access mode**, not a bare path.
+- **Foreground service:** a started **foreground** `Service` with
+  `foregroundServiceType="dataSync"` + `FOREGROUND_SERVICE_DATA_SYNC`, a `WifiLock`
+  (`WIFI_MODE_FULL_HIGH_PERF`) and partial `WakeLock`, an ongoing notification (handle
+  notification-permission UX, user-stop, and battery/thermal). Start it **while the app is
+  foregrounded**. Note: Android 14/15 do **not** guarantee unlimited background — the realistic
+  promise is "survives screen-off during an active session," not true background hosting.
+- **WebSocket:** NanoHTTPD has `NanoWSD`, or Ktor, or a tiny WS in the service. Prefer **one port
+  for HTTP + WS** (simpler QR/auth/firewall). Decide in M3.
+- Permissions: `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `WAKE_LOCK`, `POST_NOTIFICATIONS`
   (+ the WiFi/multicast perms already in `app.json`).
 
 ### 3.3 iOS (Swift) approach — after Android
@@ -65,11 +101,17 @@ phones are Android; iOS port follows once proven).
 
 ### 3.4 JS API (the Expo module surface)
 ```ts
-RailReelHost.start({ filePath, token, approvedClientIds, httpPort, wsPort }): Promise<{ httpPort; wsPort }>
+// fileUri = content:// (SAF) or file://; accessMode tells the server how to open it.
+// port 0 = let the OS pick; the resolved port is returned and encoded into the QR/mDNS TXT.
+RailReelHost.start({ fileUri, accessMode, token, approvedClientIds, port }): Promise<{ port }>
 RailReelHost.stop(): Promise<void>
 RailReelHost.setApprovedClients(ids: string[]): void
 // events: 'clientConnected' | 'bytesServed' | 'wsMessage' | 'error'
 ```
+- **Token auth from M1** (even as a stub): require the session token as a **query param or
+  first-message** (don't rely on custom WS headers — RN/browsers can't always set them). Bytes
+  served only to approved clients.
+- **Port handling:** bind `0` or retry on conflict; return the actual port; never assume a fixed one.
 
 ## 4. Discovery
 - mDNS via `react-native-zeroconf` or `expo-bonjour` (both likely "untested on New Arch" —
@@ -78,18 +120,31 @@ RailReelHost.setApprovedClients(ids: string[]): void
 
 ## 5. Milestones (each ends in a verifiable on-device check)
 
-1. **M1 — Native HTTP range server.** Scaffold `railreel-host`; serve a real file; client
-   downloads with `expo-file-system`; **measure throughput** (target: ≫1.8 Mbps; expect tens of
-   Mbps). *This is the make-or-break number — do it first.*
-2. **M2 — Survive backgrounding.** Add the foreground service + WiFi/wake locks; verify a
-   transfer completes with the host screen off.
-3. **M3 — Control plane.** WS (or tcp-socket) for clock sync + play/pause/seek; lock two phones'
-   playback together using the existing `lib/sync` math.
-4. **M4 — Security.** Session token + approved-client gating on HTTP and control.
-5. **M5 — Wire to UI.** Replace the mock data in Create/Join/Lobby with the live host/client
-   services; real readiness in the lobby.
-6. **M6 — Discovery + polish.** mDNS auto-discovery; reconnection; error states.
-7. **iOS port** once Android is proven end-to-end.
+0. **M0 — Cleartext + scaffold.** Add cleartext config (§2a); scaffold `railreel-host`; confirm an
+   RN WebSocket + an `expo-file-system` download both work over `http`/`ws` to a trivial native
+   endpoint. (Unblocks everything; tiny.)
+1. **M1 — Native HTTP range server (the make-or-break).**
+   - **M1a:** serve a real movie-sized file from a `content://` source; **single client** downloads
+     via `expo-file-system`; pass the **range-compliance** check (206/416/Content-Range/HEAD/ETag,
+     pause→resume, app-restart resume, final size matches); carry a **stub token**.
+   - **M1b:** **4–5 simultaneous clients** download at once; record **sustained aggregate Mbps** +
+     heap stability. *Only this number decides if NanoHTTPD stays.* (Target: ≫1.8 Mbps.)
+2. **M2 — Survive screen-off.** Foreground service (`dataSync`) + WiFi/wake locks + notification;
+   verify a transfer completes with the host screen off **during an active session** (not generic
+   background).
+3. **M3 — Control + sync plane.** WS (shared port) for clock sync + play/pause/seek; lock two
+   phones together using `lib/sync`. If JS-timestamped WS can't hold sub-100ms, add a small
+   **native monotonic-timing** helper (client + host).
+4. **M4 — Security hardening.** Promote the stub token to high-entropy; approved-client gating on
+   HTTP + WS; rate-limit pairing; integrity via **size/mtime/ETag** (compute a strong file hash
+   async/at-completion, not a blocking multi-GB hash before the lobby).
+5. **M5 — Wire to UI.** Replace mock data in Create/Join/Lobby with live host/client services;
+   real readiness (full pre-cache to 100% → Start). Free-space preflight; store session files in
+   **cache / no-backup** storage with a cleanup policy.
+6. **M6 — Discovery + polish.** mDNS auto-discovery (QR/link stays the guaranteed path);
+   reconnection; error/empty states.
+7. **Later — Progressive playback** (client-side native player cache) and the **iOS port**, once
+   Android pre-cache is proven end-to-end.
 
 ## 6. Notes / risks
 - Each native change = a dev-client rebuild (~2–11 min) → keep native surface small, iterate the
@@ -98,4 +153,9 @@ RailReelHost.setApprovedClients(ids: string[]): void
   fall back to **full pre-cache before play** (already in the architecture).
 - Build for **both ABIs** (`armeabi-v7a,arm64-v8a`) so older 32-bit phones can join (learned the
   hard way in the spike).
+- **Storage:** clients write session files to **cache / no-backup** storage (not backed-up
+  Documents); free-space preflight before download; cleanup policy after the session.
+- **Hashing:** don't block the lobby on hashing a multi-GB file — serve by size/mtime/`ETag`,
+  compute any strong hash asynchronously / at completion if the product truly needs it.
+- **One port** for HTTP + WS where possible (simpler QR, auth, firewall/cleartext testing).
 - The throwaway spike lives on branch `spike/networking` for reference; not merged to `main`.
