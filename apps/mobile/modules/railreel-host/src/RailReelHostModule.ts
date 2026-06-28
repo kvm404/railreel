@@ -12,6 +12,10 @@ type RailReelHostEvents = {
 declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
   /** Start the HTTP (range) + WebSocket (control) servers. Ports 0 = OS-assigned. */
   start(fileUri: string, httpPort: number, wsPort: number, token: string): Promise<HostPorts>
+  /** Authorize a client's download grant so the data plane will serve it bytes (§10). */
+  approve(grant: string): Promise<void>
+  /** Revoke a previously-approved grant; future requests with it are rejected. */
+  revoke(grant: string): Promise<void>
   /** Send a JSON message to every connected client (play/pause/seek/chat/reactions). */
   broadcast(message: string): Promise<void>
   /** Stop both servers + the foreground service. */
@@ -28,6 +32,8 @@ const androidOnly = (): RailReelHostModule => {
   }
   return {
     start: unavailable,
+    approve: async () => {},
+    revoke: async () => {},
     broadcast: async () => {},
     stop: async () => {},
     createTestFile: unavailable,

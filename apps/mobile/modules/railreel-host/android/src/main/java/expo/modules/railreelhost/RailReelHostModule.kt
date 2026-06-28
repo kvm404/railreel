@@ -79,6 +79,23 @@ class RailReelHostModule : Module() {
       }
     }
 
+    // Approve a client's download grant: until the host calls this, the data plane serves no
+    // bytes to that client even though it holds the session token (see docs/architecture.md §10).
+    // Fail closed — validate the grant shape and require a live session, so a JS bug can never
+    // widen the gate with a blank/oversized value or "approve" into a torn-down server.
+    AsyncFunction("approve") { grant: String ->
+      if (!isValidGrant(grant)) throw CodedException("Invalid grant")
+      val s = synchronized(lock) { server } ?: throw CodedException("No active session")
+      s.approve(grant)
+    }
+
+    // Revoke a previously-approved grant (client kicked / left). Affects FUTURE requests only —
+    // a transfer already streaming is not interrupted. That is acceptable for v1: clients fully
+    // pre-cache the file, so a revoked client's only recourse (re-request) is already blocked.
+    AsyncFunction("revoke") { grant: String ->
+      synchronized(lock) { server }?.revoke(grant)
+    }
+
     // Host → all clients (play/pause/seek/chat/reactions as JSON strings).
     AsyncFunction("broadcast") { message: String ->
       // Grab the server under the lock, but do the socket writes outside it so a slow/blocked
@@ -125,6 +142,13 @@ class RailReelHostModule : Module() {
      * interval so the socket survives a missed ping. Keepalive is 10s (see syncClient.ts).
      */
     const val WS_SOCKET_READ_TIMEOUT_MS = 30_000
+
+    /**
+     * A real grant is base64url of 16 random bytes (22 chars). Accept a small range to allow
+     * future sizing, but bound it so a malformed/oversized value can never reach the grant set.
+     */
+    fun isValidGrant(g: String): Boolean =
+      g.length in 16..64 && g.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' }
   }
 }
 
@@ -135,6 +159,14 @@ private class FileServer(
 ) : NanoHTTPD(port) {
   private val etag = "\"${file.lastModified()}-${file.length()}\""
 
+  // Per-client download grants the host has approved. The session token gets a client onto the
+  // network; only an approved grant unlocks the bytes (docs/architecture.md §10). Set operations
+  // (add/remove/contains) are each individually synchronized — we never iterate it.
+  private val approvedGrants = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+  fun approve(grant: String) { approvedGrants.add(grant) }
+  fun revoke(grant: String) { approvedGrants.remove(grant) }
+
   override fun serve(session: IHTTPSession): Response {
     if (session.method != Method.GET && session.method != Method.HEAD) {
       return newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, TEXT, "method not allowed")
@@ -142,6 +174,12 @@ private class FileServer(
     // Token gate (query param ?tk= — works from fetch/expo-file-system without custom headers).
     if (session.parameters["tk"]?.firstOrNull() != token) {
       return newFixedLengthResponse(Response.Status.FORBIDDEN, TEXT, "forbidden")
+    }
+    // Approval gate: a valid token is not enough — the client must present a grant the host
+    // approved. Covers HEAD (size probe) too, so an unapproved client learns nothing.
+    val grant = session.parameters["g"]?.firstOrNull()
+    if (grant == null || grant !in approvedGrants) {
+      return newFixedLengthResponse(Response.Status.FORBIDDEN, TEXT, "not approved")
     }
 
     val fileLen = file.length()
