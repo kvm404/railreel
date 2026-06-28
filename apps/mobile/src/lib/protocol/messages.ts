@@ -43,7 +43,9 @@ export type ServerMsg =
 
 // ── Client → host ───────────────────────────────────────────────────────────
 export type ClientMsg =
-  | { t: 'join'; name: string; token: string }
+  // `grant` is a per-client download secret the client mints itself; the host authorizes it
+  // on the data plane only when it approves this join (see docs/architecture.md §10).
+  | { t: 'join'; name: string; token: string; grant: string }
   | {
       t: 'heartbeat'
       bufferedAheadSec: number

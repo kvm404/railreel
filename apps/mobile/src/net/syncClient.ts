@@ -11,6 +11,8 @@ export type SyncSession = {
   samples: number
   /** Convert a client monotonic-ms reading to host time. */
   toHostTime: (clientMs: number) => number
+  /** Send a client→host message (join/chat/reaction/request) on the open socket. */
+  send: (msg: Record<string, unknown>) => void
   close: () => void
 }
 
@@ -94,6 +96,13 @@ export function openSyncSession(
             estimate,
             samples: samples.length,
             toHostTime: (clientMs) => clientMs + estimate.offsetMs,
+            send: (msg) => {
+              try {
+                ws.send(JSON.stringify(msg))
+              } catch {
+                // socket closed; caller's onclose/onerror will surface it
+              }
+            },
             close: () => {
               clearTimers()
               ws.close()

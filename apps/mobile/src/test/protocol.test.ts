@@ -53,7 +53,7 @@ describe('join payload codec', () => {
 
 describe('message parsing', () => {
   it('accepts a valid client message', () => {
-    const msg: ClientMsg = { t: 'join', name: 'Riya', token: 'x' }
+    const msg: ClientMsg = { t: 'join', name: 'Riya', token: 'x', grant: 'g' }
     const r = parseClientMsg(encodeMsg(msg))
     expect(r.ok).toBe(true)
     if (r.ok) expect(r.msg).toEqual(msg)

@@ -6,19 +6,27 @@ import { Screen } from '@/components/Screen'
 import { Button, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { openSyncSession, type SyncSession } from '@/net/syncClient'
+import { randomBytes } from '@/net/random'
+import { generateGrant, isValidSecret, parseClientMsg } from '@/lib/protocol'
 import RailReelHost from '../../modules/railreel-host'
 
 /**
- * DEV-ONLY harness for the native data plane (M1 throughput, M2 keep-awake, M3 control/sync).
- * Host serves a generated file (HTTP range) + a WS control plane; client measures throughput,
- * runs the clock handshake, and receives host broadcasts. Remove before shipping.
+ * DEV-ONLY harness for the native data plane (M1 throughput, M2 keep-awake, M3 control/sync,
+ * M4 approval gating). Host serves a generated file (HTTP range) + a WS control plane; client
+ * measures throughput, runs the clock handshake, receives host broadcasts, and must be approved
+ * before it can download. Remove before shipping.
  */
 
 const HTTP_PORT = 8493
 const WS_PORT = 8492
+// DEV: a fixed shared session token keeps two phones connectable without typing 22 chars. The
+// real high-entropy token (generateToken) is unit-tested and wired into the QR flow in M5; M4's
+// on-device proof is the per-client approval gate below, which can't be unit-tested.
 const TOKEN = 'spike'
 const SIZE_MB = 64
 const KEEP_AWAKE_TAG = 'railreel-host'
+
+type Pending = { name: string; grant: string }
 
 export function HostTestScreen() {
   const t = useTheme()
@@ -27,23 +35,49 @@ export function HostTestScreen() {
   const [log, setLog] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [wsClients, setWsClients] = useState(0)
+  const [pending, setPending] = useState<Pending[]>([])
   const serving = useRef(false)
   const session = useRef<SyncSession | null>(null)
+  // Client: this device's own download grant, minted once. Unlocked only when the host approves.
+  const grant = useRef(generateGrant(randomBytes))
 
   const addLog = useCallback((l: string) => setLog((p) => [...p.slice(-30), l]), [])
 
-  // Host: track connected WS clients.
+  // Host: track WS clients + collect join requests awaiting approval.
   useEffect(() => {
     const open = RailReelHost.addListener('onWsOpen', () => setWsClients((n) => n + 1))
     const close = RailReelHost.addListener('onWsClose', () => setWsClients((n) => Math.max(0, n - 1)))
+    const message = RailReelHost.addListener('onWsMessage', ({ data }) => {
+      const r = parseClientMsg(data)
+      if (!r.ok) return
+      const msg = r.msg
+      // Validate the join before it can reach approve(): a malformed/tiny grant must never enter
+      // the host's approved set (a short grant would weaken the HTTP gate for everyone).
+      if (msg.t === 'join' && isValidSecret(msg.grant, 22) && typeof msg.name === 'string' && msg.name.length > 0) {
+        const name = msg.name.slice(0, 40)
+        setPending((p) => [...p, { name, grant: msg.grant }])
+        addLog(`⇢ join request from ${name}`)
+      }
+    })
     return () => {
       open.remove()
       close.remove()
+      message.remove()
       RailReelHost.stop().catch(() => {})
       deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
       session.current?.close()
     }
-  }, [])
+  }, [addLog])
+
+  const approve = async (p: Pending) => {
+    try {
+      await RailReelHost.approve(p.grant)
+      setPending((list) => list.filter((x) => x.grant !== p.grant))
+      addLog(`✅ approved ${p.name}`)
+    } catch (e) {
+      addLog(`❌ approve: ${String(e)}`)
+    }
+  }
 
   const toggleHost = async () => {
     if (serving.current) {
@@ -82,7 +116,8 @@ export function HostTestScreen() {
   const runDownload = async () => {
     setBusy(true)
     setLog([])
-    const url = `http://${clientIp.trim()}:${HTTP_PORT}/movie?tk=${TOKEN}`
+    // Carry the per-client grant: this 403s until the host approves it (M4 gate).
+    const url = `http://${clientIp.trim()}:${HTTP_PORT}/movie?tk=${TOKEN}&g=${grant.current}`
     try {
       addLog(`downloading ${url}`)
       const dest = new File(Paths.cache, 'rr-dl.bin')
@@ -109,7 +144,9 @@ export function HostTestScreen() {
       )
       session.current = s
       addLog(`✅ offset ${s.estimate.offsetMs.toFixed(0)}ms · rtt ${s.estimate.rttMs.toFixed(1)}ms (${s.samples} samples)`)
-      addLog('listening for host broadcasts…')
+      // Ask to join, presenting our grant for the host to approve (M4).
+      s.send({ t: 'join', name: 'tester', token: TOKEN, grant: grant.current })
+      addLog('→ join sent · listening for host broadcasts…')
     } catch (e) {
       addLog(`❌ ${String(e)}`)
     } finally {
@@ -118,7 +155,7 @@ export function HostTestScreen() {
   }
 
   return (
-    <Screen title="HOST TEST · M1-M3" scroll>
+    <Screen title="HOST TEST · M1-M4" scroll>
       <View style={styles.body}>
         <View style={styles.tabs}>
           <Button title="Host" intent={mode === 'host' ? 'amber' : 'cyan'} height={52} onPress={() => setMode('host')} />
@@ -142,6 +179,9 @@ export function HostTestScreen() {
                 <Button title="⏸ PAUSE" intent="cyan" height={52} onPress={() => broadcast(false)} />
               </View>
             ) : null}
+            {pending.map((p) => (
+              <Button key={p.grant} title={`Approve ${p.name}`} intent="amber" height={52} onPress={() => approve(p)} />
+            ))}
           </>
         ) : (
           <>
