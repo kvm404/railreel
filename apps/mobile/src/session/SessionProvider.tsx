@@ -19,6 +19,7 @@ import {
   PROTOCOL_VERSION,
   type JoinPayload,
   type ParticipantInfo,
+  type PlaybackState,
 } from '@/lib/protocol'
 
 /**
@@ -76,10 +77,20 @@ export interface SessionStore {
   progress: number // this client's own download fraction
   hostName: string | null
 
+  // playback (the show)
+  /** The local movie file the player should open (host: the picked source; client: the cached copy). */
+  movieUri: string | null
+  /** Latest authoritative playback state. Host owns it; clients receive it over WS. */
+  playback: PlaybackState | null
+
   // actions
   startHost: () => Promise<void>
   /** Recompute the join link from the current device IP (call after enabling the hotspot). */
   refreshJoin: () => void
+  /** Host: publish a new playback state (play/pause/seek), stamped + broadcast to clients. */
+  setHostPlayback: (positionSec: number, isPlaying: boolean, rate?: number) => void
+  /** Client: current host-monotonic time (for drift math); host: its own monotonic clock. */
+  hostNowMs: () => number
   approve: (id: string) => void
   deny: (id: string) => void
   connect: (joinLink: string, name: string) => Promise<void>
@@ -112,6 +123,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [progress, setProgress] = useState(0)
   // Reserved for M6 when the join link carries the host's name; null in M5.
   const [hostName] = useState<string | null>(null)
+  const [movieUri, setMovieUri] = useState<string | null>(null)
+  const [playback, setPlayback] = useState<PlaybackState | null>(null)
 
   // Mutable session handles + identity, read from listeners without stale closures.
   const roleRef = useRef<Role>('none')
@@ -241,6 +254,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setJoinUrl(ip ? encodeJoinUrl(buildJoinPayload(joinMetaRef.current, ip)) : null)
       setJoinCode(humanCode(sessionId))
       setMovie({ title: cleanTitle(asset.name), sizeBytes: asset.size ?? 0 })
+      setMovieUri(asset.uri) // the host plays the same source it shares
 
       // Seed the roster with the host (it already has the file).
       grantsRef.current.clear()
@@ -266,6 +280,26 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const ip = RailReelHost.getHostIpAddress()
     setHostIp(ip)
     setJoinUrl(ip ? encodeJoinUrl(buildJoinPayload(meta, ip)) : null)
+  }, [])
+
+  // Host: publish playback. Stamp it with the host's monotonic clock (the timebase clients sync
+  // against) so a follower can compute where the playhead should be right now.
+  const setHostPlayback = useCallback((positionSec: number, isPlaying: boolean, rate = 1) => {
+    const state: PlaybackState = {
+      positionSec,
+      rate,
+      isPlaying,
+      hostMonotonicMs: RailReelHost.getMonotonicMs(),
+    }
+    setPlayback(state)
+    RailReelHost.broadcast(JSON.stringify({ t: 'state', state })).catch(() => {})
+  }, [])
+
+  // Current host-monotonic time: the host reads its own clock; a client converts its clock via the
+  // measured offset from the sync handshake.
+  const hostNowMs = useCallback((): number => {
+    const c = clientRef.current
+    return c ? c.session.toHostTime(nowMs()) : RailReelHost.getMonotonicMs()
   }, [])
 
   const approve = useCallback(
@@ -329,6 +363,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         throw new Error(`download failed (HTTP ${res?.status ?? '?'})`)
       }
       setProgress(1)
+      setMovieUri(MOVIE_CACHE) // the cached copy is what the player will open
       setClientPhase('ready')
       sendBeat(1, 0)
       c.session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: 0 })
@@ -389,6 +424,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 }))
               participantsRef.current = list
               setParticipants(list)
+            } else if (m.t === 'state') {
+              setPlayback(m.state) // host's authoritative playback; the Player drift-corrects to it
             } else if (m.t === 'ended') {
               leave()
             }
@@ -431,6 +468,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setHostPhase('idle')
     setClientPhase('idle')
     setProgress(0)
+    setMovieUri(null)
+    setPlayback(null)
     setError(null)
     setRole('none')
     roleRef.current = 'none'
@@ -449,20 +488,28 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       clientPhase,
       progress,
       hostName,
+      movieUri,
+      playback,
       startHost,
       refreshJoin,
+      setHostPlayback,
+      hostNowMs,
       approve,
       deny,
       connect,
       leave,
     }),
-    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, startHost, refreshJoin, approve, deny, connect, leave],
+    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, movieUri, playback, startHost, refreshJoin, setHostPlayback, hostNowMs, approve, deny, connect, leave],
   )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
 }
 
 const clamp01 = (n: number): number => (n < 0 ? 0 : n > 1 ? 1 : n)
+
+/** Client monotonic clock — must match openSyncSession's timebase so the offset maps correctly. */
+const nowMs = (): number =>
+  typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
 
 /** Build the join payload from the session meta + the currently-reachable IP. */
 function buildJoinPayload(

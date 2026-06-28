@@ -12,6 +12,7 @@ import { HomeScreen } from '@/screens/HomeScreen'
 import { CreateSessionScreen } from '@/screens/CreateSessionScreen'
 import { JoinSessionScreen } from '@/screens/JoinSessionScreen'
 import { LobbyScreen } from '@/screens/LobbyScreen'
+import { PlayerScreen } from '@/screens/PlayerScreen'
 import { HostTestScreen } from '@/screens/HostTestScreen'
 import { palette } from '@/theme/tokens'
 
@@ -23,6 +24,7 @@ const routes: Routes = {
   CreateSession: CreateSessionScreen,
   JoinSession: JoinSessionScreen,
   Lobby: LobbyScreen,
+  Player: PlayerScreen,
   HostTest: HostTestScreen, // dev-only M1 throughput harness
 }
 

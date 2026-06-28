@@ -35,6 +35,11 @@ class RailReelHostModule : Module() {
     // so we pick the address clients actually reach: prefer the hotspot/wifi interface.
     Function("getHostIpAddress") { hostIpAddress() }
 
+    // The host's MONOTONIC clock (ms) — the same timebase the WS sync handshake answers in (see
+    // CtrlServer). The host stamps each PlaybackState with this so clients can convert it to their
+    // own clock via the measured offset. Never wall-clock.
+    Function("getMonotonicMs") { android.os.SystemClock.elapsedRealtimeNanos() / 1_000_000.0 }
+
     AsyncFunction("start") { fileUri: String, httpPort: Int, wsPort: Int, token: String ->
       if (token.isBlank()) throw CodedException("Session token must not be empty")
       synchronized(lock) {
