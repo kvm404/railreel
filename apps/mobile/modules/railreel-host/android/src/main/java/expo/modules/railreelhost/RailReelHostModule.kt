@@ -39,6 +39,8 @@ class RailReelHostModule : Module() {
           throw CodedException("Failed to start server: ${e.message}")
         }
         server = s
+        // Keep the process + CPU/WiFi alive so the transfer survives screen-off.
+        appContext.reactContext?.let { RailReelHostService.start(it) }
         s.listeningPort
       }
     }
@@ -47,6 +49,7 @@ class RailReelHostModule : Module() {
       synchronized(lock) {
         server?.stop()
         server = null
+        appContext.reactContext?.let { RailReelHostService.stop(it) }
       }
     }
 
@@ -64,6 +67,7 @@ class RailReelHostModule : Module() {
       synchronized(lock) {
         server?.stop()
         server = null
+        appContext.reactContext?.let { RailReelHostService.stop(it) }
       }
     }
   }

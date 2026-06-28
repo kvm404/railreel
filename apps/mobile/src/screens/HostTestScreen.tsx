@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, TextInput, View } from 'react-native'
 import { File, Paths } from 'expo-file-system'
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
 import { Screen } from '@/components/Screen'
 import { Button, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
@@ -15,6 +16,8 @@ import RailReelHost from '../../modules/railreel-host'
 const PORT = 8493
 const TOKEN = 'spike'
 const SIZE_MB = 64
+// The hotspot/SoftAP stops serving when the host screen sleeps, so keep it awake while hosting.
+const KEEP_AWAKE_TAG = 'railreel-host'
 
 export function HostTestScreen() {
   const t = useTheme()
@@ -29,12 +32,14 @@ export function HostTestScreen() {
   useEffect(() => {
     return () => {
       RailReelHost.stop().catch(() => {})
+      deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
     }
   }, [])
 
   const toggleHost = async () => {
     if (serving.current) {
       await RailReelHost.stop().catch(() => {})
+      await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
       serving.current = false
       addLog('host stopped')
       return
@@ -45,8 +50,9 @@ export function HostTestScreen() {
       addLog(`generating ${SIZE_MB} MB test file…`)
       const uri = await RailReelHost.createTestFile(SIZE_MB)
       const port = await RailReelHost.start(uri, PORT, TOKEN)
+      await activateKeepAwakeAsync(KEEP_AWAKE_TAG) // hotspot needs the screen on
       serving.current = true
-      addLog(`✅ serving ${SIZE_MB} MB on :${port}`)
+      addLog(`✅ serving ${SIZE_MB} MB on :${port} (screen kept awake)`)
       addLog(`clients GET http://<ip>:${port}/movie?tk=${TOKEN}`)
     } catch (e) {
       addLog(`❌ ${String(e)}`)

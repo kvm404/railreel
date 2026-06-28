@@ -129,9 +129,16 @@ RailReelHost.setApprovedClients(ids: string[]): void
      pause→resume, app-restart resume, final size matches); carry a **stub token**.
    - **M1b:** **4–5 simultaneous clients** download at once; record **sustained aggregate Mbps** +
      heap stability. *Only this number decides if NanoHTTPD stays.* (Target: ≫1.8 Mbps.)
-2. **M2 — Survive screen-off.** Foreground service (`dataSync`) + WiFi/wake locks + notification;
-   verify a transfer completes with the host screen off **during an active session** (not generic
-   background).
+2. **M2 — Host stays alive (DONE 2026-06-28).** Foreground service (`dataSync`) + WiFi/wake locks
+   + ongoing notification, plus `expo-keep-awake` while hosting.
+   **Empirical finding:** with the host's screen OFF the **hotspot/SoftAP stops serving clients**
+   (client got timeout / connection-reset), even though the foreground service kept the process
+   alive (`isForeground=true` throughout). The WiFi-lock only governs *client* WiFi; Android has no
+   API to keep a SoftAP awake through sleep. Screen ON → 52 Mbps; screen OFF → unreachable. So
+   **screen-off hosting is not supported** — the host must keep its screen on (keep-awake), which
+   `architecture.md §9` already required. The foreground service still earns its place: it keeps
+   the server process from being frozen if the host briefly switches apps (screen on), and shows
+   the "hosting" notification.
 3. **M3 — Control + sync plane.** WS (shared port) for clock sync + play/pause/seek; lock two
    phones together using `lib/sync`. If JS-timestamped WS can't hold sub-100ms, add a small
    **native monotonic-timing** helper (client + host).
