@@ -1,56 +1,42 @@
-import { useEffect, useRef, useState } from 'react'
 import { StyleSheet, View } from 'react-native'
 import { Screen } from '@/components/Screen'
 import { FilamentRing } from '@/components/FilamentRing'
 import { Button, FlapText, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
-import type { NavParams } from '@/navigation/context'
+import { useSession, type Participant } from '@/session/SessionProvider'
+import RailReelHost from '../../modules/railreel-host'
 
 /**
- * The lobby: each friend's download/buffer readiness as a filament ring; the board flips
- * to READY and Start ignites when everyone's aboard. (v1 mock — progress is simulated
- * until the real transfer layer lands.) See docs/design-language.md.
+ * The lobby: each friend's download readiness as a filament ring, fed by the real transfer layer.
+ * The host approves join requests here; the board flips to READY and Start ignites once everyone's
+ * aboard. See docs/design-language.md.
  */
 
-type Person = { name: string; progress: number; speed: number }
-
-const INITIAL: Person[] = [
-  { name: 'You', progress: 1, speed: 0 },
-  { name: 'Aanya', progress: 0.62, speed: 0.06 },
-  { name: 'Kabir', progress: 0.34, speed: 0.09 },
-  { name: 'Mira', progress: 0.15, speed: 0.05 },
-]
-
-export function LobbyScreen({ params }: { params?: NavParams }) {
+export function LobbyScreen() {
   const t = useTheme()
-  const title = (params?.title as string) ?? 'Dune · Part Two'
-  const [people, setPeople] = useState<Person[]>(INITIAL)
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const s = useSession()
+  const isHost = s.role === 'host'
+  const title = s.movie?.title ?? 'The show'
 
-  // Simulate everyone buffering up to ready.
-  useEffect(() => {
-    intervalRef.current = setInterval(() => {
-      setPeople((prev) =>
-        prev.every((p) => p.progress >= 1)
-          ? prev
-          : prev.map((p) => ({ ...p, progress: Math.min(1, p.progress + p.speed) })),
-      )
-    }, 600)
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
-    }
-  }, [])
+  // Relabel the host's own entry to "You" on the host device (guests see "Host"); and show the
+  // client's own ring from local download progress (smoother than the roster echo).
+  const people: Participant[] = s.participants.map((p) => {
+    if (isHost && p.id === 'host') return { ...p, name: 'You' }
+    if (!isHost && p.name === 'You') return { ...p, progress: s.progress }
+    return p
+  })
 
-  const aboard = people.filter((p) => p.progress >= 1).length
-  const ready = aboard === people.length
+  const aboard = people.filter((p) => p.status === 'ready').length
+  const ready = people.length > 0 && people.every((p) => p.status === 'ready')
 
-  // Stop waking JS once everyone is aboard.
-  useEffect(() => {
-    if (ready && intervalRef.current) {
-      clearInterval(intervalRef.current)
-      intervalRef.current = null
-    }
-  }, [ready])
+  const startShow = () => {
+    if (!isHost) return
+    // Matches ServerMsg `{ t: 'state', state: PlaybackState }`. Actual synchronized playback
+    // (a real host monotonic timestamp + the player) lands in the next milestone.
+    RailReelHost.broadcast(
+      JSON.stringify({ t: 'state', state: { positionSec: 0, rate: 1, isPlaying: true, hostMonotonicMs: 0 } }),
+    ).catch(() => {})
+  }
 
   return (
     <Screen title="LOBBY" scroll>
@@ -68,31 +54,65 @@ export function LobbyScreen({ params }: { params?: NavParams }) {
         </View>
 
         <View style={styles.grid}>
-          {people.map((p) => (
-            <View key={p.name} style={[styles.person, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}>
-              <FilamentRing progress={p.progress} size={84} />
-              <Text variant="cardTitle" style={{ marginTop: 10 }}>
-                {p.name}
-              </Text>
-              <Text variant="data" tone="tertiary">
-                {p.progress >= 1 ? 'ready' : `${Math.round(p.progress * 100)}%`}
-              </Text>
-            </View>
-          ))}
+          {people.map((p) => {
+            const requested = p.status === 'requested'
+            return (
+              <View key={p.id} style={[styles.person, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}>
+                <FilamentRing progress={p.status === 'ready' ? 1 : p.progress} size={84} />
+                <Text variant="cardTitle" numberOfLines={1} style={{ marginTop: 10 }}>
+                  {p.name}
+                </Text>
+                <Text variant="data" tone="tertiary">
+                  {statusLabel(p)}
+                </Text>
+                {isHost && requested ? (
+                  <View style={styles.approveRow}>
+                    <Button title="Approve" intent="amber" height={40} onPress={() => s.approve(p.id)} />
+                    <Button title="Deny" intent="cyan" height={40} onPress={() => s.deny(p.id)} />
+                  </View>
+                ) : null}
+              </View>
+            )
+          })}
         </View>
 
         <View style={{ flex: 1 }} />
 
-        <Button
-          title={ready ? 'Start the show' : 'Waiting for everyone…'}
-          subtitle={ready ? 'Lights down — everyone in sync' : undefined}
-          intent="amber"
-          height={72}
-          disabled={!ready}
-        />
+        {isHost ? (
+          <Button
+            title={ready ? 'Start the show' : 'Waiting for everyone…'}
+            subtitle={ready ? 'Lights down — everyone in sync' : undefined}
+            intent="amber"
+            height={72}
+            disabled={!ready}
+            onPress={startShow}
+          />
+        ) : (
+          <Button
+            title={s.clientPhase === 'ready' ? 'Ready — waiting for host' : s.clientPhase === 'denied' ? 'Not approved' : 'Getting ready…'}
+            intent="cyan"
+            height={72}
+            disabled
+          />
+        )}
       </View>
     </Screen>
   )
+}
+
+function statusLabel(p: Participant): string {
+  switch (p.status) {
+    case 'requested':
+      return 'wants in'
+    case 'approved':
+      return 'approved'
+    case 'ready':
+      return 'ready'
+    case 'downloading':
+      return `${Math.round(p.progress * 100)}%`
+    default:
+      return `${Math.round(p.progress * 100)}%`
+  }
 }
 
 const styles = StyleSheet.create({
@@ -108,4 +128,5 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 18,
   },
+  approveRow: { flexDirection: 'row', gap: 8, marginTop: 12 },
 })

@@ -34,6 +34,8 @@ export function openSyncSession(
   wsPort: number,
   token: string,
   onMessage: (msg: Record<string, unknown>) => void,
+  /** Called once if the socket drops AFTER the session was established (host stop, WiFi loss). */
+  onClose?: () => void,
   rounds = 6,
 ): Promise<SyncSession> {
   return new Promise((resolve, reject) => {
@@ -129,6 +131,8 @@ export function openSyncSession(
       if (!settled) {
         settled = true
         reject(new Error('WebSocket closed'))
+      } else {
+        onClose?.() // session was live; let the caller tear down its UI/state
       }
     }
   })

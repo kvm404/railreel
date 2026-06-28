@@ -5,6 +5,7 @@ import * as SplashScreen from 'expo-splash-screen'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { ThemeProvider } from '@/theme/ThemeProvider'
+import { SessionProvider } from '@/session/SessionProvider'
 import { useAppFonts } from '@/theme/fonts'
 import { Navigator, type Routes } from '@/navigation/Navigator'
 import { HomeScreen } from '@/screens/HomeScreen'
@@ -38,10 +39,12 @@ export default function App() {
     <GestureHandlerRootView style={{ flex: 1 }} onLayout={onLayout}>
       <SafeAreaProvider>
         <ThemeProvider>
-          <View style={{ flex: 1, backgroundColor: palette.base }}>
-            <StatusBar style="light" />
-            <Navigator routes={routes} initial="Home" />
-          </View>
+          <SessionProvider>
+            <View style={{ flex: 1, backgroundColor: palette.base }}>
+              <StatusBar style="light" />
+              <Navigator routes={routes} initial="Home" />
+            </View>
+          </SessionProvider>
         </ThemeProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

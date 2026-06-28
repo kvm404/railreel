@@ -54,6 +54,8 @@ export interface ParticipantInfo {
   id: string
   name: string
   status: ParticipantStatus
+  /** Fraction of the movie this client has cached (0–1). Drives the lobby readiness ring. */
+  progress: number
   /** Seconds of media buffered ahead of this client's playhead. */
   bufferedAheadSec: number
   /** Last measured download throughput (Mbps) under real conditions. */

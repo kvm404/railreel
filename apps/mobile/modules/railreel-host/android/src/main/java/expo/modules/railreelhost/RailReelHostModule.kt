@@ -1,5 +1,7 @@
 package expo.modules.railreelhost
 
+import android.content.ContentResolver
+import android.net.Uri
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.exception.CodedException
@@ -7,6 +9,11 @@ import fi.iki.elonen.NanoHTTPD
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.FilterInputStream
+import java.io.IOException
+import java.io.InputStream
+import java.net.Inet4Address
+import java.net.NetworkInterface
 
 /**
  * RailReel host data plane (Android). A NanoHTTPD server that streams the selected movie file
@@ -24,18 +31,35 @@ class RailReelHostModule : Module() {
     Name("RailReelHost")
     Events("onWsOpen", "onWsClose", "onWsMessage")
 
+    // The host's own LAN/hotspot IPv4, for the QR/join link. NanoHTTPD binds to all interfaces,
+    // so we pick the address clients actually reach: prefer the hotspot/wifi interface.
+    Function("getHostIpAddress") { hostIpAddress() }
+
     AsyncFunction("start") { fileUri: String, httpPort: Int, wsPort: Int, token: String ->
       if (token.isBlank()) throw CodedException("Session token must not be empty")
-      val file = File(fileUri.removePrefix("file://"))
-      if (!file.exists() || !file.canRead()) {
-        throw CodedException("File not found or unreadable: ${file.path}")
-      }
       synchronized(lock) {
         val ctx = appContext.reactContext ?: throw CodedException("No app context")
+        // Resolve the movie source. The document picker hands us a content:// URI; we stream it
+        // straight off the provider (no multi-GB copy into cache). file:// is still supported.
+        val media: MediaSource = try {
+          if (fileUri.startsWith("content://")) {
+            ContentSource(ctx.contentResolver, Uri.parse(fileUri))
+          } else {
+            val file = File(fileUri.removePrefix("file://"))
+            if (!file.exists() || !file.canRead()) {
+              throw CodedException("File not found or unreadable: ${file.path}")
+            }
+            FileSource(file)
+          }
+        } catch (e: CodedException) {
+          throw e
+        } catch (e: Exception) {
+          throw CodedException("Cannot open media source: ${e.message}")
+        }
         // Fully tear down any previous session first.
         teardown(ctx)
 
-        val s = FileServer(httpPort, file, token)
+        val s = FileServer(httpPort, media, token)
         try {
           s.start(NanoHTTPD.SOCKET_READ_TIMEOUT, true) // daemon listener thread
         } catch (e: Exception) {
@@ -127,6 +151,26 @@ class RailReelHostModule : Module() {
     }
   }
 
+  /**
+   * Best-effort LAN IPv4 of this device. Prefers the hotspot/wifi interface (ap, wlan, swlan)
+   * since when hosting that is the address guests on the hotspot can reach. Returns null if none.
+   */
+  private fun hostIpAddress(): String? = try {
+    val candidates = NetworkInterface.getNetworkInterfaces().toList()
+      .filter { it.isUp && !it.isLoopback }
+      .flatMap { nif ->
+        nif.inetAddresses.toList()
+          .filter { !it.isLoopbackAddress && it is Inet4Address }
+          .mapNotNull { addr -> addr.hostAddress?.let { nif.name to it } }
+      }
+    val preferred = candidates.firstOrNull { (name, _) ->
+      name.startsWith("ap") || name.startsWith("swlan") || name.startsWith("wlan")
+    }
+    (preferred ?: candidates.firstOrNull())?.second
+  } catch (e: Exception) {
+    null
+  }
+
   /** Stop the HTTP + WS servers and the foreground service. Caller holds `lock`. */
   private fun teardown(ctx: android.content.Context) {
     server?.stop()
@@ -152,12 +196,84 @@ class RailReelHostModule : Module() {
   }
 }
 
+/**
+ * A movie source the host serves. Abstracts file:// (a real File) from content:// (a SAF document
+ * streamed off the ContentResolver), so the byte-range server doesn't care which it got.
+ */
+private interface MediaSource {
+  /** Total bytes; must be known so range responses can set Content-Length/Content-Range. */
+  val length: Long
+  /** Strong validator for the bytes; stable for the life of the source. */
+  val etag: String
+  /** Open a stream positioned at [offset]; the caller closes it. */
+  fun openAt(offset: Long): InputStream
+}
+
+private class FileSource(private val file: File) : MediaSource {
+  override val length = file.length()
+  override val etag = "\"${file.lastModified()}-${file.length()}\""
+  override fun openAt(offset: Long): InputStream {
+    val fis = FileInputStream(file)
+    if (offset > 0) {
+      try {
+        fis.channel.position(offset) // reliable seek (skip() may short-skip)
+      } catch (e: Exception) {
+        fis.close()
+        throw e
+      }
+    }
+    return fis
+  }
+}
+
+private class ContentSource(
+  private val resolver: ContentResolver,
+  private val uri: Uri,
+) : MediaSource {
+  override val length: Long = resolveLength()
+  override val etag = "\"${uri.toString().hashCode()}-$length\""
+
+  private fun resolveLength(): Long {
+    resolver.openFileDescriptor(uri, "r")?.use { pfd ->
+      if (pfd.statSize >= 0) return pfd.statSize
+    }
+    // Some providers report an unknown statSize; fall back to the OpenableColumns size.
+    resolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use { c ->
+      val idx = c.getColumnIndex(android.provider.OpenableColumns.SIZE)
+      if (idx >= 0 && c.moveToFirst() && !c.isNull(idx)) return c.getLong(idx)
+    }
+    throw IOException("content length unknown for $uri")
+  }
+
+  override fun openAt(offset: Long): InputStream {
+    val pfd = resolver.openFileDescriptor(uri, "r") ?: throw IOException("cannot open $uri")
+    val fis = FileInputStream(pfd.fileDescriptor)
+    try {
+      if (offset > 0) fis.channel.position(offset)
+    } catch (e: Exception) {
+      runCatching { fis.close() }
+      runCatching { pfd.close() }
+      throw e
+    }
+    // NanoHTTPD closes the response stream when done; make that release the fd too.
+    return object : FilterInputStream(fis) {
+      override fun close() {
+        try {
+          super.close()
+        } finally {
+          pfd.close()
+        }
+      }
+    }
+  }
+}
+
 private class FileServer(
   port: Int,
-  private val file: File,
+  private val media: MediaSource,
   private val token: String,
 ) : NanoHTTPD(port) {
-  private val etag = "\"${file.lastModified()}-${file.length()}\""
+  private val etag = media.etag
 
   // Per-client download grants the host has approved. The session token gets a client onto the
   // network; only an approved grant unlocks the bytes (docs/architecture.md §10). Set operations
@@ -182,7 +298,7 @@ private class FileServer(
       return newFixedLengthResponse(Response.Status.FORBIDDEN, TEXT, "not approved")
     }
 
-    val fileLen = file.length()
+    val fileLen = media.length
 
     if (session.method == Method.HEAD) {
       return newFixedLengthResponse(Response.Status.OK, MIME, "").apply {
@@ -193,7 +309,7 @@ private class FileServer(
     }
 
     return when (val r = parseRange(session.headers["range"], fileLen)) {
-      Range.Full -> newFixedLengthResponse(Response.Status.OK, MIME, FileInputStream(file), fileLen).apply {
+      Range.Full -> newFixedLengthResponse(Response.Status.OK, MIME, media.openAt(0), fileLen).apply {
         addHeader("Accept-Ranges", "bytes")
         addHeader("ETag", etag)
       }
@@ -203,14 +319,7 @@ private class FileServer(
       }
       is Range.Partial -> {
         val contentLen = r.end - r.start + 1
-        val fis = FileInputStream(file)
-        try {
-          fis.channel.position(r.start) // reliable seek (skip() may short-skip)
-        } catch (e: Exception) {
-          fis.close()
-          throw e
-        }
-        newFixedLengthResponse(Response.Status.PARTIAL_CONTENT, MIME, fis, contentLen).apply {
+        newFixedLengthResponse(Response.Status.PARTIAL_CONTENT, MIME, media.openAt(r.start), contentLen).apply {
           addHeader("Accept-Ranges", "bytes")
           addHeader("Content-Range", "bytes ${r.start}-${r.end}/$fileLen")
           addHeader("ETag", etag)
