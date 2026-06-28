@@ -20,4 +20,6 @@ android {
 dependencies {
   // Embedded HTTP server with byte-range support for the host data plane.
   implementation 'org.nanohttpd:nanohttpd:2.3.1'
+  // WebSocket control plane (clock sync + play/pause/seek/chat).
+  implementation 'org.nanohttpd:nanohttpd-websocket:2.3.1'
 }

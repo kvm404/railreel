@@ -1,10 +1,20 @@
 import { NativeModule, requireNativeModule } from 'expo'
 import { Platform } from 'react-native'
 
-declare class RailReelHostModule extends NativeModule<Record<never, never>> {
-  /** Start serving `fileUri` (file://) with HTTP byte-range. `port` 0 = OS-assigned. Returns the bound port. */
-  start(fileUri: string, port: number, token: string): Promise<number>
-  /** Stop the server. */
+export type HostPorts = { httpPort: number; wsPort: number }
+
+type RailReelHostEvents = {
+  onWsOpen: () => void
+  onWsClose: () => void
+  onWsMessage: (event: { data: string }) => void
+}
+
+declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
+  /** Start the HTTP (range) + WebSocket (control) servers. Ports 0 = OS-assigned. */
+  start(fileUri: string, httpPort: number, wsPort: number, token: string): Promise<HostPorts>
+  /** Send a JSON message to every connected client (play/pause/seek/chat/reactions). */
+  broadcast(message: string): Promise<void>
+  /** Stop both servers + the foreground service. */
   stop(): Promise<void>
   /** DEV (M1): write an N-MB test file to cache and return its file:// uri. */
   createTestFile(sizeMb: number): Promise<string>
@@ -18,8 +28,11 @@ const androidOnly = (): RailReelHostModule => {
   }
   return {
     start: unavailable,
+    broadcast: async () => {},
     stop: async () => {},
     createTestFile: unavailable,
+    addListener: () => ({ remove: () => {} }),
+    removeAllListeners: () => {},
   } as unknown as RailReelHostModule
 }
 

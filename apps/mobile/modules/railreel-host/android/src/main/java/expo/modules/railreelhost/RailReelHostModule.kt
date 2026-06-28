@@ -18,11 +18,13 @@ import java.io.FileOutputStream
 class RailReelHostModule : Module() {
   private val lock = Any()
   private var server: FileServer? = null
+  private var ctrl: CtrlServer? = null
 
   override fun definition() = ModuleDefinition {
     Name("RailReelHost")
+    Events("onWsOpen", "onWsClose", "onWsMessage")
 
-    AsyncFunction("start") { fileUri: String, port: Int, token: String ->
+    AsyncFunction("start") { fileUri: String, httpPort: Int, wsPort: Int, token: String ->
       if (token.isBlank()) throw CodedException("Session token must not be empty")
       val file = File(fileUri.removePrefix("file://"))
       if (!file.exists() || !file.canRead()) {
@@ -31,36 +33,63 @@ class RailReelHostModule : Module() {
       synchronized(lock) {
         val ctx = appContext.reactContext ?: throw CodedException("No app context")
         // Fully tear down any previous session first.
-        server?.stop()
-        server = null
-        RailReelHostService.stop(ctx)
+        teardown(ctx)
 
-        val s = FileServer(port, file, token)
+        val s = FileServer(httpPort, file, token)
         try {
           s.start(NanoHTTPD.SOCKET_READ_TIMEOUT, true) // daemon listener thread
         } catch (e: Exception) {
           runCatching { s.stop() }
-          throw CodedException("Failed to start server: ${e.message}")
+          throw CodedException("Failed to start HTTP server: ${e.message}")
         }
-        // Foreground service keeps the process + CPU/WiFi alive while hosting. Keep start atomic:
-        // if it fails, don't leave an orphan server running without the service.
+
+        val c = CtrlServer(wsPort, token) { type, payload ->
+          // CtrlServer fires these from per-connection socket threads; hop to the JS thread
+          // before touching the event emitter (sendEvent goes straight into JSI).
+          appContext.runtime.schedule {
+            when (type) {
+              "open" -> sendEvent("onWsOpen", mapOf<String, Any?>())
+              "close" -> sendEvent("onWsClose", mapOf<String, Any?>())
+              "message" -> sendEvent("onWsMessage", mapOf("data" to payload))
+            }
+          }
+        }
+        try {
+          // The control channel is idle for long stretches of a movie, so its per-connection
+          // socket read timeout must comfortably exceed the client keepalive interval — otherwise
+          // the server closes the socket between pings. (HTTP uses the default 5s; data flows there.)
+          c.start(WS_SOCKET_READ_TIMEOUT_MS, true)
+        } catch (e: Exception) {
+          runCatching { s.stop() }
+          throw CodedException("Failed to start WS server: ${e.message}")
+        }
+
+        // Foreground service keeps the process + CPU/WiFi alive. Keep start atomic.
         try {
           RailReelHostService.start(ctx)
         } catch (e: Exception) {
           runCatching { s.stop() }
+          runCatching { c.stop() }
           runCatching { RailReelHostService.stop(ctx) }
           throw CodedException("Failed to start foreground service: ${e.message}")
         }
         server = s
-        s.listeningPort
+        ctrl = c
+        mapOf("httpPort" to s.listeningPort, "wsPort" to c.listeningPort)
       }
+    }
+
+    // Host → all clients (play/pause/seek/chat/reactions as JSON strings).
+    AsyncFunction("broadcast") { message: String ->
+      // Grab the server under the lock, but do the socket writes outside it so a slow/blocked
+      // client can't stall start/stop.
+      val c = synchronized(lock) { ctrl }
+      c?.broadcast(message)
     }
 
     AsyncFunction("stop") {
       synchronized(lock) {
-        server?.stop()
-        server = null
-        appContext.reactContext?.let { RailReelHostService.stop(it) }
+        appContext.reactContext?.let { teardown(it) }
       }
     }
 
@@ -76,11 +105,26 @@ class RailReelHostModule : Module() {
 
     OnDestroy {
       synchronized(lock) {
-        server?.stop()
-        server = null
-        appContext.reactContext?.let { RailReelHostService.stop(it) }
+        appContext.reactContext?.let { teardown(it) }
       }
     }
+  }
+
+  /** Stop the HTTP + WS servers and the foreground service. Caller holds `lock`. */
+  private fun teardown(ctx: android.content.Context) {
+    server?.stop()
+    server = null
+    ctrl?.stop()
+    ctrl = null
+    RailReelHostService.stop(ctx)
+  }
+
+  private companion object {
+    /**
+     * Read timeout for an accepted WS control connection. Must be > 2× the client keepalive
+     * interval so the socket survives a missed ping. Keepalive is 10s (see syncClient.ts).
+     */
+    const val WS_SOCKET_READ_TIMEOUT_MS = 30_000
   }
 }
 

@@ -5,18 +5,19 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
 import { Screen } from '@/components/Screen'
 import { Button, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
+import { openSyncSession, type SyncSession } from '@/net/syncClient'
 import RailReelHost from '../../modules/railreel-host'
 
 /**
- * DEV-ONLY M1 harness: measures NATIVE host throughput (NanoHTTPD range server) vs the
- * spike's 1.8 Mbps JS-bridge number. Host serves a generated test file; client downloads it
- * with expo-file-system and reports Mbps. Remove before shipping. See docs/data-plane-module.md.
+ * DEV-ONLY harness for the native data plane (M1 throughput, M2 keep-awake, M3 control/sync).
+ * Host serves a generated file (HTTP range) + a WS control plane; client measures throughput,
+ * runs the clock handshake, and receives host broadcasts. Remove before shipping.
  */
 
-const PORT = 8493
+const HTTP_PORT = 8493
+const WS_PORT = 8492
 const TOKEN = 'spike'
 const SIZE_MB = 64
-// The hotspot/SoftAP stops serving when the host screen sleeps, so keep it awake while hosting.
 const KEEP_AWAKE_TAG = 'railreel-host'
 
 export function HostTestScreen() {
@@ -25,14 +26,22 @@ export function HostTestScreen() {
   const [clientIp, setClientIp] = useState('10.63.238.250')
   const [log, setLog] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
+  const [wsClients, setWsClients] = useState(0)
   const serving = useRef(false)
+  const session = useRef<SyncSession | null>(null)
 
   const addLog = useCallback((l: string) => setLog((p) => [...p.slice(-30), l]), [])
 
+  // Host: track connected WS clients.
   useEffect(() => {
+    const open = RailReelHost.addListener('onWsOpen', () => setWsClients((n) => n + 1))
+    const close = RailReelHost.addListener('onWsClose', () => setWsClients((n) => Math.max(0, n - 1)))
     return () => {
+      open.remove()
+      close.remove()
       RailReelHost.stop().catch(() => {})
       deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
+      session.current?.close()
     }
   }, [])
 
@@ -41,6 +50,7 @@ export function HostTestScreen() {
       await RailReelHost.stop().catch(() => {})
       await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
       serving.current = false
+      setWsClients(0)
       addLog('host stopped')
       return
     }
@@ -49,14 +59,12 @@ export function HostTestScreen() {
     try {
       addLog(`generating ${SIZE_MB} MB test file…`)
       const uri = await RailReelHost.createTestFile(SIZE_MB)
-      const port = await RailReelHost.start(uri, PORT, TOKEN)
-      await activateKeepAwakeAsync(KEEP_AWAKE_TAG) // hotspot needs the screen on
+      const ports = await RailReelHost.start(uri, HTTP_PORT, WS_PORT, TOKEN)
+      await activateKeepAwakeAsync(KEEP_AWAKE_TAG)
       serving.current = true
-      addLog(`✅ serving ${SIZE_MB} MB on :${port} (screen kept awake)`)
-      addLog(`clients GET http://<ip>:${port}/movie?tk=${TOKEN}`)
+      addLog(`✅ http :${ports.httpPort} · ws :${ports.wsPort} (screen kept awake)`)
     } catch (e) {
       addLog(`❌ ${String(e)}`)
-      // Don't leave an orphan host/keep-awake if any step failed.
       await RailReelHost.stop().catch(() => {})
       await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
       serving.current = false
@@ -65,10 +73,16 @@ export function HostTestScreen() {
     }
   }
 
-  const runClient = async () => {
+  const broadcast = (isPlaying: boolean) => {
+    const msg = JSON.stringify({ t: 'state', isPlaying, positionSec: 0, rate: 1, hostMonotonicMs: 0 })
+    RailReelHost.broadcast(msg).catch((e) => addLog(`broadcast err: ${String(e)}`))
+    addLog(`→ broadcast ${isPlaying ? 'PLAY' : 'PAUSE'}`)
+  }
+
+  const runDownload = async () => {
     setBusy(true)
     setLog([])
-    const url = `http://${clientIp.trim()}:${PORT}/movie?tk=${TOKEN}`
+    const url = `http://${clientIp.trim()}:${HTTP_PORT}/movie?tk=${TOKEN}`
     try {
       addLog(`downloading ${url}`)
       const dest = new File(Paths.cache, 'rr-dl.bin')
@@ -77,9 +91,25 @@ export function HostTestScreen() {
       const file = await File.downloadFileAsync(url, dest)
       const secs = (Date.now() - t0) / 1000
       const bytes = file.size ?? 0
-      const mbps = secs > 0 ? (bytes * 8) / 1e6 / secs : 0
-      addLog(`${(bytes / 1e6).toFixed(1)} MB in ${secs.toFixed(2)}s`)
-      addLog(`✅ ${mbps.toFixed(1)} Mbps  (spike JS was ~1.8)`)
+      addLog(`${(bytes / 1e6).toFixed(1)} MB in ${secs.toFixed(2)}s → ✅ ${((bytes * 8) / 1e6 / secs).toFixed(1)} Mbps`)
+    } catch (e) {
+      addLog(`❌ ${String(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const runSync = async () => {
+    setBusy(true)
+    session.current?.close()
+    try {
+      addLog(`ws → ${clientIp.trim()}:${WS_PORT} …`)
+      const s = await openSyncSession(clientIp.trim(), WS_PORT, TOKEN, (msg) =>
+        addLog(`← ${msg.t === 'state' ? `state ${msg.isPlaying ? 'PLAY' : 'PAUSE'}` : JSON.stringify(msg)}`),
+      )
+      session.current = s
+      addLog(`✅ offset ${s.estimate.offsetMs.toFixed(0)}ms · rtt ${s.estimate.rttMs.toFixed(1)}ms (${s.samples} samples)`)
+      addLog('listening for host broadcasts…')
     } catch (e) {
       addLog(`❌ ${String(e)}`)
     } finally {
@@ -88,7 +118,7 @@ export function HostTestScreen() {
   }
 
   return (
-    <Screen title="HOST TEST · M1" scroll>
+    <Screen title="HOST TEST · M1-M3" scroll>
       <View style={styles.body}>
         <View style={styles.tabs}>
           <Button title="Host" intent={mode === 'host' ? 'amber' : 'cyan'} height={52} onPress={() => setMode('host')} />
@@ -97,7 +127,8 @@ export function HostTestScreen() {
 
         {mode === 'host' ? (
           <>
-            <Row label="SERVE" value={`${SIZE_MB} MB · :${PORT}`} />
+            <Row label="SERVE" value={`${SIZE_MB} MB · http ${HTTP_PORT} · ws ${WS_PORT}`} />
+            <Row label="WS CLIENTS" value={String(wsClients)} />
             <Button
               title={serving.current ? 'Stop host' : busy ? 'Starting…' : 'Start host'}
               intent="amber"
@@ -105,6 +136,12 @@ export function HostTestScreen() {
               disabled={busy}
               onPress={toggleHost}
             />
+            {serving.current ? (
+              <View style={styles.tabs}>
+                <Button title="▶ PLAY" intent="cyan" height={52} onPress={() => broadcast(true)} />
+                <Button title="⏸ PAUSE" intent="cyan" height={52} onPress={() => broadcast(false)} />
+              </View>
+            ) : null}
           </>
         ) : (
           <>
@@ -119,7 +156,10 @@ export function HostTestScreen() {
               placeholderTextColor={t.palette.textTertiary}
               style={[styles.input, { color: t.palette.textPrimary, borderColor: t.palette.hairline, fontFamily: t.fonts.monoRegular }]}
             />
-            <Button title={busy ? 'Downloading…' : 'Download test'} intent="amber" height={60} disabled={busy} onPress={runClient} />
+            <View style={styles.tabs}>
+              <Button title={busy ? '…' : 'Download'} intent="amber" height={56} disabled={busy} onPress={runDownload} />
+              <Button title={busy ? '…' : 'Sync (WS)'} intent="amber" height={56} disabled={busy} onPress={runSync} />
+            </View>
           </>
         )}
 
