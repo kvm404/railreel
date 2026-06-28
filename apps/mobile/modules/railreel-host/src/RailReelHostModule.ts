@@ -10,7 +10,10 @@ type RailReelHostEvents = {
 }
 
 declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
-  /** Start the HTTP (range) + WebSocket (control) servers. Ports 0 = OS-assigned. */
+  /** This device's LAN/hotspot IPv4 for the join link, or null if none found. */
+  getHostIpAddress(): string | null
+  /** Start the HTTP (range) + WebSocket (control) servers. Ports 0 = OS-assigned.
+   *  `fileUri` may be a file:// path or a content:// (SAF) URI from the document picker. */
   start(fileUri: string, httpPort: number, wsPort: number, token: string): Promise<HostPorts>
   /** Authorize a client's download grant so the data plane will serve it bytes (§10). */
   approve(grant: string): Promise<void>
@@ -31,6 +34,7 @@ const androidOnly = (): RailReelHostModule => {
     throw new Error('RailReelHost is only available on Android')
   }
   return {
+    getHostIpAddress: () => null,
     start: unavailable,
     approve: async () => {},
     revoke: async () => {},

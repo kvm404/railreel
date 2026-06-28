@@ -6,29 +6,59 @@ import { SyncDots } from '@/components/SyncDots'
 import { Button, FlapText, Text } from '@/ui'
 import { useNavigation } from '@/navigation/context'
 import { useTheme } from '@/theme/ThemeProvider'
-import { encodeJoinUrl, PROTOCOL_VERSION, type JoinPayload } from '@/lib/protocol'
+import { useSession } from '@/session/SessionProvider'
 
 /**
- * Host's "ready to invite" screen. (v1 mock — real movie pick + hotspot/session wiring
- * comes with the native networking layer.) Shows the QR + split-flap join code + the
- * guided hotspot step. See docs/design-language.md.
+ * Host's "ready to invite" screen. Opens the movie picker, starts the native HTTP+WS servers,
+ * and shows the real QR + split-flap join code + the guided hotspot step. The session lives in
+ * the store so it survives the trip into the lobby. See docs/design-language.md.
  */
 
-// Mock session until the host server + media picker are wired up.
-const JOIN_CODE = 'RL4K'
-const MOCK_PAYLOAD: JoinPayload = {
-  v: PROTOCOL_VERSION,
-  host: '192.168.43.1',
-  wsPort: 8492,
-  httpPort: 8493,
-  sessionId: 'demo-rl4k',
-  token: 'demo-token-rl4k',
+function fmtSize(bytes: number): string {
+  if (bytes <= 0) return '—'
+  const gb = bytes / 1e9
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1e6)} MB`
 }
 
 export function CreateSessionScreen() {
   const t = useTheme()
   const nav = useNavigation()
-  const joinUrl = encodeJoinUrl(MOCK_PAYLOAD)
+  const s = useSession()
+
+  const guests = s.participants.filter((p) => p.id !== 'host').length
+
+  // Before the session is live: a deliberate "choose a movie" step. (We open the picker on a tap
+  // rather than on mount so it can't interrupt the screen-entry animation — that left the screen
+  // mounted but invisible.)
+  if (s.hostPhase !== 'live') {
+    const starting = s.hostPhase === 'starting'
+    return (
+      <Screen title="NEW SESSION">
+        <View style={styles.center}>
+          <Film size={40} color={t.palette.amber} strokeWidth={1.75} />
+          <Text variant="title" style={{ textAlign: 'center' }}>
+            Share a movie with the cabin
+          </Text>
+          <Text variant="caption" tone="tertiary" style={{ textAlign: 'center' }}>
+            Pick a video on this phone — friends download their own copy and watch in sync.
+          </Text>
+          {s.error ? (
+            <Text variant="caption" tone="amber" style={{ textAlign: 'center' }}>
+              {s.error}
+            </Text>
+          ) : null}
+          {starting ? <SyncDots /> : null}
+          <Button
+            title={starting ? 'Opening…' : s.error ? 'Try another movie' : 'Choose a movie'}
+            intent="amber"
+            height={64}
+            disabled={starting}
+            onPress={() => s.startHost()}
+          />
+        </View>
+      </Screen>
+    )
+  }
 
   return (
     <Screen title="NEW SESSION" scroll>
@@ -41,30 +71,49 @@ export function CreateSessionScreen() {
               NOW SHARING
             </Text>
             <Text variant="cardTitle" numberOfLines={1}>
-              Dune · Part Two
+              {s.movie?.title ?? 'Movie'}
             </Text>
           </View>
+          <Text variant="data" tone="tertiary">
+            {fmtSize(s.movie?.sizeBytes ?? 0)}
+          </Text>
         </View>
 
-        {/* invite panel — film/ticket frame around the QR */}
-        <View style={[styles.invite, { borderColor: t.palette.hairline }]}>
-          {/* dark modules on a light "ticket" tile with a quiet zone — scans reliably */}
-          <View style={styles.qrWrap}>
-            <QRCode value={joinUrl} size={172} color="#0A0E16" backgroundColor="#F5F3EC" />
+        {/* invite panel — film/ticket frame around the QR (only once we have a reachable address) */}
+        {s.joinUrl ? (
+          <View style={[styles.invite, { borderColor: t.palette.hairline }]}>
+            <View style={styles.qrWrap}>
+              <QRCode value={s.joinUrl} size={172} color="#0A0E16" backgroundColor="#F5F3EC" />
+            </View>
+            <Text variant="eyebrow" tone="tertiary" style={{ marginTop: 18 }}>
+              JOIN CODE
+            </Text>
+            <FlapText value={s.joinCode ?? '····'} size={34} tone="amber" stagger={70} style={{ marginTop: 8 }} />
+            {s.hostIp ? (
+              <Text variant="data" tone="tertiary" style={{ marginTop: 10 }}>
+                {s.hostIp}
+              </Text>
+            ) : null}
           </View>
-          <Text variant="eyebrow" tone="tertiary" style={{ marginTop: 18 }}>
-            JOIN CODE
-          </Text>
-          <FlapText value={JOIN_CODE} size={34} tone="amber" stagger={70} style={{ marginTop: 8 }} />
-        </View>
+        ) : (
+          <View style={[styles.invite, { borderColor: t.palette.hairline, gap: 14 }]}>
+            <Text variant="cardTitle" style={{ textAlign: 'center' }}>
+              Turn on your hotspot
+            </Text>
+            <Text variant="caption" tone="tertiary" style={{ textAlign: 'center', paddingHorizontal: 20 }}>
+              No reachable address yet. Enable your hotspot, then refresh to show the invite code.
+            </Text>
+            <Button title="Refresh link" intent="cyan" height={52} onPress={s.refreshJoin} />
+          </View>
+        )}
 
         {/* hotspot step */}
         <View style={[styles.step, { borderColor: t.palette.hairline }]}>
           <Wifi size={20} color={t.palette.cyan} strokeWidth={2.25} />
           <View style={{ flex: 1 }}>
-            <Text variant="cardTitle">Turn on your hotspot</Text>
+            <Text variant="cardTitle">Keep your hotspot on</Text>
             <Text variant="caption" tone="tertiary">
-              Name it so friends recognize it, then they scan or type the code.
+              Name it so friends recognize it, then they scan or paste the code.
             </Text>
           </View>
         </View>
@@ -72,7 +121,7 @@ export function CreateSessionScreen() {
         <View style={styles.waiting}>
           <SyncDots />
           <Text variant="data" tone="secondary">
-            Waiting for guests…
+            {guests > 0 ? `${guests} aboard` : 'Waiting for guests…'}
           </Text>
         </View>
 
@@ -84,6 +133,7 @@ export function CreateSessionScreen() {
 
 const styles = StyleSheet.create({
   body: { flex: 1, gap: 16, paddingTop: 8 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 18, paddingHorizontal: 24 },
   movie: {
     flexDirection: 'row',
     alignItems: 'center',

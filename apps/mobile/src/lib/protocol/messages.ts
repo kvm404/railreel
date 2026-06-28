@@ -43,16 +43,26 @@ export type ServerMsg =
 
 // ── Client → host ───────────────────────────────────────────────────────────
 export type ClientMsg =
+  // The host can't tell connections apart (the native WS forwards frames without identity), so
+  // every client→host message that must be attributed carries the client's self-assigned `id`
+  // (a non-secret correlation handle; the secret is `grant`). The host echoes it in requestDecision.
+  //
   // `grant` is a per-client download secret the client mints itself; the host authorizes it
   // on the data plane only when it approves this join (see docs/architecture.md §10).
-  | { t: 'join'; name: string; token: string; grant: string }
+  | { t: 'join'; id: string; name: string; token: string; grant: string }
   | {
       t: 'heartbeat'
+      id: string
+      /** The client's own grant — proves the sender owns `id`, so a peer can't spoof its row. */
+      grant: string
+      /** Fraction of the movie cached so far (0–1) — drives the lobby ring during pre-cache. */
+      progress: number
       bufferedAheadSec: number
       downloadMbps: number
       positionSec: number
     }
-  | { t: 'ready'; positionSec: number } // ACK after a seek / when buffered to start
+  // ACK after a seek / when buffered to start. `grant` proves the sender owns `id`.
+  | { t: 'ready'; id: string; grant: string; positionSec: number }
   | { t: 'request'; id: string; action: RequestAction; arg?: number }
   | { t: 'chat'; text: string }
   | { t: 'reaction'; emoji: string }
