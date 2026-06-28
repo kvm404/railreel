@@ -29,8 +29,12 @@ class RailReelHostModule : Module() {
         throw CodedException("File not found or unreadable: ${file.path}")
       }
       synchronized(lock) {
+        val ctx = appContext.reactContext ?: throw CodedException("No app context")
+        // Fully tear down any previous session first.
         server?.stop()
         server = null
+        RailReelHostService.stop(ctx)
+
         val s = FileServer(port, file, token)
         try {
           s.start(NanoHTTPD.SOCKET_READ_TIMEOUT, true) // daemon listener thread
@@ -38,9 +42,16 @@ class RailReelHostModule : Module() {
           runCatching { s.stop() }
           throw CodedException("Failed to start server: ${e.message}")
         }
+        // Foreground service keeps the process + CPU/WiFi alive while hosting. Keep start atomic:
+        // if it fails, don't leave an orphan server running without the service.
+        try {
+          RailReelHostService.start(ctx)
+        } catch (e: Exception) {
+          runCatching { s.stop() }
+          runCatching { RailReelHostService.stop(ctx) }
+          throw CodedException("Failed to start foreground service: ${e.message}")
+        }
         server = s
-        // Keep the process + CPU/WiFi alive so the transfer survives screen-off.
-        appContext.reactContext?.let { RailReelHostService.start(it) }
         s.listeningPort
       }
     }

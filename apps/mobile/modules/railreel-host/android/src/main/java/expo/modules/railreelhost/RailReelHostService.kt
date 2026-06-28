@@ -37,8 +37,18 @@ class RailReelHostService : Service() {
     return START_NOT_STICKY
   }
 
+  // Android 15+: dataSync FGS has a ~6h budget; we must stop ourselves or the app is killed.
+  override fun onTimeout(startId: Int, fgsType: Int) {
+    // The session has outlived the FGS budget — release everything and stop. (A movie is far
+    // shorter than 6h, so this is a safety net, not a normal path.)
+    releaseLocks()
+    stopSelf(startId)
+  }
+
   private fun acquireLocks() {
+    releaseLocks() // idempotent: never overwrite a held, non-ref-counted lock
     val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+    @Suppress("DEPRECATION") // best-effort STA hint; does NOT keep a SoftAP awake
     wifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "railreel:wifi").apply {
       setReferenceCounted(false)
       acquire()

@@ -56,6 +56,10 @@ export function HostTestScreen() {
       addLog(`clients GET http://<ip>:${port}/movie?tk=${TOKEN}`)
     } catch (e) {
       addLog(`❌ ${String(e)}`)
+      // Don't leave an orphan host/keep-awake if any step failed.
+      await RailReelHost.stop().catch(() => {})
+      await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
+      serving.current = false
     } finally {
       setBusy(false)
     }
