@@ -41,13 +41,20 @@
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
         "android.permission.WAKE_LOCK",
-        "android.permission.POST_NOTIFICATIONS"
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.CAMERA"
       ],
       "predictiveBackGestureEnabled": false
     },
     "plugins": [
       "expo-dev-client",
       "expo-font",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "RailReel scans the host's QR code to join a session. The camera is used only for scanning."
+        }
+      ],
       [
         "expo-splash-screen",
         {

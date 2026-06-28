@@ -17,6 +17,7 @@
     "@expo-google-fonts/space-mono": "^0.4.2",
     "@expo-google-fonts/unbounded": "^0.4.1",
     "expo": "~56.0.12",
+    "expo-camera": "~56.0.8",
     "expo-crypto": "~56.0.4",
     "expo-dev-client": "~56.0.20",
     "expo-document-picker": "~56.0.4",
