@@ -406,8 +406,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setClientPhase('idle')
       }
     },
-    // leave/startDownload are stable enough; declared below — referenced via closure.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // `leave` (stable, no deps) is referenced via closure; startDownload is the only changing dep.
     [startDownload],
   )
 
