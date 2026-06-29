@@ -198,9 +198,14 @@ export function PlayerScreen() {
               <ChevronLeft size={20} color={t.palette.textSecondary} strokeWidth={2.25} />
             </Pressable>
             <View style={styles.syncTag}>
-              <View style={[styles.dot, { backgroundColor: inSync ? t.palette.cyan : t.palette.amber }]} />
+              <View
+                style={[
+                  styles.dot,
+                  { backgroundColor: s.reconnecting ? t.palette.danger : inSync ? t.palette.cyan : t.palette.amber },
+                ]}
+              />
               <Text variant="eyebrow" tone="secondary">
-                {isHost ? 'HOSTING' : inSync ? 'IN SYNC' : 'CATCHING UP'}
+                {s.reconnecting ? 'RECONNECTING…' : isHost ? 'HOSTING' : inSync ? 'IN SYNC' : 'CATCHING UP'}
               </Text>
             </View>
           </View>
