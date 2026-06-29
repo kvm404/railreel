@@ -7,7 +7,7 @@ import { Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { useNavigation } from '@/navigation/context'
 import { useSession } from '@/session/SessionProvider'
-import { decideCorrection, targetPositionSec } from '@/lib/sync/playback'
+import { decideCorrection, roomGate, targetPositionSec } from '@/lib/sync/playback'
 
 /**
  * The show. Immersive full-bleed video; the host drives play/pause/seek and broadcasts state,
@@ -43,6 +43,8 @@ export function PlayerScreen() {
   const [pos, setPos] = useState(0)
   const [inSync, setInSync] = useState(true)
   const hideRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const autoPausedRef = useRef(false) // host: the room-hold paused us (vs. a manual pause)
+  const overrideRef = useRef(false) // host: chose to play through a hold; don't auto-pause again
 
   const revealControls = useCallback(() => {
     setShowControls(true)
@@ -71,6 +73,8 @@ export function PlayerScreen() {
       setPlaying(false)
       s.setHostPlayback(player.currentTime, false)
     } else {
+      // Playing through an active hold is a deliberate override — don't let the gate re-pause us.
+      if (s.waitingFor.length > 0) overrideRef.current = true
       player.play()
       setPlaying(true)
       s.setHostPlayback(player.currentTime, true)
@@ -114,6 +118,29 @@ export function PlayerScreen() {
   }
   useEffect(() => () => exitRef.current(), [])
 
+  // Host: pause the room while any follower's player is stalled, and resume once everyone is ready
+  // again. `autoPausedRef` keeps this from fighting a manual pause (we only auto-resume what we
+  // auto-paused). The stall flag is "player not readyToPlay", so a pause can't clear it → no flap.
+  const waiting = s.waitingFor
+  useEffect(() => {
+    if (!isHost) return
+    const blocked = waiting.length > 0
+    if (!blocked) overrideRef.current = false // straggler caught up — drop the override
+    const action = roomGate({ autoPaused: autoPausedRef.current, playing }, blocked)
+    if (action === 'pause' && !overrideRef.current) {
+      autoPausedRef.current = true
+      player.pause()
+      setPlaying(false)
+      s.setHostPlayback(player.currentTime, false)
+      revealControls()
+    } else if (action === 'resume') {
+      autoPausedRef.current = false
+      player.play()
+      setPlaying(true)
+      s.setHostPlayback(player.currentTime, true)
+    }
+  }, [isHost, waiting, playing, player, s, revealControls])
+
   // ── client: drift-correct to the host's state ───────────────────────────────
   const correct = useCallback(() => {
     const pb = s.playback
@@ -143,6 +170,16 @@ export function PlayerScreen() {
     return () => clearInterval(id)
   }, [isHost, correct])
 
+  // Follower: tell the host whether our player is ready. "Not readyToPlay" = stalled (still loading
+  // / buffering), so the host holds the room for us; clears the moment our player is ready.
+  useEffect(() => {
+    if (isHost) return
+    const report = () => s.reportPlayback(player.status !== 'readyToPlay', player.currentTime)
+    report()
+    const id = setInterval(report, CORRECT_MS)
+    return () => clearInterval(id)
+  }, [isHost, player, s])
+
   return (
     <View style={styles.fill}>
       <Pressable style={StyleSheet.absoluteFill} onPress={revealControls}>
@@ -168,7 +205,8 @@ export function PlayerScreen() {
             </View>
           </View>
 
-          {/* host transport (clients are followers — no controls) */}
+          {/* middle: host transport (always available, even while holding, so the host is never
+              stuck), or the follower's status */}
           {isHost ? (
             <View style={styles.transport} pointerEvents="box-none">
               <Pressable onPress={() => skip(-SKIP_SEC)} hitSlop={12} style={styles.transportBtn}>
@@ -193,11 +231,12 @@ export function PlayerScreen() {
             </View>
           )}
 
-          {/* bottom: position */}
+          {/* bottom: a "holding for stragglers" notice (host), else the position readout */}
           <View style={styles.bottomBar} pointerEvents="none">
             <Text variant="data" tone="secondary">
-              {fmt(pos)}
-              {player.duration ? ` / ${fmt(player.duration)}` : ''}
+              {isHost && waiting.length > 0
+                ? `Holding for ${waiting.join(', ')} to catch up…`
+                : `${fmt(pos)}${player.duration ? ` / ${fmt(player.duration)}` : ''}`}
             </Text>
           </View>
         </View>

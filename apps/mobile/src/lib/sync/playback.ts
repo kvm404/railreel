@@ -53,6 +53,25 @@ const DEFAULTS = {
 const clamp = (n: number, lo: number, hi: number): number => (n < lo ? lo : n > hi ? hi : n)
 
 /**
+ * Room gate: the host holds the show while any follower is stalled (still loading) and resumes
+ * once everyone is ready. Pure so the tricky bits are pinned down: it must NOT fight a manual pause
+ * (only auto-resume what it auto-paused) and must be idempotent (no action if already in the right
+ * state) so it can't flap.
+ *
+ * `autoPaused` — did the gate itself pause the room? `playing` — is the room currently playing?
+ * `blocked` — is at least one follower stalled?
+ */
+export type RoomGateAction = 'pause' | 'resume' | 'none'
+export function roomGate(
+  { autoPaused, playing }: { autoPaused: boolean; playing: boolean },
+  blocked: boolean,
+): RoomGateAction {
+  if (blocked && playing) return 'pause' // a straggler appeared — hold the room
+  if (!blocked && autoPaused && !playing) return 'resume' // everyone caught up — resume our hold
+  return 'none'
+}
+
+/**
  * Decide how to bring the local player back in line. `drift > 0` means we are BEHIND the host
  * (need to move forward / speed up); `drift < 0` means we are AHEAD.
  */
