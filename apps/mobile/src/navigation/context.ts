@@ -6,7 +6,7 @@ import { createContext, useContext } from 'react'
  * — importantly — adds no native module, so the UI keeps hot-reloading without a rebuild.
  */
 
-export type RouteName = 'Home' | 'CreateSession' | 'JoinSession' | 'Lobby' | 'HostTest'
+export type RouteName = 'Home' | 'CreateSession' | 'JoinSession' | 'Lobby' | 'Player' | 'HostTest'
 export type NavParams = Record<string, unknown>
 
 export interface NavApi {

@@ -12,6 +12,8 @@ type RailReelHostEvents = {
 declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
   /** This device's LAN/hotspot IPv4 for the join link, or null if none found. */
   getHostIpAddress(): string | null
+  /** The host's monotonic clock in ms (matches the WS sync timebase); for stamping PlaybackState. */
+  getMonotonicMs(): number
   /** Start the HTTP (range) + WebSocket (control) servers. Ports 0 = OS-assigned.
    *  `fileUri` may be a file:// path or a content:// (SAF) URI from the document picker. */
   start(fileUri: string, httpPort: number, wsPort: number, token: string): Promise<HostPorts>
@@ -35,6 +37,7 @@ const androidOnly = (): RailReelHostModule => {
   }
   return {
     getHostIpAddress: () => null,
+    getMonotonicMs: () => Date.now(),
     start: unavailable,
     approve: async () => {},
     revoke: async () => {},

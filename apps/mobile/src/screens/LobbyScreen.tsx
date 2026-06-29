@@ -1,10 +1,11 @@
+import { useEffect } from 'react'
 import { StyleSheet, View } from 'react-native'
 import { Screen } from '@/components/Screen'
 import { FilamentRing } from '@/components/FilamentRing'
 import { Button, FlapText, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
+import { useNavigation } from '@/navigation/context'
 import { useSession, type Participant } from '@/session/SessionProvider'
-import RailReelHost from '../../modules/railreel-host'
 
 /**
  * The lobby: each friend's download readiness as a filament ring, fed by the real transfer layer.
@@ -14,9 +15,15 @@ import RailReelHost from '../../modules/railreel-host'
 
 export function LobbyScreen() {
   const t = useTheme()
+  const nav = useNavigation()
   const s = useSession()
   const isHost = s.role === 'host'
   const title = s.movie?.title ?? 'The show'
+
+  // A guest is taken into the show the moment the host starts it.
+  useEffect(() => {
+    if (!isHost && s.playback) nav.navigate('Player')
+  }, [isHost, s.playback, nav])
 
   // Relabel the host's own entry to "You" on the host device (guests see "Host"); and show the
   // client's own ring from local download progress (smoother than the roster echo).
@@ -31,11 +38,10 @@ export function LobbyScreen() {
 
   const startShow = () => {
     if (!isHost) return
-    // Matches ServerMsg `{ t: 'state', state: PlaybackState }`. Actual synchronized playback
-    // (a real host monotonic timestamp + the player) lands in the next milestone.
-    RailReelHost.broadcast(
-      JSON.stringify({ t: 'state', state: { positionSec: 0, rate: 1, isPlaying: true, hostMonotonicMs: 0 } }),
-    ).catch(() => {})
+    // Broadcast "playing from the top" (stamped with the host clock) and open the player; guests
+    // follow into the Player via the effect above when they receive this state.
+    s.setHostPlayback(0, true, 1)
+    nav.navigate('Player')
   }
 
   return (
