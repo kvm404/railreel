@@ -36,6 +36,9 @@ const HTTP_PORT = 8493
 const WS_PORT = 8492
 const KEEP_AWAKE_TAG = 'railreel-host'
 const MOVIE_CACHE = `${LegacyFS.cacheDirectory}railreel-movie.bin`
+/** A stalled follower that hasn't sent a heartbeat in this long is treated as gone — clear its
+ *  stall so it can't hang the room (followers beat every ~500ms during playback). */
+const STALE_BEAT_MS = 4000
 
 export type Role = 'none' | 'host' | 'client'
 
@@ -46,6 +49,10 @@ export type Participant = {
   status: ParticipantInfo['status']
   progress: number
   downloadMbps: number
+  /** During playback: this follower's player is loading and the room is waiting on it. */
+  stalled: boolean
+  /** Wall-clock ms of the last heartbeat — a stale stall (client gone) is cleared so we don't hang. */
+  lastBeatAt: number
 }
 
 /** Host phases: picking/launching the servers, then live and accepting guests. */
@@ -82,6 +89,8 @@ export interface SessionStore {
   movieUri: string | null
   /** Latest authoritative playback state. Host owns it; clients receive it over WS. */
   playback: PlaybackState | null
+  /** Host view: names of followers whose player is currently stalled (the room waits on them). */
+  waitingFor: string[]
 
   // actions
   startHost: () => Promise<void>
@@ -89,6 +98,8 @@ export interface SessionStore {
   refreshJoin: () => void
   /** Host: publish a new playback state (play/pause/seek), stamped + broadcast to clients. */
   setHostPlayback: (positionSec: number, isPlaying: boolean, rate?: number) => void
+  /** Client: report whether our player is keeping up (host pauses the room while any are stalled). */
+  reportPlayback: (stalled: boolean, positionSec: number) => void
   /** Client: current host-monotonic time (for drift math); host: its own monotonic clock. */
   hostNowMs: () => number
   approve: (id: string) => void
@@ -169,7 +180,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // A later client→host frame is trusted only if it proves ownership of its `id` with the grant
   // the host stored at join time. Blocks spoofing a peer's row or the reserved "host" id.
   const ownsId = useCallback(
-    (id: string, grant: string): boolean => id !== 'host' && grantsRef.current.get(id) === grant,
+    (id: unknown, grant: unknown): boolean =>
+      typeof id === 'string' &&
+      typeof grant === 'string' &&
+      id !== 'host' &&
+      grantsRef.current.get(id) === grant,
     [],
   )
 
@@ -196,23 +211,33 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         grantsRef.current.set(msg.id, msg.grant)
         updateParticipants((prev) => {
           const without = prev.filter((p) => p.id !== msg.id)
-          return [...without, { id: msg.id, name, status: 'requested', progress: 0, downloadMbps: 0 }]
+          return [...without, { id: msg.id, name, status: 'requested', progress: 0, downloadMbps: 0, stalled: false, lastBeatAt: Date.now() }]
         })
       } else if (msg.t === 'heartbeat') {
         if (!ownsId(msg.id, msg.grant) || !Number.isFinite(msg.progress)) return
         const mbps = Number.isFinite(msg.downloadMbps) ? msg.downloadMbps : 0
-        updateParticipants((prev) =>
-          prev.map((p) =>
-            // Only an already-approved guest can report progress (no pre-approval self-ready).
-            p.id === msg.id && p.status !== 'requested'
-              ? {
-                  ...p,
-                  progress: clamp01(msg.progress),
-                  downloadMbps: mbps,
-                  status: msg.progress >= 1 ? 'ready' : 'downloading',
-                }
-              : p,
-          ),
+        const newStatus = msg.progress >= 1 ? 'ready' : 'downloading'
+        const newProgress = clamp01(msg.progress)
+        // Only re-broadcast the roster when a roster-visible field actually changed — playback
+        // heartbeats (progress already 1, only `stalled` toggling) must not spam the control plane.
+        const prevP = participantsRef.current.find((p) => p.id === msg.id)
+        const rosterChanged = !prevP || (prevP.status !== 'requested' && (prevP.status !== newStatus || prevP.progress !== newProgress))
+        updateParticipants(
+          (prev) =>
+            prev.map((p) =>
+              // Only an already-approved guest can report progress (no pre-approval self-ready).
+              p.id === msg.id && p.status !== 'requested'
+                ? {
+                    ...p,
+                    progress: newProgress,
+                    downloadMbps: mbps,
+                    stalled: msg.stalled === true,
+                    status: newStatus,
+                    lastBeatAt: Date.now(),
+                  }
+                : p,
+            ),
+          rosterChanged,
         )
       } else if (msg.t === 'ready') {
         if (!ownsId(msg.id, msg.grant)) return
@@ -223,6 +248,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     })
     return () => onMessage.remove()
   }, [updateParticipants, ownsId])
+
+  // Host: clear a stall whose heartbeats have gone quiet (client left/backgrounded/crashed) so the
+  // room never stays paused waiting on someone who isn't coming back.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (roleRef.current !== 'host') return
+      const cutoff = Date.now() - STALE_BEAT_MS
+      updateParticipants(
+        (prev) =>
+          prev.some((p) => p.stalled && p.id !== 'host' && p.lastBeatAt < cutoff)
+            ? prev.map((p) => (p.stalled && p.id !== 'host' && p.lastBeatAt < cutoff ? { ...p, stalled: false } : p))
+            : prev,
+        false,
+      )
+    }, 1000)
+    return () => clearInterval(id)
+  }, [updateParticipants])
 
   // ── host actions ────────────────────────────────────────────────────────────
   const startHost = useCallback(async () => {
@@ -259,7 +301,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // Seed the roster with the host (it already has the file).
       grantsRef.current.clear()
       // Named "Host" so guests see "Host"; the host's own lobby relabels this entry to "You".
-      updateParticipants(() => [{ id: 'host', name: 'Host', status: 'ready', progress: 1, downloadMbps: 0 }], false)
+      updateParticipants(() => [{ id: 'host', name: 'Host', status: 'ready', progress: 1, downloadMbps: 0, stalled: false, lastBeatAt: Date.now() }], false)
 
       setRole('host')
       roleRef.current = 'host'
@@ -334,6 +376,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const c = clientRef.current
     if (!c) return
     c.session.send({ t: 'heartbeat', id: c.myId, grant: c.grant, progress: frac, downloadMbps: mbps, bufferedAheadSec: 0, positionSec: 0 })
+  }, [])
+
+  // Follower → host during playback: report whether our player is keeping up. The host pauses the
+  // room while any follower is stalled (loading) and resumes once everyone is ready again.
+  const reportPlayback = useCallback((stalled: boolean, positionSec: number) => {
+    const c = clientRef.current
+    if (!c) return
+    c.session.send({ t: 'heartbeat', id: c.myId, grant: c.grant, progress: 1, stalled, downloadMbps: 0, bufferedAheadSec: 0, positionSec })
   }, [])
 
   const startDownload = useCallback(async () => {
@@ -421,6 +471,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                   status: p.status,
                   progress: clamp01(p.progress),
                   downloadMbps: Number.isFinite(p.downloadMbps) ? p.downloadMbps : 0,
+                  stalled: false, // roster is a lobby-phase view; stall is host-tracked during playback
+                  lastBeatAt: Date.now(),
                 }))
               participantsRef.current = list
               setParticipants(list)
@@ -475,6 +527,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     roleRef.current = 'none'
   }, [])
 
+  // Followers (not the host) whose player is stalled — the room waits on these.
+  const waitingFor = useMemo(
+    () => participants.filter((p) => p.id !== 'host' && p.stalled).map((p) => p.name),
+    [participants],
+  )
+
   const value = useMemo<SessionStore>(
     () => ({
       role,
@@ -490,16 +548,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       hostName,
       movieUri,
       playback,
+      waitingFor,
       startHost,
       refreshJoin,
       setHostPlayback,
+      reportPlayback,
       hostNowMs,
       approve,
       deny,
       connect,
       leave,
     }),
-    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, movieUri, playback, startHost, refreshJoin, setHostPlayback, hostNowMs, approve, deny, connect, leave],
+    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, movieUri, playback, waitingFor, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave],
   )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>

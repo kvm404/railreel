@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { decideCorrection, targetPositionSec } from '@/lib/sync/playback'
+import { decideCorrection, roomGate, targetPositionSec } from '@/lib/sync/playback'
 import type { PlaybackState } from '@/lib/protocol'
 
 const state = (over: Partial<PlaybackState> = {}): PlaybackState => ({
@@ -98,5 +98,27 @@ describe('decideCorrection', () => {
         expect(c.rate).toBeLessThanOrEqual(1.6)
       }
     })
+  })
+})
+
+describe('roomGate', () => {
+  it('pauses the room when a straggler appears while playing', () => {
+    expect(roomGate({ autoPaused: false, playing: true }, true)).toBe('pause')
+  })
+
+  it('does nothing if already paused while blocked', () => {
+    expect(roomGate({ autoPaused: true, playing: false }, true)).toBe('none')
+  })
+
+  it('resumes once everyone has caught up (only what it auto-paused)', () => {
+    expect(roomGate({ autoPaused: true, playing: false }, false)).toBe('resume')
+  })
+
+  it('does not fight a manual pause (auto-paused false → no resume)', () => {
+    expect(roomGate({ autoPaused: false, playing: false }, false)).toBe('none')
+  })
+
+  it('does nothing while playing and unblocked', () => {
+    expect(roomGate({ autoPaused: false, playing: true }, false)).toBe('none')
   })
 })

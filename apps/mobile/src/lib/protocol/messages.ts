@@ -57,6 +57,8 @@ export type ClientMsg =
       grant: string
       /** Fraction of the movie cached so far (0–1) — drives the lobby ring during pre-cache. */
       progress: number
+      /** During playback: this follower's player isn't ready (loading) — the host waits for it. */
+      stalled?: boolean
       bufferedAheadSec: number
       downloadMbps: number
       positionSec: number
