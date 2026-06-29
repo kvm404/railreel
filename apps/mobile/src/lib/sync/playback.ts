@@ -43,11 +43,14 @@ export interface CorrectionParams {
   baseRate?: number
 }
 
+// Tuned for SMOOTHNESS over frame-perfect sync: a movie that's <0.3s off is imperceptible, so leave
+// it alone (deadband) and only ever close a gap with a gentle, near-inaudible rate trim. A hard seek
+// is jarring (it re-buffers, drops audio) so it's reserved for a real desync (>1.5s).
 const DEFAULTS = {
-  seekThresholdSec: 1.0,
-  deadbandSec: 0.05,
-  rateGain: 0.5,
-  maxRateNudge: 0.1,
+  seekThresholdSec: 1.5,
+  deadbandSec: 0.3,
+  rateGain: 0.4,
+  maxRateNudge: 0.06,
 }
 
 const clamp = (n: number, lo: number, hi: number): number => (n < lo ? lo : n > hi ? hi : n)
@@ -69,6 +72,29 @@ export function roomGate(
   if (blocked && playing) return 'pause' // a straggler appeared — hold the room
   if (!blocked && autoPaused && !playing) return 'resume' // everyone caught up — resume our hold
   return 'none'
+}
+
+/** Default grace before a flaky "not ready" counts as a real stall (see stallReport). */
+export const STALL_GRACE_MS = 1200
+
+/**
+ * Debounce a follower's flaky readiness signal into a stable stall report. `player.status` blips to
+ * "not ready" on every drift-seek and brief decode hiccup; reporting those instantly makes the host
+ * hold the room and (on a slow client) never cleanly resume — a freeze. So we only call it a stall
+ * once the player has been CONTINUOUSLY not-ready for `graceMs`, and clear it the instant it's ready.
+ *
+ * Pure: caller persists `notReadySince` (the ms timestamp readiness was first lost, or null) and
+ * feeds it back each tick.
+ */
+export function stallReport(
+  notReady: boolean,
+  notReadySince: number | null,
+  nowMs: number,
+  graceMs = STALL_GRACE_MS,
+): { notReadySince: number | null; stalled: boolean } {
+  if (!notReady) return { notReadySince: null, stalled: false }
+  const since = notReadySince ?? nowMs
+  return { notReadySince: since, stalled: nowMs - since >= graceMs }
 }
 
 /**
