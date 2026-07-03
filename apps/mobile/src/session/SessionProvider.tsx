@@ -7,6 +7,7 @@ import * as LegacyFS from 'expo-file-system/legacy'
 import RailReelHost from '../../modules/railreel-host'
 import { openSyncSession, type SyncSession } from '@/net/syncClient'
 import { reconnectDelayMs } from '@/lib/net/backoff'
+import { downloadBufferedAheadSec, smoothedMbps, updateFloorHolds } from '@/lib/sync/startGate'
 import { randomBytes } from '@/net/random'
 import {
   decodeJoinUrl,
@@ -19,6 +20,7 @@ import {
   parseServerMsg,
   PROTOCOL_VERSION,
   type JoinPayload,
+  type MediaInfo,
   type ParticipantInfo,
   type PlaybackState,
 } from '@/lib/protocol'
@@ -53,8 +55,12 @@ export type Participant = {
   status: ParticipantInfo['status']
   progress: number
   downloadMbps: number
+  /** Seconds of media between this client's playhead and its download edge (gate + floor math). */
+  bufferedAheadSec: number
   /** During playback: this follower's player is loading and the room is waiting on it. */
   stalled: boolean
+  /** This follower's player is live in the show (buffer-floor holds apply only then). */
+  inShow: boolean
   /** Wall-clock ms of the last heartbeat — a stale stall (client gone) is cleared so we don't hang. */
   lastBeatAt: number
 }
@@ -74,7 +80,8 @@ export type ClientPhase =
 export interface SessionStore {
   role: Role
   error: string | null
-  movie: { title: string; sizeBytes: number } | null
+  /** durationSec 0 (probe failed) or fastStart false degrade the start gate to full pre-cache. */
+  movie: { title: string; sizeBytes: number; durationSec: number; fastStart: boolean } | null
   participants: Participant[]
 
   // host
@@ -128,7 +135,7 @@ type GrantMap = Map<string, string>
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [role, setRole] = useState<Role>('none')
   const [error, setError] = useState<string | null>(null)
-  const [movie, setMovie] = useState<{ title: string; sizeBytes: number } | null>(null)
+  const [movie, setMovie] = useState<{ title: string; sizeBytes: number; durationSec: number; fastStart: boolean } | null>(null)
   const [participants, setParticipants] = useState<Participant[]>([])
 
   const [hostPhase, setHostPhase] = useState<HostPhase>('idle')
@@ -159,6 +166,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Enough to rebuild the join link if the reachable IP changes (e.g. after the hotspot comes up).
   const joinMetaRef = useRef<{ sessionId: string; token: string; httpPort: number; wsPort: number } | null>(null)
   const downloadRef = useRef<LegacyFS.DownloadResumable | null>(null)
+  // Download/playback telemetry for heartbeats (refs: read by beats fired from timers + callbacks).
+  const mediaRef = useRef<MediaInfo | null>(null) // host: what it shares; client: from the roster
+  const progressRef = useRef(0)
+  const mbpsRef = useRef(0)
+  const mbpsSampleRef = useRef<{ bytes: number; ms: number } | null>(null)
+  const positionRef = useRef(0) // this client's playhead (0 until the show starts)
+  const stalledRef = useRef(false) // player-not-ready, debounced by the PlayerScreen
+  const inShowRef = useRef(false) // our player is live (only an in-show client may hold the room)
+  // Playback-proxy lifecycle (client). 'starting' claims synchronously so racing progress
+  // callbacks can't double-start; 'failed' pins the pre-cache fallback (no native retry storm).
+  const proxyStateRef = useRef<'idle' | 'starting' | 'up' | 'failed'>('idle')
 
   useEffect(() => {
     roleRef.current = role
@@ -171,10 +189,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       name: p.name,
       status: p.status,
       progress: p.progress,
-      bufferedAheadSec: 0,
+      bufferedAheadSec: p.bufferedAheadSec,
       downloadMbps: p.downloadMbps,
     }))
-    RailReelHost.broadcast(JSON.stringify({ t: 'roster', participants: payload })).catch(() => {})
+    // media rides along so clients can do their own buffer math (duration/size).
+    const media = mediaRef.current ?? undefined
+    RailReelHost.broadcast(JSON.stringify({ t: 'roster', participants: payload, media })).catch(() => {})
   }, [])
 
   // Update participants everywhere at once: ref (for listeners), state (for render), and — when
@@ -223,17 +243,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         grantsRef.current.set(msg.id, msg.grant)
         updateParticipants((prev) => {
           const without = prev.filter((p) => p.id !== msg.id)
-          return [...without, { id: msg.id, name, status: 'requested', progress: 0, downloadMbps: 0, stalled: false, lastBeatAt: Date.now() }]
+          return [...without, { id: msg.id, name, status: 'requested', progress: 0, downloadMbps: 0, bufferedAheadSec: 0, stalled: false, inShow: false, lastBeatAt: Date.now() }]
         })
       } else if (msg.t === 'heartbeat') {
         if (!ownsId(msg.id, msg.grant) || !Number.isFinite(msg.progress)) return
         const mbps = Number.isFinite(msg.downloadMbps) ? msg.downloadMbps : 0
+        const buffered = Number.isFinite(msg.bufferedAheadSec) && msg.bufferedAheadSec >= 0 ? msg.bufferedAheadSec : 0
         const newStatus = msg.progress >= 1 ? 'ready' : 'downloading'
         const newProgress = clamp01(msg.progress)
-        // Only re-broadcast the roster when a roster-visible field actually changed — playback
-        // heartbeats (progress already 1, only `stalled` toggling) must not spam the control plane.
+        // Only re-broadcast the roster when a roster-visible change happened — and progress only
+        // counts in whole percents, or every heartbeat from every downloader would fan out an
+        // O(N) roster to N clients ~3×/s on the same hotspot carrying the movie bytes.
         const prevP = participantsRef.current.find((p) => p.id === msg.id)
-        const rosterChanged = !prevP || (prevP.status !== 'requested' && (prevP.status !== newStatus || prevP.progress !== newProgress))
+        const rosterChanged =
+          !prevP ||
+          (prevP.status !== 'requested' &&
+            (prevP.status !== newStatus || Math.round(prevP.progress * 100) !== Math.round(newProgress * 100)))
         updateParticipants(
           (prev) =>
             prev.map((p) =>
@@ -243,7 +268,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                     ...p,
                     progress: newProgress,
                     downloadMbps: mbps,
+                    bufferedAheadSec: buffered,
                     stalled: msg.stalled === true,
+                    inShow: msg.inShow === true,
                     status: newStatus,
                     lastBeatAt: Date.now(),
                   }
@@ -261,16 +288,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return () => onMessage.remove()
   }, [updateParticipants, ownsId])
 
-  // Host: clear a stall whose heartbeats have gone quiet (client left/backgrounded/crashed) so the
-  // room never stays paused waiting on someone who isn't coming back.
+  // Host: a client whose heartbeats have gone quiet (left / backgrounded / crashed) must stop
+  // holding the room — clear the flags that make it count (stalled, inShow). The next live beat
+  // re-reports both, so a client that comes back is held again if it genuinely needs it.
   useEffect(() => {
     const id = setInterval(() => {
       if (roleRef.current !== 'host') return
       const cutoff = Date.now() - STALE_BEAT_MS
+      const goneQuiet = (p: Participant): boolean =>
+        p.id !== 'host' && p.lastBeatAt < cutoff && (p.stalled || p.inShow)
       updateParticipants(
         (prev) =>
-          prev.some((p) => p.stalled && p.id !== 'host' && p.lastBeatAt < cutoff)
-            ? prev.map((p) => (p.stalled && p.id !== 'host' && p.lastBeatAt < cutoff ? { ...p, stalled: false } : p))
+          prev.some(goneQuiet)
+            ? prev.map((p) => (goneQuiet(p) ? { ...p, stalled: false, inShow: false } : p))
             : prev,
         false,
       )
@@ -307,13 +337,31 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // hand guests an unreachable host. refreshJoin() rebuilds it after the hotspot comes up.
       setJoinUrl(ip ? encodeJoinUrl(buildJoinPayload(joinMetaRef.current, ip)) : null)
       setJoinCode(humanCode(sessionId))
-      setMovie({ title: cleanTitle(asset.name), sizeBytes: asset.size ?? 0 })
+
+      // Duration powers the progressive start gate (progress → seconds buffered); fastStart says
+      // whether a partial copy is even playable. If the probe fails we keep going with 0/false:
+      // the gate then degrades to "start after full pre-cache".
+      const probed = await RailReelHost.probe(asset.uri).catch(() => ({ durationSec: 0, fastStart: false }))
+      const durationSec = Number.isFinite(probed.durationSec) && probed.durationSec > 0 ? probed.durationSec : 0
+      const fastStart = probed.fastStart === true
+      const sizeBytes = asset.size ?? 0
+      const title = cleanTitle(asset.name)
+      mediaRef.current = {
+        title,
+        sizeBytes,
+        durationSec,
+        bitrateMbps: durationSec > 0 ? (sizeBytes * 8) / durationSec / 1e6 : 0,
+        hash: '', // integrity metadata lands with the media-probe milestone
+        format: '',
+        fastStart,
+      }
+      setMovie({ title, sizeBytes, durationSec, fastStart })
       setMovieUri(asset.uri) // the host plays the same source it shares
 
       // Seed the roster with the host (it already has the file).
       grantsRef.current.clear()
       // Named "Host" so guests see "Host"; the host's own lobby relabels this entry to "You".
-      updateParticipants(() => [{ id: 'host', name: 'Host', status: 'ready', progress: 1, downloadMbps: 0, stalled: false, lastBeatAt: Date.now() }], false)
+      updateParticipants(() => [{ id: 'host', name: 'Host', status: 'ready', progress: 1, downloadMbps: 0, bufferedAheadSec: Infinity, stalled: false, inShow: false, lastBeatAt: Date.now() }], false)
 
       setRole('host')
       roleRef.current = 'host'
@@ -385,19 +433,37 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   )
 
   // ── client actions ──────────────────────────────────────────────────────────
-  const sendBeat = useCallback((frac: number, mbps: number) => {
+  // One heartbeat builder for both phases (downloading + playback), reading the telemetry refs so
+  // a download-progress beat can never clobber the playback fields (or vice versa). Always sends
+  // over the LIVE session: a reconnect swaps clientRef's socket under us.
+  const sendBeat = useCallback(() => {
     const c = clientRef.current
     if (!c) return
-    c.session.send({ t: 'heartbeat', id: c.myId, grant: c.grant, progress: frac, downloadMbps: mbps, bufferedAheadSec: 0, positionSec: 0 })
+    const durationSec = mediaRef.current?.durationSec ?? 0
+    c.session.send({
+      t: 'heartbeat',
+      id: c.myId,
+      grant: c.grant,
+      progress: progressRef.current,
+      stalled: stalledRef.current,
+      inShow: inShowRef.current,
+      downloadMbps: mbpsRef.current,
+      bufferedAheadSec: downloadBufferedAheadSec(progressRef.current, durationSec, positionRef.current),
+      positionSec: positionRef.current,
+    })
   }, [])
 
-  // Follower → host during playback: report whether our player is keeping up. The host pauses the
-  // room while any follower is stalled (loading) and resumes once everyone is ready again.
-  const reportPlayback = useCallback((stalled: boolean, positionSec: number) => {
-    const c = clientRef.current
-    if (!c) return
-    c.session.send({ t: 'heartbeat', id: c.myId, grant: c.grant, progress: 1, stalled, downloadMbps: 0, bufferedAheadSec: 0, positionSec })
-  }, [])
+  // Follower → host during playback: whether our player is keeping up (stall debounced by the
+  // PlayerScreen) and where our playhead is. The download may still be running underneath.
+  const reportPlayback = useCallback(
+    (stalled: boolean, positionSec: number) => {
+      inShowRef.current = true // only the PlayerScreen calls this — our player is live
+      stalledRef.current = stalled
+      positionRef.current = positionSec
+      sendBeat()
+    },
+    [sendBeat],
+  )
 
   const startDownload = useCallback(async () => {
     const c = clientRef.current
@@ -408,12 +474,41 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const dl = LegacyFS.createDownloadResumable(url, MOVIE_CACHE, {}, (p) => {
         const total = p.totalBytesExpectedToWrite
         const frac = total > 0 ? clamp01(p.totalBytesWritten / total) : 0
+        progressRef.current = frac
         setProgress(frac)
-        // Throttle heartbeats to ~3/s so a fast download doesn't flood the control channel.
+
+        // Measured throughput (smoothed) — the number the host's start gate reasons about.
         const now = Date.now()
-        if (now - lastBeatRef.current > 300) {
+        const sample = mbpsSampleRef.current
+        if (!sample) {
+          mbpsSampleRef.current = { bytes: p.totalBytesWritten, ms: now }
+        } else if (now - sample.ms >= 1000) {
+          mbpsRef.current = smoothedMbps(mbpsRef.current, p.totalBytesWritten - sample.bytes, now - sample.ms)
+          mbpsSampleRef.current = { bytes: p.totalBytesWritten, ms: now }
+        }
+
+        // Progressive playback: as soon as we know the final size, stand up the localhost proxy
+        // over the growing file and hand THAT to the player — never the partially-written file.
+        if (total > 0 && proxyStateRef.current === 'idle') {
+          proxyStateRef.current = 'starting'
+          RailReelHost.startProxy(MOVIE_CACHE, total)
+            .then((port) => {
+              proxyStateRef.current = 'up'
+              setMovieUri(`http://127.0.0.1:${port}/movie`)
+            })
+            .catch(() => {
+              // Full pre-cache fallback — and if the download already finished while we were
+              // starting, the completion block has passed, so set the source here.
+              proxyStateRef.current = 'failed'
+              if (progressRef.current >= 1) setMovieUri(MOVIE_CACHE)
+            })
+        }
+
+        // Throttle heartbeats to ~3/s so a fast download doesn't flood the control channel. Once
+        // our player is live the PlayerScreen's report loop is already beating — don't double up.
+        if (!inShowRef.current && now - lastBeatRef.current > 300) {
           lastBeatRef.current = now
-          sendBeat(frac, 0)
+          sendBeat()
         }
       })
       downloadRef.current = dl
@@ -425,13 +520,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         await LegacyFS.deleteAsync(MOVIE_CACHE, { idempotent: true }).catch(() => {})
         throw new Error(`download failed (HTTP ${res?.status ?? '?'})`)
       }
+      progressRef.current = 1
       setProgress(1)
-      setMovieUri(MOVIE_CACHE) // the cached copy is what the player will open
+      // If the proxy is serving the show (or about to — its .then/.catch sets the source), leave
+      // it alone: swapping the source mid-playback would rebuffer. Otherwise this is the
+      // pre-cache path — open the finished file directly.
+      if (proxyStateRef.current === 'idle' || proxyStateRef.current === 'failed') setMovieUri(MOVIE_CACHE)
       setClientPhase('ready')
-      // Send over the LIVE session: a reconnect during download swaps clientRef's socket, so the
-      // captured `c.session` may be the old, closed one. (sendBeat already reads clientRef fresh.)
-      sendBeat(1, 0)
-      ;(clientRef.current ?? c).session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: 0 })
+      sendBeat()
+      ;(clientRef.current ?? c).session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: positionRef.current })
     } catch (e) {
       downloadRef.current = null
       setError(String(e))
@@ -463,6 +560,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               setClientPhase('denied')
             }
           } else if (m.t === 'roster' && Array.isArray(m.participants)) {
+            // The roster carries the movie's metadata — what our own buffer math needs.
+            if (isMediaInfo(m.media)) {
+              mediaRef.current = m.media
+              setMovie({
+                title: m.media.title,
+                sizeBytes: m.media.sizeBytes,
+                durationSec: m.media.durationSec,
+                fastStart: m.media.fastStart === true,
+              })
+            }
             const list: Participant[] = m.participants
               .filter(isParticipantInfo)
               .map((q) => ({
@@ -471,7 +578,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 status: q.status,
                 progress: clamp01(q.progress),
                 downloadMbps: Number.isFinite(q.downloadMbps) ? q.downloadMbps : 0,
+                bufferedAheadSec: Number.isFinite(q.bufferedAheadSec) ? q.bufferedAheadSec : 0,
                 stalled: false, // roster is a lobby-phase view; stall is host-tracked during playback
+                inShow: false,
                 lastBeatAt: Date.now(),
               }))
             participantsRef.current = list
@@ -580,6 +689,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setReconnecting(false)
     downloadRef.current?.cancelAsync().catch(() => {})
     downloadRef.current = null
+    RailReelHost.stopProxy().catch(() => {})
+    proxyStateRef.current = 'idle'
+    mediaRef.current = null
+    progressRef.current = 0
+    mbpsRef.current = 0
+    mbpsSampleRef.current = null
+    positionRef.current = 0
+    stalledRef.current = false
+    inShowRef.current = false
+    setFloorHeld(new Set())
     clientRef.current?.session.close()
     clientRef.current = null
     if (roleRef.current === 'host') {
@@ -605,10 +724,27 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     roleRef.current = 'none'
   }, [])
 
-  // Followers (not the host) whose player is stalled — the room waits on these.
+  // Group buffer floor (PRD §7 rule 2): advance the hysteretic held-set whenever new telemetry
+  // lands (an effect, not render math — the held set is real state). Held under 15s of buffer,
+  // released at 30s, so a client hovering at the edge can't flap the room. Only followers whose
+  // player is live can hold the room — a late joiner still downloading in the lobby must never
+  // pause everyone else's movie.
+  const [floorHeld, setFloorHeld] = useState<ReadonlySet<string>>(new Set())
+  useEffect(() => {
+    const inShow = participants.filter((p) => p.id !== 'host' && p.inShow)
+    setFloorHeld((prev) => {
+      const held = updateFloorHolds(prev, inShow)
+      return held.size === prev.size && [...held].every((id) => prev.has(id)) ? prev : held
+    })
+  }, [participants])
+
+  // Followers the room waits on: a stalled player, or a floor-held downloader.
   const waitingFor = useMemo(
-    () => participants.filter((p) => p.id !== 'host' && p.stalled).map((p) => p.name),
-    [participants],
+    () =>
+      participants
+        .filter((p) => p.id !== 'host' && p.inShow && (p.stalled || floorHeld.has(p.id)))
+        .map((p) => p.name),
+    [participants, floorHeld],
   )
 
   const value = useMemo<SessionStore>(
@@ -678,6 +814,21 @@ function isParticipantInfo(p: unknown): p is ParticipantInfo {
     PARTICIPANT_STATUSES.includes(o.status) &&
     typeof o.progress === 'number' &&
     typeof o.downloadMbps === 'number'
+  )
+}
+
+/** Validate the media metadata off the roster before it drives buffer math. */
+function isMediaInfo(m: unknown): m is MediaInfo {
+  if (typeof m !== 'object' || m === null) return false
+  const o = m as Record<string, unknown>
+  return (
+    typeof o.title === 'string' &&
+    typeof o.sizeBytes === 'number' &&
+    Number.isFinite(o.sizeBytes) &&
+    o.sizeBytes > 0 &&
+    typeof o.durationSec === 'number' &&
+    Number.isFinite(o.durationSec) &&
+    o.durationSec >= 0
   )
 }
 

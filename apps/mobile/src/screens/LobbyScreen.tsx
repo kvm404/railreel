@@ -1,10 +1,11 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { StyleSheet, View } from 'react-native'
 import { Screen } from '@/components/Screen'
 import { FilamentRing } from '@/components/FilamentRing'
 import { Button, FlapText, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { useNavigation } from '@/navigation/context'
+import { decideStartGate, type StartGateDecision } from '@/lib/sync/startGate'
 import { useSession, type Participant } from '@/session/SessionProvider'
 
 /**
@@ -35,6 +36,23 @@ export function LobbyScreen() {
 
   const aboard = people.filter((p) => p.status === 'ready').length
   const ready = people.length > 0 && people.every((p) => p.status === 'ready')
+
+  // The progressive start gate (PRD §7): the show may start while downloads are still running,
+  // as long as everyone has a head start and the math says their download outruns playback.
+  const { participants, movie } = s
+  const gate: StartGateDecision | null = useMemo(
+    () =>
+      isHost && movie
+        ? decideStartGate(
+            participants
+              .filter((p) => p.id !== 'host')
+              .map((p) => ({ id: p.id, name: p.name, progress: p.progress, downloadMbps: p.downloadMbps, positionSec: 0 })),
+            { sizeBytes: movie.sizeBytes, durationSec: movie.durationSec, precacheOnly: !movie.fastStart },
+          )
+        : null,
+    [isHost, movie, participants],
+  )
+  const canStart = gate?.start ?? false
 
   const startShow = () => {
     if (!isHost) return
@@ -87,11 +105,17 @@ export function LobbyScreen() {
 
         {isHost ? (
           <Button
-            title={ready ? 'Start the show' : 'Waiting for everyone…'}
-            subtitle={ready ? 'Lights down — everyone in sync' : undefined}
+            title={canStart ? 'Start the show' : gate?.mode === 'precache' ? 'Pre-caching…' : 'Building head starts…'}
+            subtitle={
+              canStart
+                ? ready
+                  ? 'Lights down — everyone in sync'
+                  : 'Head starts locked — downloads finish during the show'
+                : gateEta(gate)
+            }
             intent="amber"
             height={72}
-            disabled={!ready}
+            disabled={!canStart}
             onPress={startShow}
           />
         ) : (
@@ -105,6 +129,15 @@ export function LobbyScreen() {
       </View>
     </Screen>
   )
+}
+
+/** "Waiting on Asha, Ben — ~3 min" (or seconds while a head start fills). */
+function gateEta(gate: StartGateDecision | null): string | undefined {
+  if (!gate || gate.waitingOn.length === 0) return undefined
+  const names = gate.waitingOn.join(', ')
+  if (gate.etaSec == null) return `Waiting on ${names}`
+  const eta = gate.etaSec < 90 ? `~${gate.etaSec}s` : `~${Math.ceil(gate.etaSec / 60)} min`
+  return `Waiting on ${names} — ${eta}`
 }
 
 function statusLabel(p: Participant): string {

@@ -32,6 +32,8 @@ export interface MediaInfo {
   hash: string
   /** Container/codec summary, e.g. "mp4 / h264 / aac". */
   format: string
+  /** moov before mdat — a player can open a partially-downloaded copy (progressive start). */
+  fastStart?: boolean
 }
 
 /** Everything a client needs to connect to a host, encoded into the QR/link. */

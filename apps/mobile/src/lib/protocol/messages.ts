@@ -36,7 +36,9 @@ export type ServerMsg =
   | { t: 'state'; state: PlaybackState }
   | { t: 'pause'; reason: PauseReason; who?: string }
   | { t: 'resume'; atHostMonotonicMs: number } // scheduled resume (future host time)
-  | { t: 'roster'; participants: ParticipantInfo[] }
+  // `media` rides along so every client can do its own buffer math (duration/size) — the roster
+  // is re-broadcast on every membership change, so late joiners always catch it.
+  | { t: 'roster'; participants: ParticipantInfo[]; media?: MediaInfo }
   | { t: 'requestDecision'; id: string; approved: boolean }
   | { t: 'chat'; from: string; text: string; at: number }
   | { t: 'reaction'; from: string; emoji: string; at: number }
@@ -61,6 +63,8 @@ export type ClientMsg =
       progress: number
       /** During playback: this follower's player isn't ready (loading) — the host waits for it. */
       stalled?: boolean
+      /** This follower's player is live in the show — only then may it hold the room (buffer floor). */
+      inShow?: boolean
       bufferedAheadSec: number
       downloadMbps: number
       positionSec: number
