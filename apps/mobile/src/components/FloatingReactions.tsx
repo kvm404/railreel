@@ -50,10 +50,10 @@ function Spark({ event, onDone }: { event: ReactionEvent; onDone: (seq: number) 
   const progress = useSharedValue(0)
 
   useEffect(() => {
+    // mount-only: this spark animates once and retires itself; event.seq is stable per instance.
     progress.value = withTiming(1, { duration: LIFE_MS, easing: Easing.out(Easing.quad) })
     const id = setTimeout(() => onDone(event.seq), LIFE_MS + 60)
     return () => clearTimeout(id)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const style = useAnimatedStyle(() => {
