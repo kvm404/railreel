@@ -172,6 +172,20 @@ export function updateFloorHolds(
   return held
 }
 
+/** Lead a late joiner needs beyond the live playhead before it may enter the show (seconds). */
+export const CATCH_UP_LEAD_SEC = 30
+
+/**
+ * May a late joiner enter the show yet? Its download edge must cover the CURRENT playhead plus a
+ * lead (or the download is simply done) — entering earlier would just stall the player at a
+ * position it hasn't downloaded and hold nothing but its own experience hostage.
+ */
+export function canJoinShow(progress: number, durationSec: number, positionSec: number, leadSec = CATCH_UP_LEAD_SEC): boolean {
+  if (progress >= 1) return true
+  if (!(durationSec > 0)) return false // can't reason without a duration — wait for the full file
+  return downloadBufferedAheadSec(progress, durationSec, positionSec) >= leadSec
+}
+
 /**
  * Smoothed throughput from two byte/time samples (EMA so one bursty read doesn't swing the gate).
  * Returns `prevMbps` unchanged when the window is too short to measure.
