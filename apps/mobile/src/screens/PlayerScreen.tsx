@@ -3,7 +3,7 @@ import { Pressable, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useVideoPlayer, VideoView } from 'expo-video'
 import { ChevronLeft, Pause, Play, RotateCcw, RotateCw } from 'lucide-react-native'
-import { Text } from '@/ui'
+import { Button, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { useNavigation } from '@/navigation/context'
 import { useSession } from '@/session/SessionProvider'
@@ -127,6 +127,18 @@ export function PlayerScreen() {
     },
     [player, playing, setHostPlayback, revealControls],
   )
+
+  // Host: "one bad device can't hold the group hostage" (PRD §7) — play through an active hold.
+  // The straggler keeps downloading/buffering and its player drift-corrects back into the show
+  // the moment it can; the override clears itself once everyone has recovered.
+  const playWithout = useCallback(() => {
+    overrideRef.current = true
+    autoPausedRef.current = false
+    setEnded(false)
+    player.play()
+    setPlaying(true)
+    setHostPlayback(player.currentTime, true)
+  }, [player, setHostPlayback])
 
   useEffect(() => {
     if (!isHost) return
@@ -353,15 +365,29 @@ export function PlayerScreen() {
             </View>
           )}
 
-          {/* bottom: a "holding for stragglers" notice (host), else the position readout */}
-          <View style={styles.bottomBar} pointerEvents="none">
-            <Text variant="data" tone="secondary">
-              {ended
-                ? 'The End'
-                : isHost && waiting.length > 0
-                  ? `Holding for ${waiting.join(', ')} to catch up…`
-                  : `${fmt(pos)}${player.duration ? ` / ${fmt(player.duration)}` : ''}`}
-            </Text>
+          {/* bottom: a "holding for stragglers" notice + the host's way out, else the position */}
+          <View style={styles.bottomBar} pointerEvents="box-none">
+            {!ended && isHost && waiting.length > 0 && !playing ? (
+              <View style={styles.holdRow} pointerEvents="box-none">
+                <Text variant="data" tone="secondary">
+                  {`Holding for ${waiting.join(', ')} to catch up…`}
+                </Text>
+                <Button
+                  title={`Play without ${waiting.length > 1 ? 'them' : waiting[0]}`}
+                  intent="cyan"
+                  height={44}
+                  onPress={playWithout}
+                />
+              </View>
+            ) : (
+              <Text variant="data" tone="secondary">
+                {ended
+                  ? 'The End'
+                  : isHost && waiting.length > 0
+                    ? `Holding for ${waiting.join(', ')} to catch up…`
+                    : `${fmt(pos)}${player.duration ? ` / ${fmt(player.duration)}` : ''}`}
+              </Text>
+            )}
           </View>
         </View>
       ) : null}
@@ -391,4 +417,5 @@ const styles = StyleSheet.create({
   transportBtn: { width: 52, height: 52, alignItems: 'center', justifyContent: 'center' },
   playBtn: { width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center' },
   bottomBar: { alignItems: 'center' },
+  holdRow: { alignItems: 'center', gap: 10 },
 })
