@@ -12,7 +12,7 @@ import { useTheme } from '@/theme/ThemeProvider'
  * never competes with the film. See docs/design-language.md (warm = human = interactive).
  */
 
-export const RAIL_EMOJI = ['❤️', '🤣', '😱', '🍿', '✨'] as const
+export const RAIL_EMOJI = ['❤️', '🤣', '😱', '🍿', '😢'] as const
 
 const IDLE_DIM_MS = 4000
 const DIM_OPACITY = 0.4
