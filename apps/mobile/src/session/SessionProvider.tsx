@@ -468,9 +468,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const startDownload = useCallback(async () => {
     const c = clientRef.current
     if (!c) return
+    // Re-entrancy guard: a duplicate approval (host double-tap, decision re-delivered after a
+    // reconnect) must NOT start a second download — two writers on the same cache file, and
+    // either one's failure path deleting the file out from under the other (the player then
+    // streams a ghost inode the proxy can't see).
+    if (downloadRef.current) return
     setClientPhase('downloading')
     const url = `http://${c.payload.host}:${c.payload.httpPort}/movie?tk=${encodeURIComponent(c.payload.token)}&g=${encodeURIComponent(c.grant)}`
     try {
+      // Clear any stale partial from a previous attempt BEFORE the download opens the file —
+      // never after another attempt may have started (deleting a file mid-write detaches the
+      // writer onto a deleted inode while the proxy reads the path).
+      await LegacyFS.deleteAsync(MOVIE_CACHE, { idempotent: true }).catch(() => {})
       const dl = LegacyFS.createDownloadResumable(url, MOVIE_CACHE, {}, (p) => {
         const total = p.totalBytesExpectedToWrite
         const frac = total > 0 ? clamp01(p.totalBytesWritten / total) : 0
@@ -513,6 +522,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       })
       downloadRef.current = dl
       const res = await dl.downloadAsync()
+      if (downloadRef.current !== dl) return // superseded by leave()/a newer attempt — not ours to finish
       downloadRef.current = null
       // downloadAsync resolves even on 4xx/5xx (writing the error body to disk) — verify the status
       // before trusting the file, or a 403 would show up as "ready".
@@ -531,6 +541,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       ;(clientRef.current ?? c).session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: positionRef.current })
     } catch (e) {
       downloadRef.current = null
+      // NOTE: no deleteAsync here — a failed transfer's partial bytes are harmless (a retry
+      // truncates them) and the path may already belong to a newer attempt.
       setError(String(e))
       setClientPhase('approved') // allow a retry
     }
