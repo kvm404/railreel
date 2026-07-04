@@ -308,10 +308,36 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(id)
   }, [updateParticipants])
 
+  // Cancel any in-flight transfer and zero all transfer telemetry. MOVIE_CACHE is one shared
+  // path and the gate's ETA math trusts these refs, so EVERY session boundary (leave, a fresh
+  // connect, re-hosting) must pass through here — a prior session's dying download otherwise
+  // keeps feeding near-zero Mbps into the new session's gate (the "~232 min ETA" bug).
+  const resetTransfer = useCallback(() => {
+    downloadRef.current?.cancelAsync().catch(() => {})
+    downloadRef.current = null
+    RailReelHost.stopProxy().catch(() => {})
+    proxyStateRef.current = 'idle'
+    progressRef.current = 0
+    mbpsRef.current = 0
+    mbpsSampleRef.current = null
+    positionRef.current = 0
+    stalledRef.current = false
+    inShowRef.current = false
+    setProgress(0)
+    setMovieUri(null)
+  }, [])
+
   // ── host actions ────────────────────────────────────────────────────────────
   const startHost = useCallback(async () => {
     setError(null)
     setHostPhase('starting')
+    // Re-hosting (or hosting after having been a guest) must not inherit the previous session:
+    // stale playback would yank fresh guests straight into the Player, and a leftover download /
+    // floor-hold would corrupt the new gate's math. Bump the epoch so any zombie transfer bails.
+    epochRef.current++
+    resetTransfer()
+    setPlayback(null)
+    setFloorHeld(new Set())
     try {
       const picked = await DocumentPicker.getDocumentAsync({ type: 'video/*', copyToCacheDirectory: false })
       if (picked.canceled || !picked.assets[0]) {
@@ -341,7 +367,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // Duration powers the progressive start gate (progress → seconds buffered); fastStart says
       // whether a partial copy is even playable. If the probe fails we keep going with 0/false:
       // the gate then degrades to "start after full pre-cache".
-      const probed = await RailReelHost.probe(asset.uri).catch(() => ({ durationSec: 0, fastStart: false }))
+      const probed = await RailReelHost.probe(asset.uri).catch(() => ({ durationSec: 0, fastStart: false, width: 0, height: 0 }))
       const durationSec = Number.isFinite(probed.durationSec) && probed.durationSec > 0 ? probed.durationSec : 0
       const fastStart = probed.fastStart === true
       const sizeBytes = asset.size ?? 0
@@ -354,6 +380,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         hash: '', // integrity metadata lands with the media-probe milestone
         format: '',
         fastStart,
+        width: probed.width || 0,
+        height: probed.height || 0,
       }
       setMovie({ title, sizeBytes, durationSec, fastStart })
       setMovieUri(asset.uri) // the host plays the same source it shares
@@ -372,7 +400,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       await RailReelHost.stop().catch(() => {})
       await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
     }
-  }, [updateParticipants])
+  }, [updateParticipants, resetTransfer])
 
   // Re-read the device IP and rebuild the join link — call after enabling the hotspot, when the
   // reachable address may have changed (or only just appeared).
@@ -475,6 +503,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     if (downloadRef.current) {
       return
     }
+    // Session epoch at start: if a leave()/new connect() bumps it, this download is a zombie —
+    // it must not write telemetry, state, or errors into whatever session came after it.
+    const myEpoch = epochRef.current
+    const stale = (): boolean => epochRef.current !== myEpoch
     setClientPhase('downloading')
     const url = `http://${c.payload.host}:${c.payload.httpPort}/movie?tk=${encodeURIComponent(c.payload.token)}&g=${encodeURIComponent(c.grant)}`
     try {
@@ -483,6 +515,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // writer onto a deleted inode while the proxy reads the path).
       await LegacyFS.deleteAsync(MOVIE_CACHE, { idempotent: true }).catch(() => {})
       const dl = LegacyFS.createDownloadResumable(url, MOVIE_CACHE, {}, (p) => {
+        if (stale()) return // a newer session owns the telemetry refs now
         const total = p.totalBytesExpectedToWrite
         const frac = total > 0 ? clamp01(p.totalBytesWritten / total) : 0
         progressRef.current = frac
@@ -504,10 +537,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           proxyStateRef.current = 'starting'
           RailReelHost.startProxy(MOVIE_CACHE, total)
             .then((port) => {
+              if (stale()) return // a newer session owns the proxy state (its own startProxy replaces this server)
               proxyStateRef.current = 'up'
               setMovieUri(`http://127.0.0.1:${port}/movie`)
             })
             .catch(() => {
+              if (stale()) return
               // Full pre-cache fallback — and if the download already finished while we were
               // starting, the completion block has passed, so set the source here.
               proxyStateRef.current = 'failed'
@@ -524,7 +559,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       })
       downloadRef.current = dl
       const res = await dl.downloadAsync()
-      if (downloadRef.current !== dl) return // superseded by leave()/a newer attempt — not ours to finish
+      if (stale() || downloadRef.current !== dl) return // superseded — not ours to finish
       downloadRef.current = null
       // downloadAsync resolves even on 4xx/5xx (writing the error body to disk) — verify the status
       // before trusting the file, or a 403 would show up as "ready".
@@ -542,6 +577,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       sendBeat()
       ;(clientRef.current ?? c).session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: positionRef.current })
     } catch (e) {
+      if (stale()) return // a zombie's failure must not clobber the next session's phase/error
       downloadRef.current = null
       // NOTE: no deleteAsync here — a failed transfer's partial bytes are harmless (a retry
       // truncates them) and the path may already belong to a newer attempt.
@@ -680,6 +716,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       leavingRef.current = false
       approvedRef.current = false
       epochRef.current++ // a fresh session — invalidate any reconnect loop left over from a prior one
+      // A fresh join must not inherit ANYTHING from a previous session: no zombie download feeding
+      // the gate a dying transfer rate, no stale playback state yanking us straight into the
+      // Player, no leftover roster/media.
+      resetTransfer()
+      clientRef.current?.session.close()
+      clientRef.current = null
+      mediaRef.current = null
+      setPlayback(null)
+      participantsRef.current = []
+      setParticipants([])
+      setMovie(null)
       try {
         const session = await openClient({ payload, myId, grant, name }, true)
         clientRef.current = { session, payload, grant, myId, name }
@@ -692,7 +739,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setClientPhase('idle')
       }
     },
-    [openClient],
+    [openClient, resetTransfer],
   )
 
   const leave = useCallback(() => {
@@ -701,17 +748,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     approvedRef.current = false
     epochRef.current++ // invalidate any in-flight reconnect loop so it can't resurrect this session
     setReconnecting(false)
-    downloadRef.current?.cancelAsync().catch(() => {})
-    downloadRef.current = null
-    RailReelHost.stopProxy().catch(() => {})
-    proxyStateRef.current = 'idle'
+    resetTransfer()
     mediaRef.current = null
-    progressRef.current = 0
-    mbpsRef.current = 0
-    mbpsSampleRef.current = null
-    positionRef.current = 0
-    stalledRef.current = false
-    inShowRef.current = false
     setFloorHeld(new Set())
     clientRef.current?.session.close()
     clientRef.current = null
@@ -730,13 +768,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setHostIp(null)
     setHostPhase('idle')
     setClientPhase('idle')
-    setProgress(0)
-    setMovieUri(null)
     setPlayback(null)
     setError(null)
     setRole('none')
     roleRef.current = 'none'
-  }, [])
+  }, [resetTransfer])
 
   // Group buffer floor (PRD §7 rule 2): advance the hysteretic held-set whenever new telemetry
   // lands (an effect, not render math — the held set is real state). Held under 15s of buffer,

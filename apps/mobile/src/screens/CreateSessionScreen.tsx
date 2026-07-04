@@ -27,13 +27,20 @@ export function CreateSessionScreen() {
 
   const guests = s.participants.filter((p) => p.id !== 'host').length
 
+  // Backing out of a live (or starting) session tears it down — servers, keep-awake, roster —
+  // so the next session starts clean instead of inheriting a zombie.
+  const exitSession = () => {
+    if (s.hostPhase !== 'idle') s.leave()
+    nav.goBack()
+  }
+
   // Before the session is live: a deliberate "choose a movie" step. (We open the picker on a tap
   // rather than on mount so it can't interrupt the screen-entry animation — that left the screen
   // mounted but invisible.)
   if (s.hostPhase !== 'live') {
     const starting = s.hostPhase === 'starting'
     return (
-      <Screen title="NEW SESSION">
+      <Screen title="NEW SESSION" onBack={exitSession}>
         <View style={styles.center}>
           <Film size={40} color={t.palette.amber} strokeWidth={1.75} />
           <Text variant="title" style={{ textAlign: 'center' }}>
@@ -61,7 +68,7 @@ export function CreateSessionScreen() {
   }
 
   return (
-    <Screen title="NEW SESSION" scroll>
+    <Screen title="NEW SESSION" scroll onBack={exitSession}>
       <View style={styles.body}>
         {/* now sharing */}
         <View style={[styles.movie, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}>

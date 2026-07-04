@@ -34,6 +34,9 @@ export interface MediaInfo {
   format: string
   /** moov before mdat — a player can open a partially-downloaded copy (progressive start). */
   fastStart?: boolean
+  /** Video frame size (0 = unknown) — for the client decode-capability check (a 4K file is a slideshow on a 1080p-max decoder). */
+  width?: number
+  height?: number
 }
 
 /** Everything a client needs to connect to a host, encoded into the QR/link. */
