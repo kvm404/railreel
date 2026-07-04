@@ -7,7 +7,7 @@ import { Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { useNavigation } from '@/navigation/context'
 import { useSession } from '@/session/SessionProvider'
-import { decideCorrection, roomGate, stallReport, targetPositionSec } from '@/lib/sync/playback'
+import { decideCorrection, nextSeekLead, roomGate, stallReport, targetPositionSec } from '@/lib/sync/playback'
 import type { PlaybackState } from '@/lib/protocol'
 
 /**
@@ -20,7 +20,7 @@ const SKIP_SEC = 10
 const CORRECT_MS = 500 // client drift-check cadence
 const HOST_BEAT_MS = 2000 // host re-stamps state so followers stay fresh
 const SEEK_SETTLE_MS = 2500 // after a corrective seek, leave the player alone to actually land + buffer
-const IN_SYNC_SEC = 0.5 // |drift| under this shows the "in sync" badge
+const IN_SYNC_SEC = 0.35 // |drift| under this shows the "in sync" badge
 
 function fmt(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) sec = 0
@@ -52,7 +52,10 @@ export function PlayerScreen() {
   const [inSync, setInSync] = useState(true)
   const [ended, setEnded] = useState(false)
   const lastSeekAtRef = useRef(0) // client: when we last issued a corrective seek (settle window)
+  const pendingSeekAtRef = useRef<number | null>(null) // client: seek issued, landing not yet measured
+  const seekLeadRef = useRef(0) // client: EMA of this device's seek-landing latency (s)
   const appliedRateRef = useRef(1) // client: the playbackRate we last set (avoid redundant churn)
+  const lastDriftLogRef = useRef(0) // client: dev drift telemetry throttle
   const posRef = useRef(0) // last known playhead; read at unmount when the player may be released
   const autoPausedRef = useRef(false) // host: the room-hold paused us (vs. a manual pause)
   const overrideRef = useRef(false) // host: chose to play through a hold; don't auto-pause again
@@ -185,26 +188,48 @@ export function PlayerScreen() {
     const actual = player.currentTime
     const now = Date.now()
     const settling = now - lastSeekAtRef.current < SEEK_SETTLE_MS
-    const c = decideCorrection({ targetSec: target, actualSec: actual, isPlaying: pb.isPlaying, baseRate: pb.rate })
+
+    // A seek we issued has landed (player ready again while the settle window runs): measure how
+    // long the landing took and fold it into this device's seek-lead estimate, so the NEXT seek
+    // aims far enough ahead to land on the moving target.
+    if (settling && pendingSeekAtRef.current != null && player.status === 'readyToPlay') {
+      seekLeadRef.current = nextSeekLead(seekLeadRef.current, (now - pendingSeekAtRef.current) / 1000)
+      pendingSeekAtRef.current = null
+    }
+
+    const c = decideCorrection({
+      targetSec: target,
+      actualSec: actual,
+      isPlaying: pb.isPlaying,
+      baseRate: pb.rate,
+      seekLeadSec: seekLeadRef.current,
+    })
 
     // A hard seek (big desync) — but not while a previous seek is still landing, or we thrash.
     if (c.seekToSec != null && !settling) {
       player.currentTime = c.seekToSec
       lastSeekAtRef.current = now
+      pendingSeekAtRef.current = now
     }
 
     if (c.action === 'pause') {
       if (player.playing) player.pause()
     } else {
-      // Hold the host's plain rate while a seek settles; otherwise apply the (gentle) nudged rate.
+      // Hold the host's plain rate while a seek settles; otherwise apply the nudged rate.
       const rate = settling ? pb.rate : c.rate
-      if (Math.abs(rate - appliedRateRef.current) > 0.02) {
+      if (Math.abs(rate - appliedRateRef.current) > 0.01) {
         player.playbackRate = rate
         appliedRateRef.current = rate
       }
       if (!player.playing) player.play()
     }
     setInSync(Math.abs(target - actual) < IN_SYNC_SEC)
+
+    // Dev-only sync telemetry (Metro console): the number the PRD's sub-100ms target is judged by.
+    if (__DEV__ && now - lastDriftLogRef.current > 5000) {
+      lastDriftLogRef.current = now
+      console.log(`[sync] drift=${(target - actual).toFixed(3)}s lead=${seekLeadRef.current.toFixed(2)}s rate=${appliedRateRef.current.toFixed(3)}`)
+    }
   }, [player, hostNowMs])
 
   // React to each NEW host state: mirror "The End", and let a host DISCONTINUITY (play/pause toggle,
