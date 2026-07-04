@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { decideCorrection, roomGate, stallReport, targetPositionSec } from '@/lib/sync/playback'
+import { decideCorrection, nextSeekLead, roomGate, stallReport, targetPositionSec } from '@/lib/sync/playback'
 import type { PlaybackState } from '@/lib/protocol'
 
 const state = (over: Partial<PlaybackState> = {}): PlaybackState => ({
@@ -52,12 +52,12 @@ describe('decideCorrection', () => {
     })
   })
 
-  it('nudges rate up when slightly behind', () => {
+  it('nudges rate up when slightly behind (inaudible near-band cap)', () => {
     const c = decideCorrection({ targetSec: 100.4, actualSec: 100, isPlaying: true })
     expect(c.action).toBe('play')
     if (c.action === 'play') {
       expect(c.rate).toBeGreaterThan(1)
-      expect(c.rate).toBeLessThanOrEqual(1.1)
+      expect(c.rate).toBeLessThanOrEqual(1.05)
       expect(c.seekToSec).toBeUndefined()
     }
   })
@@ -66,37 +66,56 @@ describe('decideCorrection', () => {
     const c = decideCorrection({ targetSec: 100, actualSec: 100.4, isPlaying: true })
     if (c.action === 'play') {
       expect(c.rate).toBeLessThan(1)
-      expect(c.rate).toBeGreaterThanOrEqual(0.9)
+      expect(c.rate).toBeGreaterThanOrEqual(0.95)
     }
   })
 
-  it('clamps the rate nudge to ±maxRateNudge', () => {
-    const c = decideCorrection({ targetSec: 100.9, actualSec: 100, isPlaying: true }) // big-ish but < seek threshold
-    if (c.action === 'play') expect(c.rate).toBeLessThanOrEqual(1.1)
-  })
-
-  // Smoothness guardrails: imperceptible drift is ignored, and a sub-1.5s gap is nudged (not seeked)
-  // so playback never re-buffers / drops audio for small corrections.
+  // Smoothness guardrails: imperceptible drift is ignored, and a sub-threshold gap is nudged
+  // (not seeked) so playback never re-buffers / drops audio for small corrections.
   it('leaves sub-deadband drift completely alone (exactly base rate, no seek)', () => {
-    expect(decideCorrection({ targetSec: 100.2, actualSec: 100, isPlaying: true })).toEqual({
+    expect(decideCorrection({ targetSec: 100.1, actualSec: 100, isPlaying: true })).toEqual({
       action: 'play',
       rate: 1,
     })
   })
 
-  it('nudges (never seeks) for a moderate gap under the seek threshold', () => {
-    const c = decideCorrection({ targetSec: 101.2, actualSec: 100, isPlaying: true }) // 1.2s behind
+  it('escalates to the assertive catch-up cap beyond the near band — still no seek', () => {
+    const c = decideCorrection({ targetSec: 100.9, actualSec: 100, isPlaying: true }) // 0.9s behind
     expect(c.action).toBe('play')
     if (c.action === 'play') {
       expect(c.seekToSec).toBeUndefined()
-      expect(c.rate).toBeGreaterThan(1)
-      expect(c.rate).toBeLessThanOrEqual(1.06)
+      expect(c.rate).toBeGreaterThan(1.05) // past the inaudible cap…
+      expect(c.rate).toBeLessThanOrEqual(1.15) // …but bounded by the far cap
     }
   })
 
-  it('hard-seeks only once the gap exceeds 1.5s', () => {
-    const c = decideCorrection({ targetSec: 101.6, actualSec: 100, isPlaying: true })
-    expect(c.action === 'play' && c.seekToSec).toBe(101.6)
+  it('the two nudge stages meet at the near-band edge', () => {
+    const near = decideCorrection({ targetSec: 100.5, actualSec: 100, isPlaying: true })
+    const far = decideCorrection({ targetSec: 100.51, actualSec: 100, isPlaying: true })
+    if (near.action === 'play') expect(near.rate).toBeLessThanOrEqual(1.05)
+    if (far.action === 'play') expect(far.rate).toBeGreaterThan(1.05)
+  })
+
+  it('hard-seeks once the gap exceeds the seek threshold', () => {
+    const c = decideCorrection({ targetSec: 101.3, actualSec: 100, isPlaying: true })
+    expect(c.action === 'play' && c.seekToSec).toBe(101.3)
+  })
+
+  describe('seek lead (landing-latency compensation)', () => {
+    it('leads a forward seek by the measured landing latency', () => {
+      const c = decideCorrection({ targetSec: 110, actualSec: 100, isPlaying: true, seekLeadSec: 0.8 })
+      expect(c.action === 'play' && c.seekToSec).toBeCloseTo(110.8)
+    })
+
+    it('never leads a backwards seek (ahead of host) past the target', () => {
+      const c = decideCorrection({ targetSec: 100, actualSec: 110, isPlaying: true, seekLeadSec: 0.8 })
+      expect(c.action === 'play' && c.seekToSec).toBe(100)
+    })
+
+    it('does not lead while paused (the target is not moving)', () => {
+      const c = decideCorrection({ targetSec: 100, actualSec: 105, isPlaying: false, seekLeadSec: 0.8 })
+      expect(c.action === 'pause' && c.seekToSec).toBe(100)
+    })
   })
 
   describe('with a non-1 host rate (baseRate)', () => {
@@ -119,9 +138,27 @@ describe('decideCorrection', () => {
       const c = decideCorrection({ targetSec: 100.4, actualSec: 100, isPlaying: true, baseRate: 1.5 })
       if (c.action === 'play') {
         expect(c.rate).toBeGreaterThan(1.5)
-        expect(c.rate).toBeLessThanOrEqual(1.6)
+        expect(c.rate).toBeLessThanOrEqual(1.55)
       }
     })
+  })
+})
+
+describe('nextSeekLead', () => {
+  it('adopts the first believable sample directly', () => {
+    expect(nextSeekLead(0, 0.6)).toBe(0.6)
+  })
+
+  it('smooths later samples instead of jumping', () => {
+    const next = nextSeekLead(0.6, 1.2)
+    expect(next).toBeGreaterThan(0.6)
+    expect(next).toBeLessThan(1.2)
+  })
+
+  it('rejects implausible samples (timer noise, mid-seek rebuffers)', () => {
+    expect(nextSeekLead(0.6, 0.01)).toBe(0.6)
+    expect(nextSeekLead(0.6, 30)).toBe(0.6)
+    expect(nextSeekLead(0.6, NaN)).toBe(0.6)
   })
 })
 

@@ -37,20 +37,34 @@ export interface CorrectionParams {
   deadbandSec?: number
   /** Rate-nudge gain applied to the drift (s). */
   rateGain?: number
-  /** Max rate deviation from the base rate (e.g. 0.1 → base ± 0.1). */
+  /** Max rate deviation inside the near band (inaudible trim). */
   maxRateNudge?: number
+  /** |drift| beyond this (s) escalates to the assertive catch-up cap. */
+  nearBandSec?: number
+  /** Max rate deviation beyond the near band (brief, assertive catch-up). */
+  maxRateNudgeFar?: number
   /** The host's playback rate; nudges are centered on this (default 1). */
   baseRate?: number
+  /**
+   * Measured seek-landing latency (s) for THIS device: how far the target moves while a seek is
+   * being executed. A hard seek while playing aims at `target + lead` so it lands ON the target
+   * instead of behind it — the reason slow devices used to settle ~1s behind the host.
+   */
+  seekLeadSec?: number
 }
 
-// Tuned for SMOOTHNESS over frame-perfect sync: a movie that's <0.3s off is imperceptible, so leave
-// it alone (deadband) and only ever close a gap with a gentle, near-inaudible rate trim. A hard seek
-// is jarring (it re-buffers, drops audio) so it's reserved for a real desync (>1.5s).
+// Tuned for tight-but-smooth sync (PRD target: sub-100ms perceived). Inside a small deadband we
+// leave the player alone; small drift gets an inaudible ≤5% rate trim; larger drift (a slow device
+// falling behind) gets a brief assertive ≤15% catch-up — still smoother than a seek, and it closes
+// 1s of drift in ~7s instead of parking just outside a wide deadband. Hard seeks (re-buffer,
+// audio drop) stay reserved for a real desync.
 const DEFAULTS = {
-  seekThresholdSec: 1.5,
-  deadbandSec: 0.3,
-  rateGain: 0.4,
-  maxRateNudge: 0.06,
+  seekThresholdSec: 1.2,
+  deadbandSec: 0.12,
+  rateGain: 0.5,
+  maxRateNudge: 0.05,
+  nearBandSec: 0.5,
+  maxRateNudgeFar: 0.15,
 }
 
 const clamp = (n: number, lo: number, hi: number): number => (n < lo ? lo : n > hi ? hi : n)
@@ -97,6 +111,20 @@ export function stallReport(
   return { notReadySince: since, stalled: nowMs - since >= graceMs }
 }
 
+/** Bounds for a believable seek-latency sample (s): below = timer noise, above = a rebuffer, not a seek. */
+const SEEK_LEAD_MIN = 0.05
+const SEEK_LEAD_MAX = 2.5
+
+/**
+ * Fold a measured seek-landing latency sample into the device's running estimate (EMA). The
+ * estimate feeds decideCorrection's `seekLeadSec`. Samples outside believable bounds are dropped
+ * (a stall mid-seek would otherwise poison the lead and every future seek would overshoot).
+ */
+export function nextSeekLead(prevLeadSec: number, sampleSec: number, alpha = 0.3): number {
+  if (!Number.isFinite(sampleSec) || sampleSec < SEEK_LEAD_MIN || sampleSec > SEEK_LEAD_MAX) return prevLeadSec
+  return prevLeadSec > 0 ? prevLeadSec + alpha * (sampleSec - prevLeadSec) : sampleSec
+}
+
 /**
  * Decide how to bring the local player back in line. `drift > 0` means we are BEHIND the host
  * (need to move forward / speed up); `drift < 0` means we are AHEAD.
@@ -105,22 +133,30 @@ export function decideCorrection(p: CorrectionParams): Correction {
   const seekThreshold = p.seekThresholdSec ?? DEFAULTS.seekThresholdSec
   const deadband = p.deadbandSec ?? DEFAULTS.deadbandSec
   const gain = p.rateGain ?? DEFAULTS.rateGain
-  const maxNudge = p.maxRateNudge ?? DEFAULTS.maxRateNudge
+  const nearBand = p.nearBandSec ?? DEFAULTS.nearBandSec
+  const maxNudgeNear = p.maxRateNudge ?? DEFAULTS.maxRateNudge
+  const maxNudgeFar = p.maxRateNudgeFar ?? DEFAULTS.maxRateNudgeFar
   const baseRate = p.baseRate ?? 1
+  const seekLead = p.seekLeadSec ?? 0
   const drift = p.targetSec - p.actualSec
 
   if (!p.isPlaying) {
-    // Paused: hold at the host's position; only seek if we're meaningfully off.
+    // Paused: hold at the host's position; only seek if we're meaningfully off. No lead — a
+    // paused target doesn't move while the seek lands.
     return { action: 'pause', seekToSec: Math.abs(drift) > deadband ? p.targetSec : undefined }
   }
   if (Math.abs(drift) > seekThreshold) {
-    // Too far to nudge — jump there and resume at the host's rate.
-    return { action: 'play', rate: baseRate, seekToSec: p.targetSec }
+    // Too far to nudge — jump there, leading by the device's measured seek latency so the seek
+    // lands ON the moving target rather than behind it. Never lead a backwards seek past the
+    // target itself (an ahead-of-host device is already fast; overshooting would flip the error).
+    const lead = drift > 0 ? seekLead : 0
+    return { action: 'play', rate: baseRate, seekToSec: p.targetSec + lead }
   }
   if (Math.abs(drift) <= deadband) {
     return { action: 'play', rate: baseRate }
   }
-  // Small drift: trim the rate (around the host's rate) to close the gap smoothly.
+  // Rate-trim toward the target: inaudible inside the near band, assertive beyond it.
+  const maxNudge = Math.abs(drift) <= nearBand ? maxNudgeNear : maxNudgeFar
   const rate = baseRate + clamp(drift * gain, -maxNudge, maxNudge)
   return { action: 'play', rate }
 }
