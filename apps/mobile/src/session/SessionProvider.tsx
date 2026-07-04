@@ -7,6 +7,13 @@ import * as LegacyFS from 'expo-file-system/legacy'
 import RailReelHost from '../../modules/railreel-host'
 import { openSyncSession, type SyncSession } from '@/net/syncClient'
 import { reconnectDelayMs } from '@/lib/net/backoff'
+import {
+  appendCapped,
+  isValidReaction,
+  sanitizeChatText,
+  type ChatEntry,
+  type ReactionEvent,
+} from '@/lib/social/feed'
 import { downloadBufferedAheadSec, smoothedMbps, updateFloorHolds } from '@/lib/sync/startGate'
 import { randomBytes } from '@/net/random'
 import {
@@ -44,6 +51,12 @@ const MOVIE_CACHE = `${LegacyFS.cacheDirectory}railreel-movie.bin`
 const STALE_BEAT_MS = 4000
 /** Give up reconnecting (and tear down) after this many failed attempts. */
 const MAX_RECONNECT_ATTEMPTS = 8
+/** Chat history cap (older lines scroll off; this is a cabin, not an archive). */
+const CHAT_LOG_CAP = 200
+/** Recent reaction events kept for the floating overlay (it filters by freshness anyway). */
+const REACTION_KEEP = 16
+/** Minimum gap between our own outgoing reactions (taps are cheap, broadcasts are not). */
+const REACTION_SEND_GAP_MS = 250
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 export type Role = 'none' | 'host' | 'client'
@@ -105,6 +118,16 @@ export interface SessionStore {
   /** Host view: names of followers whose player is currently stalled (the room waits on them). */
   waitingFor: string[]
 
+  // social (the cabin)
+  /** Chat history, host-ordered, capped — newest last. Own lines carry `from: 'You'`. */
+  chatLog: ChatEntry[]
+  /** Recent reaction events for the floating overlay (UI filters by freshness). */
+  reactions: ReactionEvent[]
+  /** Send a chat line to the room (host broadcasts; a guest routes via the host). */
+  sendChat: (text: string) => void
+  /** Send a floating emoji reaction to the room. */
+  sendReaction: (emoji: string) => void
+
   // actions
   startHost: () => Promise<void>
   /** Recompute the join link from the current device IP (call after enabling the hotspot). */
@@ -150,6 +173,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [hostName] = useState<string | null>(null)
   const [movieUri, setMovieUri] = useState<string | null>(null)
   const [playback, setPlayback] = useState<PlaybackState | null>(null)
+  const [chatLog, setChatLog] = useState<ChatEntry[]>([])
+  const [reactions, setReactions] = useState<ReactionEvent[]>([])
+  const reactionSeqRef = useRef(0) // animation keys + lane assignment for incoming reactions
+  const lastReactionSentRef = useRef(0) // client-side reaction rate limit
 
   // Mutable session handles + identity, read from listeners without stale closures.
   const roleRef = useRef<Role>('none')
@@ -208,6 +235,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     },
     [broadcastRoster],
   )
+
+  // Fold an incoming, already-validated chat line / reaction into local state. Reactions get a
+  // local sequence for animation keys + lane assignment; freshness is judged by local receipt
+  // time so cross-device clock skew can't strand or fast-expire an animation.
+  const ingestChat = useCallback((from: string, text: string, at: number) => {
+    setChatLog((log) => appendCapped(log, { from, text, at }, CHAT_LOG_CAP))
+  }, [])
+  const ingestReaction = useCallback((from: string, emoji: string) => {
+    const seq = ++reactionSeqRef.current
+    setReactions((r) => appendCapped(r, { seq, from, emoji, at: Date.now() }, REACTION_KEEP))
+  }, [])
 
   // A later client→host frame is trusted only if it proves ownership of its `id` with the grant
   // the host stored at join time. Blocks spoofing a peer's row or the reserved "host" id.
@@ -283,10 +321,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         updateParticipants((prev) =>
           prev.map((p) => (p.id === msg.id && p.status !== 'requested' ? { ...p, status: 'ready', progress: 1 } : p)),
         )
+      } else if (msg.t === 'chat') {
+        // Hub: validate ownership + content, stamp the sender's NAME and our clock, fan out.
+        if (!ownsId(msg.id, msg.grant)) return
+        const text = sanitizeChatText(typeof msg.text === 'string' ? msg.text : '')
+        if (!text) return
+        const name = participantsRef.current.find((p) => p.id === msg.id)?.name ?? 'Guest'
+        const at = Date.now()
+        RailReelHost.broadcast(JSON.stringify({ t: 'chat', from: name, text, at })).catch(() => {})
+        ingestChat(name, text, at)
+      } else if (msg.t === 'reaction') {
+        if (!ownsId(msg.id, msg.grant) || !isValidReaction(msg.emoji)) return
+        const name = participantsRef.current.find((p) => p.id === msg.id)?.name ?? 'Guest'
+        RailReelHost.broadcast(JSON.stringify({ t: 'reaction', from: name, emoji: msg.emoji, at: Date.now() })).catch(() => {})
+        ingestReaction(name, msg.emoji)
       }
     })
     return () => onMessage.remove()
-  }, [updateParticipants, ownsId])
+  }, [updateParticipants, ownsId, ingestChat, ingestReaction])
 
   // Host: a client whose heartbeats have gone quiet (left / backgrounded / crashed) must stop
   // holding the room — clear the flags that make it count (stalled, inShow). The next live beat
@@ -338,6 +390,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     resetTransfer()
     setPlayback(null)
     setFloorHeld(new Set())
+    setChatLog([])
+    setReactions([])
     try {
       const picked = await DocumentPicker.getDocumentAsync({ type: 'video/*', copyToCacheDirectory: false })
       if (picked.canceled || !picked.assets[0]) {
@@ -493,6 +547,42 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [sendBeat],
   )
 
+  // ── social (the cabin) ──────────────────────────────────────────────────────
+  // Both role-aware: the host IS the hub (stamp + broadcast + local append); a guest routes via
+  // the host and waits for the echo — the host's ordering is the only ordering.
+  const sendChat = useCallback(
+    (raw: string) => {
+      const text = sanitizeChatText(raw)
+      if (!text) return
+      if (roleRef.current === 'host') {
+        const at = Date.now()
+        RailReelHost.broadcast(JSON.stringify({ t: 'chat', from: 'Host', text, at })).catch(() => {})
+        ingestChat('You', text, at)
+      } else {
+        const c = clientRef.current
+        if (c) c.session.send({ t: 'chat', id: c.myId, grant: c.grant, text })
+      }
+    },
+    [ingestChat],
+  )
+
+  const sendReaction = useCallback(
+    (emoji: string) => {
+      if (!isValidReaction(emoji)) return
+      const now = Date.now()
+      if (now - lastReactionSentRef.current < REACTION_SEND_GAP_MS) return
+      lastReactionSentRef.current = now
+      if (roleRef.current === 'host') {
+        RailReelHost.broadcast(JSON.stringify({ t: 'reaction', from: 'Host', emoji, at: now })).catch(() => {})
+        ingestReaction('You', emoji)
+      } else {
+        const c = clientRef.current
+        if (c) c.session.send({ t: 'reaction', id: c.myId, grant: c.grant, emoji })
+      }
+    },
+    [ingestReaction],
+  )
+
   const startDownload = useCallback(async () => {
     const c = clientRef.current
     if (!c) return
@@ -637,6 +727,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             setParticipants(list)
           } else if (m.t === 'state') {
             setPlayback(m.state) // host's authoritative playback; the Player drift-corrects to it
+          } else if (m.t === 'chat') {
+            // The host's echo is the single source of ordering — we never append optimistically,
+            // so our own line arrives here too and gets relabelled.
+            if (typeof m.from === 'string' && typeof m.text === 'string' && Number.isFinite(m.at)) {
+              ingestChat(m.from === name ? 'You' : m.from, m.text.slice(0, 280), m.at)
+            }
+          } else if (m.t === 'reaction') {
+            if (typeof m.from === 'string' && isValidReaction(m.emoji)) {
+              ingestReaction(m.from === name ? 'You' : m.from, m.emoji)
+            }
           } else if (m.t === 'ended') {
             leave()
           }
@@ -649,7 +749,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (initial) session.send({ t: 'join', id: myId, name, token: payload.token, grant })
       return session
     },
-    [startDownload],
+    [startDownload, ingestChat, ingestReaction],
   )
 
   // Reconnect loop: re-handshake with exponential backoff, then resume the same session identity.
@@ -727,6 +827,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       participantsRef.current = []
       setParticipants([])
       setMovie(null)
+      setChatLog([])
+      setReactions([])
       try {
         const session = await openClient({ payload, myId, grant, name }, true)
         clientRef.current = { session, payload, grant, myId, name }
@@ -769,6 +871,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setHostPhase('idle')
     setClientPhase('idle')
     setPlayback(null)
+    setChatLog([])
+    setReactions([])
     setError(null)
     setRole('none')
     roleRef.current = 'none'
@@ -814,6 +918,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       movieUri,
       playback,
       waitingFor,
+      chatLog,
+      reactions,
+      sendChat,
+      sendReaction,
       startHost,
       refreshJoin,
       setHostPlayback,
@@ -824,7 +932,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       connect,
       leave,
     }),
-    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, movieUri, playback, waitingFor, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave],
+    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave],
   )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>

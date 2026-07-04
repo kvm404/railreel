@@ -7,6 +7,10 @@ import { Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { useNavigation } from '@/navigation/context'
 import { useSession } from '@/session/SessionProvider'
+import { ChatSheet } from '@/components/ChatSheet'
+import { ChatTicker } from '@/components/ChatTicker'
+import { FloatingReactions } from '@/components/FloatingReactions'
+import { ReactionRail } from '@/components/ReactionRail'
 import { decideCorrection, nextSeekLead, roomGate, stallReport, targetPositionSec } from '@/lib/sync/playback'
 import type { PlaybackState } from '@/lib/protocol'
 
@@ -48,6 +52,8 @@ export function PlayerScreen() {
 
   const [playing, setPlaying] = useState(false)
   const [showControls, setShowControls] = useState(true)
+  const [chatOpen, setChatOpen] = useState(false)
+  const [chatSeen, setChatSeen] = useState(0) // chatLog length when the sheet was last open
   const [pos, setPos] = useState(0)
   const [inSync, setInSync] = useState(true)
   const [ended, setEnded] = useState(false)
@@ -273,11 +279,21 @@ export function PlayerScreen() {
     return () => clearInterval(id)
   }, [isHost, player, reportPlayback])
 
+  // While the sheet is open we're caught up; the badge counts what lands after it closes.
+  useEffect(() => {
+    if (chatOpen) setChatSeen(s.chatLog.length)
+  }, [chatOpen, s.chatLog.length])
+  const unread = Math.max(0, s.chatLog.length - chatSeen)
+
   return (
     <View style={styles.fill}>
       <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowControls((v) => !v)}>
         <VideoView style={StyleSheet.absoluteFill} player={player} contentFit="contain" nativeControls={false} />
       </Pressable>
+
+      {/* the cabin: reactions drift up the right edge, fresh chat fades in like subtitles */}
+      <FloatingReactions reactions={s.reactions} />
+      {!chatOpen && <ChatTicker log={s.chatLog} />}
 
       {showControls || ended ? (
         <View style={[styles.overlay, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 24 }]} pointerEvents="box-none">
@@ -349,6 +365,17 @@ export function PlayerScreen() {
           </View>
         </View>
       ) : null}
+
+      {/* always reachable, even with controls hidden; lifts above the position readout when
+          the controls are showing */}
+      <ReactionRail
+        onReact={s.sendReaction}
+        onOpenChat={() => setChatOpen(true)}
+        unread={unread}
+        bottom={insets.bottom + (showControls || ended ? 64 : 16)}
+      />
+
+      <ChatSheet visible={chatOpen} log={s.chatLog} onSend={s.sendChat} onClose={() => setChatOpen(false)} />
     </View>
   )
 }
