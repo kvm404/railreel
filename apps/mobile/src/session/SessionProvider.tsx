@@ -472,7 +472,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     // reconnect) must NOT start a second download — two writers on the same cache file, and
     // either one's failure path deleting the file out from under the other (the player then
     // streams a ghost inode the proxy can't see).
-    if (downloadRef.current) return
+    if (downloadRef.current) {
+      return
+    }
     setClientPhase('downloading')
     const url = `http://${c.payload.host}:${c.payload.httpPort}/movie?tk=${encodeURIComponent(c.payload.token)}&g=${encodeURIComponent(c.grant)}`
     try {
