@@ -132,6 +132,12 @@ export function CreateSessionScreen() {
           </Text>
         </View>
 
+        {s.hostWarning ? (
+          <Text variant="caption" tone="amber" style={{ textAlign: 'center' }}>
+            {s.hostWarning}
+          </Text>
+        ) : null}
+
         <Button title="Open lobby" intent="amber" height={64} onPress={() => nav.navigate('Lobby')} />
       </View>
     </Screen>

@@ -46,6 +46,12 @@ export function PlayerScreen() {
   const playbackRef = useRef(playback)
   playbackRef.current = playback // always read the latest host state without re-creating `correct`
 
+  // Session torn down under us (host ended the show / left, or a reconnect gave up): don't sit on
+  // a dead player showing "paused by host" — return to Home, carrying any error the store set.
+  useEffect(() => {
+    if (s.role === 'none') nav.navigate('Home')
+  }, [s.role, nav])
+
   const player = useVideoPlayer(s.movieUri ?? null, (p) => {
     p.loop = false
   })

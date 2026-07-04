@@ -13,7 +13,6 @@ import { CreateSessionScreen } from '@/screens/CreateSessionScreen'
 import { JoinSessionScreen } from '@/screens/JoinSessionScreen'
 import { LobbyScreen } from '@/screens/LobbyScreen'
 import { PlayerScreen } from '@/screens/PlayerScreen'
-import { HostTestScreen } from '@/screens/HostTestScreen'
 import { palette } from '@/theme/tokens'
 
 // Keep the native splash up until fonts are ready (no flash of fallback type).
@@ -25,7 +24,6 @@ const routes: Routes = {
   JoinSession: JoinSessionScreen,
   Lobby: LobbyScreen,
   Player: PlayerScreen,
-  HostTest: HostTestScreen, // dev-only M1 throughput harness
 }
 
 export default function App() {

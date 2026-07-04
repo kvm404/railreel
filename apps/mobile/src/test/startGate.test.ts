@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  canJoinShow,
   decideStartGate,
   downloadBufferedAheadSec,
   secondsToFinish,
@@ -194,5 +195,29 @@ describe('smoothedMbps', () => {
 
   it('ignores windows too short to measure', () => {
     expect(smoothedMbps(8, 500_000, 100)).toBe(8)
+  })
+})
+
+describe('canJoinShow', () => {
+  // 2h movie
+  const DUR = 7200
+
+  it('lets a finished download in immediately, wherever the playhead is', () => {
+    expect(canJoinShow(1, DUR, 6000)).toBe(true)
+  })
+
+  it('lets a late joiner in once its buffer covers the playhead plus the lead', () => {
+    // 50% downloaded = 3600s cached; playhead at 3000s → 600s ahead ≥ 30s
+    expect(canJoinShow(0.5, DUR, 3000)).toBe(true)
+  })
+
+  it('holds a late joiner back when its download edge is behind the playhead', () => {
+    // 10% = 720s cached; playhead already at 700s → only 20s ahead < 30s lead
+    expect(canJoinShow(0.1, DUR, 700)).toBe(false)
+  })
+
+  it('waits for the whole file when the duration is unknown', () => {
+    expect(canJoinShow(0.9, 0, 0)).toBe(false)
+    expect(canJoinShow(1, 0, 0)).toBe(true) // finished still trumps
   })
 })

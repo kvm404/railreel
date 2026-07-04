@@ -5,7 +5,8 @@ import { FilamentRing } from '@/components/FilamentRing'
 import { Button, FlapText, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { useNavigation } from '@/navigation/context'
-import { decideStartGate, type StartGateDecision } from '@/lib/sync/startGate'
+import { canJoinShow, decideStartGate, type StartGateDecision } from '@/lib/sync/startGate'
+import { targetPositionSec } from '@/lib/sync/playback'
 import { useSession, type Participant } from '@/session/SessionProvider'
 
 /**
@@ -21,10 +22,17 @@ export function LobbyScreen() {
   const isHost = s.role === 'host'
   const title = s.movie?.title ?? 'The show'
 
-  // A guest is taken into the show the moment the host starts it.
+  // A guest enters the show once the host has started it AND its own download covers the live
+  // playhead (+lead). For the normal start (host paused at 0) that's immediate; for a LATE joiner
+  // who arrives mid-movie, it waits in the lobby until it has buffered past the current position,
+  // so it never lands on an un-downloaded frame and holds the room the moment it arrives.
+  const { playback, hostNowMs, progress } = s
+  const durationSec = s.movie?.durationSec ?? 0
   useEffect(() => {
-    if (!isHost && s.playback) nav.navigate('Player')
-  }, [isHost, s.playback, nav])
+    if (isHost || !playback) return
+    const livePos = targetPositionSec(playback, hostNowMs())
+    if (canJoinShow(progress, durationSec, livePos)) nav.navigate('Player')
+  }, [isHost, playback, hostNowMs, progress, durationSec, nav])
 
   // Relabel the host's own entry to "You" on the host device (guests see "Host"); and show the
   // client's own ring from local download progress (smoother than the roster echo).
@@ -140,7 +148,15 @@ export function LobbyScreen() {
           />
         ) : (
           <Button
-            title={s.clientPhase === 'ready' ? 'Ready — waiting for host' : s.clientPhase === 'denied' ? 'Not approved' : 'Getting ready…'}
+            title={
+              playback // the show is already running and we're not in it yet → catching up
+                ? 'Catching up to the show…'
+                : s.clientPhase === 'ready'
+                  ? 'Ready — waiting for host'
+                  : s.clientPhase === 'denied'
+                    ? 'Not approved'
+                    : 'Getting ready…'
+            }
             intent="cyan"
             height={72}
             disabled
