@@ -417,5 +417,6 @@ const styles = StyleSheet.create({
   transportBtn: { width: 52, height: 52, alignItems: 'center', justifyContent: 'center' },
   playBtn: { width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center' },
   bottomBar: { alignItems: 'center' },
-  holdRow: { alignItems: 'center', gap: 10 },
+  // Sits above the reaction rail (which floats at ~bottom+64 while controls are up).
+  holdRow: { alignItems: 'center', gap: 10, marginBottom: 96 },
 })
