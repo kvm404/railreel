@@ -25,6 +25,20 @@ declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
   broadcast(message: string): Promise<void>
   /** Stop both servers + the foreground service. */
   stop(): Promise<void>
+  /**
+   * Read media metadata from a file:// or content:// source, for the start-gate math.
+   * `fastStart` = the MP4's moov atom precedes mdat, i.e. a player can open a partial file —
+   * false means only a full pre-cache start is safe.
+   */
+  probe(fileUri: string): Promise<{ durationSec: number; fastStart: boolean }>
+  /**
+   * Client: start the localhost playback proxy over the still-downloading movie file, declaring
+   * its final size — the player streams from this instead of opening a partially-written file.
+   * Returns the bound 127.0.0.1 port.
+   */
+  startProxy(filePath: string, expectedBytes: number): Promise<number>
+  /** Stop the playback proxy (idempotent). */
+  stopProxy(): Promise<void>
   /** DEV (M1): write an N-MB test file to cache and return its file:// uri. */
   createTestFile(sizeMb: number): Promise<string>
 }
@@ -43,6 +57,9 @@ const androidOnly = (): RailReelHostModule => {
     revoke: async () => {},
     broadcast: async () => {},
     stop: async () => {},
+    probe: unavailable,
+    startProxy: unavailable,
+    stopProxy: async () => {},
     createTestFile: unavailable,
     addListener: () => ({ remove: () => {} }),
     removeAllListeners: () => {},

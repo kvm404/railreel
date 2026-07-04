@@ -26,6 +26,7 @@ class RailReelHostModule : Module() {
   private val lock = Any()
   private var server: FileServer? = null
   private var ctrl: CtrlServer? = null
+  private var proxy: ProxyServer? = null // client-side playback proxy (see ProxyServer.kt)
 
   override fun definition() = ModuleDefinition {
     Name("RailReelHost")
@@ -139,6 +140,64 @@ class RailReelHostModule : Module() {
       }
     }
 
+    // Probe the media the host picked: duration (start-gate math) and whether the MP4 is
+    // "faststart" (moov before mdat) — a player can only open a PARTIALLY-downloaded file if the
+    // moov atom is at the front, so non-faststart files must fully pre-cache before the show.
+    // Works for both file:// paths and content:// (SAF) documents.
+    AsyncFunction("probe") { fileUri: String ->
+      val ctx = appContext.reactContext ?: throw CodedException("No app context")
+      val retriever = android.media.MediaMetadataRetriever()
+      try {
+        if (fileUri.startsWith("content://")) {
+          retriever.setDataSource(ctx, Uri.parse(fileUri))
+        } else {
+          retriever.setDataSource(fileUri.removePrefix("file://"))
+        }
+        val durationMs = retriever
+          .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+          ?.toLongOrNull()
+          ?: throw CodedException("Media has no readable duration")
+        val fastStart = runCatching {
+          openMediaStream(ctx.contentResolver, fileUri).use { isFastStart(it) }
+        }.getOrNull()
+        // Undeterminable layout (odd container, read error) → treat as NOT faststart: the cost of
+        // being wrong is only a later start, never a frozen room.
+        mapOf("durationSec" to durationMs / 1000.0, "fastStart" to (fastStart ?: false))
+      } catch (e: CodedException) {
+        throw e
+      } catch (e: Exception) {
+        throw CodedException("Cannot probe media: ${e.message}")
+      } finally {
+        runCatching { retriever.release() }
+      }
+    }
+
+    // Client: start the localhost playback proxy over the still-downloading movie file.
+    // `expectedBytes` is the final size (from the host's Content-Length); crosses the bridge as a
+    // Double because the bridge has no 64-bit int, exact for sizes < 2^53. Returns the bound port.
+    AsyncFunction("startProxy") { filePath: String, expectedBytes: Double ->
+      if (expectedBytes < 1) throw CodedException("expectedBytes must be positive")
+      synchronized(lock) {
+        proxy?.let { runCatching { it.stop() } }
+        val p = ProxyServer(File(filePath.removePrefix("file://")), expectedBytes.toLong())
+        try {
+          p.start(NanoHTTPD.SOCKET_READ_TIMEOUT, true)
+        } catch (e: Exception) {
+          runCatching { p.stop() }
+          throw CodedException("Failed to start playback proxy: ${e.message}")
+        }
+        proxy = p
+        p.listeningPort
+      }
+    }
+
+    AsyncFunction("stopProxy") {
+      synchronized(lock) {
+        proxy?.let { runCatching { it.stop() } }
+        proxy = null
+      }
+    }
+
     // DEV (M1): generate an N-MB test file in cache so we can measure throughput
     // without a media picker. Replaced by real content:// sources in later milestones.
     AsyncFunction("createTestFile") { sizeMb: Int ->
@@ -152,6 +211,8 @@ class RailReelHostModule : Module() {
     OnDestroy {
       synchronized(lock) {
         appContext.reactContext?.let { teardown(it) }
+        proxy?.let { runCatching { it.stop() } }
+        proxy = null
       }
     }
   }
@@ -176,6 +237,83 @@ class RailReelHostModule : Module() {
     null
   }
 
+  /** Open a raw byte stream over the picked media, whichever URI scheme the picker returned. */
+  private fun openMediaStream(resolver: ContentResolver, fileUri: String): InputStream =
+    if (fileUri.startsWith("content://")) {
+      resolver.openInputStream(Uri.parse(fileUri)) ?: throw IOException("cannot open $fileUri")
+    } else {
+      FileInputStream(File(fileUri.removePrefix("file://")))
+    }
+
+  /**
+   * Walk the top-level MP4 boxes: `true` iff `moov` appears before `mdat` (faststart), `null` if
+   * the layout can't be determined. Decides in a handful of tiny reads — the first `mdat`/`moov`
+   * header settles it, so multi-GB payloads are never skipped over.
+   */
+  private fun isFastStart(s: InputStream): Boolean? {
+    val header = ByteArray(16)
+    var walked = 0L
+    while (walked < FASTSTART_SCAN_CAP) {
+      if (!readFully(s, header, 8)) return null
+      var size = be32(header, 0)
+      val type = String(header, 4, 4, Charsets.US_ASCII)
+      var headerLen = 8L
+      when (size) {
+        1L -> { // 64-bit largesize follows
+          if (!readFully(s, header, 8)) return null
+          size = be64(header, 0)
+          headerLen = 16L
+        }
+        0L -> size = Long.MAX_VALUE // box extends to EOF
+      }
+      when (type) {
+        "moov" -> return true
+        "mdat" -> return false
+      }
+      val skip = size - headerLen
+      if (size < headerLen || !skipFully(s, skip)) return null
+      walked += size
+    }
+    return null
+  }
+
+  private fun be32(b: ByteArray, off: Int): Long =
+    ((b[off].toLong() and 0xff) shl 24) or ((b[off + 1].toLong() and 0xff) shl 16) or
+      ((b[off + 2].toLong() and 0xff) shl 8) or (b[off + 3].toLong() and 0xff)
+
+  private fun be64(b: ByteArray, off: Int): Long {
+    var v = 0L
+    for (i in 0 until 8) v = (v shl 8) or (b[off + i].toLong() and 0xff)
+    return v
+  }
+
+  private fun readFully(s: InputStream, into: ByteArray, len: Int): Boolean {
+    var got = 0
+    while (got < len) {
+      val n = s.read(into, got, len - got)
+      if (n <= 0) return false
+      got += n
+    }
+    return true
+  }
+
+  /** skip() may short-skip (esp. content:// streams); loop, falling back to reads. */
+  private fun skipFully(s: InputStream, count: Long): Boolean {
+    var left = count
+    val sink = ByteArray(8192)
+    while (left > 0) {
+      val skipped = s.skip(left)
+      if (skipped > 0) {
+        left -= skipped
+      } else {
+        val n = s.read(sink, 0, minOf(left, sink.size.toLong()).toInt())
+        if (n <= 0) return false
+        left -= n
+      }
+    }
+    return true
+  }
+
   /** Stop the HTTP + WS servers and the foreground service. Caller holds `lock`. */
   private fun teardown(ctx: android.content.Context) {
     server?.stop()
@@ -191,6 +329,9 @@ class RailReelHostModule : Module() {
      * interval so the socket survives a missed ping. Keepalive is 10s (see syncClient.ts).
      */
     const val WS_SOCKET_READ_TIMEOUT_MS = 30_000
+
+    /** Give up the faststart box walk after this many bytes of top-level headers/skips. */
+    const val FASTSTART_SCAN_CAP = 64L * 1024 * 1024
 
     /**
      * A real grant is base64url of 16 random bytes (22 chars). Accept a small range to allow
@@ -313,16 +454,16 @@ private class FileServer(
       }
     }
 
-    return when (val r = parseRange(session.headers["range"], fileLen)) {
-      Range.Full -> newFixedLengthResponse(Response.Status.OK, MIME, media.openAt(0), fileLen).apply {
+    return when (val r = parseByteRange(session.headers["range"], fileLen)) {
+      ByteRange.Full -> newFixedLengthResponse(Response.Status.OK, MIME, media.openAt(0), fileLen).apply {
         addHeader("Accept-Ranges", "bytes")
         addHeader("ETag", etag)
       }
-      Range.Unsatisfiable -> newFixedLengthResponse(Response.Status.RANGE_NOT_SATISFIABLE, TEXT, "").apply {
+      ByteRange.Unsatisfiable -> newFixedLengthResponse(Response.Status.RANGE_NOT_SATISFIABLE, TEXT, "").apply {
         addHeader("Content-Range", "bytes */$fileLen")
         addHeader("Accept-Ranges", "bytes")
       }
-      is Range.Partial -> {
+      is ByteRange.Partial -> {
         val contentLen = r.end - r.start + 1
         newFixedLengthResponse(Response.Status.PARTIAL_CONTENT, MIME, media.openAt(r.start), contentLen).apply {
           addHeader("Accept-Ranges", "bytes")
@@ -333,39 +474,45 @@ private class FileServer(
     }
   }
 
-  private sealed interface Range {
-    data object Full : Range
-    data object Unsatisfiable : Range
-    data class Partial(val start: Long, val end: Long) : Range
-  }
-
-  /** Strict single-range parser: supports `bytes=a-b`, `bytes=a-`, suffix `bytes=-n`. */
-  private fun parseRange(header: String?, fileLen: Long): Range {
-    if (header == null || !header.startsWith("bytes=")) return Range.Full
-    val spec = header.removePrefix("bytes=").trim()
-    if (spec.contains(",")) return Range.Full // multi-range unsupported → serve full body
-    val dash = spec.indexOf('-')
-    if (dash < 0) return Range.Full
-    val startStr = spec.substring(0, dash).trim()
-    val endStr = spec.substring(dash + 1).trim()
-    if (fileLen == 0L) return Range.Unsatisfiable
-
-    if (startStr.isEmpty()) {
-      // suffix range: last N bytes
-      val n = endStr.toLongOrNull() ?: return Range.Full
-      if (n <= 0L) return Range.Unsatisfiable
-      return Range.Partial(maxOf(0L, fileLen - n), fileLen - 1)
-    }
-    val start = startStr.toLongOrNull() ?: return Range.Full
-    if (start < 0 || start >= fileLen) return Range.Unsatisfiable
-    val end = if (endStr.isEmpty()) fileLen - 1 else (endStr.toLongOrNull() ?: return Range.Full)
-    val realEnd = minOf(end, fileLen - 1)
-    if (realEnd < start) return Range.Unsatisfiable
-    return Range.Partial(start, realEnd)
-  }
-
   companion object {
     private const val MIME = "application/octet-stream"
     private const val TEXT = "text/plain"
   }
+}
+
+/** HTTP single-range parse result — shared by the host data plane and the client playback proxy. */
+internal sealed interface ByteRange {
+  data object Full : ByteRange
+  data object Unsatisfiable : ByteRange
+  data class Partial(val start: Long, val end: Long) : ByteRange
+}
+
+/**
+ * Strict single-range parser against a total length: supports `bytes=a-b`, `bytes=a-`, and suffix
+ * `bytes=-n`. Malformed specs fall back to Full (serve the whole body), per RFC 7233's
+ * ignore-invalid-Range allowance. ONE implementation — the data plane and the playback proxy must
+ * answer the identical Range request identically.
+ */
+internal fun parseByteRange(header: String?, totalLen: Long): ByteRange {
+  if (header == null || !header.startsWith("bytes=")) return ByteRange.Full
+  val spec = header.removePrefix("bytes=").trim()
+  if (spec.contains(",")) return ByteRange.Full // multi-range unsupported → serve full body
+  val dash = spec.indexOf('-')
+  if (dash < 0) return ByteRange.Full
+  val startStr = spec.substring(0, dash).trim()
+  val endStr = spec.substring(dash + 1).trim()
+  if (totalLen == 0L) return ByteRange.Unsatisfiable
+
+  if (startStr.isEmpty()) {
+    // suffix range: last N bytes
+    val n = endStr.toLongOrNull() ?: return ByteRange.Full
+    if (n <= 0L) return ByteRange.Unsatisfiable
+    return ByteRange.Partial(maxOf(0L, totalLen - n), totalLen - 1)
+  }
+  val start = startStr.toLongOrNull() ?: return ByteRange.Full
+  if (start < 0 || start >= totalLen) return ByteRange.Unsatisfiable
+  val end = if (endStr.isEmpty()) totalLen - 1 else (endStr.toLongOrNull() ?: return ByteRange.Full)
+  val realEnd = minOf(end, totalLen - 1)
+  if (realEnd < start) return ByteRange.Unsatisfiable
+  return ByteRange.Partial(start, realEnd)
 }
