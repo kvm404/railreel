@@ -38,9 +38,10 @@ export function LobbyScreen() {
 
   const startShow = () => {
     if (!isHost) return
-    // Broadcast "playing from the top" (stamped with the host clock) and open the player; guests
-    // follow into the Player via the effect above when they receive this state.
-    s.setHostPlayback(0, true, 1)
+    // Open the player for everyone PAUSED at the top — guests follow into the Player when they
+    // receive this state, and have time to load before anything plays. The host then presses Play
+    // to actually start the show in sync (so it never auto-plays while a guest is still buffering).
+    s.setHostPlayback(0, false, 1)
     nav.navigate('Player')
   }
 

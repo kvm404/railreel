@@ -103,7 +103,7 @@ export interface SessionStore {
   /** Recompute the join link from the current device IP (call after enabling the hotspot). */
   refreshJoin: () => void
   /** Host: publish a new playback state (play/pause/seek), stamped + broadcast to clients. */
-  setHostPlayback: (positionSec: number, isPlaying: boolean, rate?: number) => void
+  setHostPlayback: (positionSec: number, isPlaying: boolean, rate?: number, ended?: boolean) => void
   /** Client: report whether our player is keeping up (host pauses the room while any are stalled). */
   reportPlayback: (stalled: boolean, positionSec: number) => void
   /** Client: current host-monotonic time (for drift math); host: its own monotonic clock. */
@@ -338,12 +338,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   // Host: publish playback. Stamp it with the host's monotonic clock (the timebase clients sync
   // against) so a follower can compute where the playhead should be right now.
-  const setHostPlayback = useCallback((positionSec: number, isPlaying: boolean, rate = 1) => {
+  const setHostPlayback = useCallback((positionSec: number, isPlaying: boolean, rate = 1, ended = false) => {
     const state: PlaybackState = {
       positionSec,
       rate,
       isPlaying,
       hostMonotonicMs: RailReelHost.getMonotonicMs(),
+      ended,
     }
     setPlayback(state)
     RailReelHost.broadcast(JSON.stringify({ t: 'state', state })).catch(() => {})

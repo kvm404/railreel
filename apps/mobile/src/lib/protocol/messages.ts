@@ -20,6 +20,8 @@ export interface PlaybackState {
    * via their measured offset. Never a wall-clock value. See docs/architecture.md §5.
    */
   hostMonotonicMs: number
+  /** The movie reached its end — followers show "The End" even if they never hit EOF locally. */
+  ended?: boolean
 }
 
 /** Why playback is paused (drives the overlay copy). */
