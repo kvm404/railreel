@@ -7,6 +7,9 @@ type RailReelHostEvents = {
   onWsOpen: () => void
   onWsClose: () => void
   onWsMessage: (event: { data: string }) => void
+  /** mDNS discovery: a nearby cabin appeared (TXT mirrors the QR payload). */
+  onNsdFound: (event: { name: string; host: string; port: number; txt: Record<string, string> }) => void
+  onNsdLost: (event: { name: string }) => void
 }
 
 declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
@@ -46,6 +49,12 @@ declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
   getBatteryStatus(): { level: number; charging: boolean }
   /** Quick integrity fingerprint: sha256(head 1MB + tail 1MB + size), as "qf1:<hex>". */
   fingerprint(fileUri: string, sizeBytes: number): Promise<string>
+  /** Host: advertise the session on mDNS (_railreel._tcp); TXT mirrors the QR payload. */
+  advertise(name: string, port: number, txt: Record<string, string>): Promise<void>
+  stopAdvertise(): Promise<void>
+  /** Guest: stream nearby cabins via onNsdFound/onNsdLost. */
+  startDiscovery(): Promise<void>
+  stopDiscovery(): Promise<void>
   /** DEV (M1): write an N-MB test file to cache and return its file:// uri. */
   createTestFile(sizeMb: number): Promise<string>
 }
@@ -70,6 +79,10 @@ const androidOnly = (): RailReelHostModule => {
     canDecode: () => true,
     getBatteryStatus: () => ({ level: -1, charging: false }),
     fingerprint: unavailable,
+    advertise: async () => {},
+    stopAdvertise: async () => {},
+    startDiscovery: async () => {},
+    stopDiscovery: async () => {},
     createTestFile: unavailable,
     addListener: () => ({ remove: () => {} }),
     removeAllListeners: () => {},

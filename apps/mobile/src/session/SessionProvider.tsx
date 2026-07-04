@@ -438,6 +438,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       joinMetaRef.current = { sessionId, token, httpPort: ports.httpPort, wsPort: ports.wsPort }
       const ip = RailReelHost.getHostIpAddress()
       setHostIp(ip)
+
+      // Tap-to-join: advertise the session on mDNS. The TXT mirrors the QR payload (the host IP
+      // comes from NSD resolution itself, so hotspot IP changes never stale the advert). Anyone
+      // on the network can *request* to join — the trust model already assumes that: the host
+      // approves every person, and bytes flow only to approved grants (architecture §10).
+      RailReelHost.advertise(`RailReel-${humanCode(sessionId)}`, ports.wsPort, {
+        v: String(PROTOCOL_VERSION),
+        t: token,
+        s: sessionId,
+        h: String(ports.httpPort),
+        c: humanCode(sessionId),
+        n: cleanTitle(asset.name).slice(0, 24),
+      }).catch(() => {})
       // Only publish a link once we have a real LAN/hotspot IP — a 0.0.0.0/Wi-Fi address would
       // hand guests an unreachable host. refreshJoin() rebuilds it after the hotspot comes up.
       setJoinUrl(ip ? encodeJoinUrl(buildJoinPayload(joinMetaRef.current, ip)) : null)

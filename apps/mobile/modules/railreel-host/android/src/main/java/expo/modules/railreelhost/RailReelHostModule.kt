@@ -27,10 +27,11 @@ class RailReelHostModule : Module() {
   private var server: FileServer? = null
   private var ctrl: CtrlServer? = null
   private var proxy: ProxyServer? = null // client-side playback proxy (see ProxyServer.kt)
+  private var nsd: NsdHelper? = null // mDNS advertise (host) / discover (guest) — see NsdHelper.kt
 
   override fun definition() = ModuleDefinition {
     Name("RailReelHost")
-    Events("onWsOpen", "onWsClose", "onWsMessage")
+    Events("onWsOpen", "onWsClose", "onWsMessage", "onNsdFound", "onNsdLost")
 
     // The host's own LAN/hotspot IPv4, for the QR/join link. NanoHTTPD binds to all interfaces,
     // so we pick the address clients actually reach: prefer the hotspot/wifi interface.
@@ -242,6 +243,25 @@ class RailReelHostModule : Module() {
       "qf1:" + md.digest().joinToString("") { "%02x".format(it) }
     }
 
+    // ── mDNS tap-to-join (PRD §6) ──────────────────────────────────────────────
+    // Host: advertise this session on the local network. TXT carries what the QR carries — the
+    // deliberate trade-off is that anyone on the hotspot can *request* to join, which the trust
+    // model already assumes: the host approves every person and bytes need an approved grant.
+    AsyncFunction("advertise") { name: String, port: Int, txt: Map<String, String> ->
+      val helper = ensureNsd() ?: throw CodedException("No app context")
+      helper.advertise(name, port, txt)
+    }
+
+    AsyncFunction("stopAdvertise") { synchronized(lock) { nsd?.stopAdvertise() } }
+
+    // Guest: discover nearby cabins; results stream via onNsdFound/onNsdLost events.
+    AsyncFunction("startDiscovery") {
+      val helper = ensureNsd() ?: throw CodedException("No app context")
+      helper.startDiscovery()
+    }
+
+    AsyncFunction("stopDiscovery") { synchronized(lock) { nsd?.stopDiscovery() } }
+
     // Client: start the localhost playback proxy over the still-downloading movie file.
     // `expectedBytes` is the final size (from the host's Content-Length); crosses the bridge as a
     // Double because the bridge has no 64-bit int, exact for sizes < 2^53. Returns the bound port.
@@ -283,7 +303,20 @@ class RailReelHostModule : Module() {
         appContext.reactContext?.let { teardown(it) }
         proxy?.let { runCatching { it.stop() } }
         proxy = null
+        nsd?.teardown()
+        nsd = null
       }
+    }
+  }
+
+  /** Lazily build the NSD helper (needs a context; events hop to the JS thread here). */
+  private fun ensureNsd(): NsdHelper? = synchronized(lock) {
+    nsd ?: appContext.reactContext?.let { ctx ->
+      NsdHelper(ctx) { kind, payload ->
+        appContext.runtime.schedule {
+          sendEvent(if (kind == "found") "onNsdFound" else "onNsdLost", payload)
+        }
+      }.also { nsd = it }
     }
   }
 
@@ -396,12 +429,13 @@ class RailReelHostModule : Module() {
     return true
   }
 
-  /** Stop the HTTP + WS servers and the foreground service. Caller holds `lock`. */
+  /** Stop the HTTP + WS servers, the advert, and the foreground service. Caller holds `lock`. */
   private fun teardown(ctx: android.content.Context) {
     server?.stop()
     server = null
     ctrl?.stop()
     ctrl = null
+    nsd?.stopAdvertise()
     RailReelHostService.stop(ctx)
   }
 
