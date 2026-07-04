@@ -14,6 +14,7 @@ import {
   type ChatEntry,
   type ReactionEvent,
 } from '@/lib/social/feed'
+import { batteryWarning, decodeWarning, storageWarning } from '@/lib/media/preflight'
 import { downloadBufferedAheadSec, smoothedMbps, updateFloorHolds } from '@/lib/sync/startGate'
 import { randomBytes } from '@/net/random'
 import {
@@ -74,6 +75,8 @@ export type Participant = {
   stalled: boolean
   /** This follower's player is live in the show (buffer-floor holds apply only then). */
   inShow: boolean
+  /** False when this device's decoder can't handle the movie's frame size (lobby warns). */
+  decodeOk: boolean
   /** Wall-clock ms of the last heartbeat — a stale stall (client gone) is cleared so we don't hang. */
   lastBeatAt: number
 }
@@ -109,6 +112,10 @@ export interface SessionStore {
   hostName: string | null
   /** Client: the WS dropped and we're re-handshaking with backoff (the Player shows "Reconnecting…"). */
   reconnecting: boolean
+  /** Client: this phone's decoder can't handle the movie (lobby warning; also reported to host). */
+  decodeCaution: string | null
+  /** Host: preflight warning while hosting (battery, for now). */
+  hostWarning: string | null
 
   // playback (the show)
   /** The local movie file the player should open (host: the picked source; client: the cached copy). */
@@ -177,6 +184,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [reactions, setReactions] = useState<ReactionEvent[]>([])
   const reactionSeqRef = useRef(0) // animation keys + lane assignment for incoming reactions
   const lastReactionSentRef = useRef(0) // client-side reaction rate limit
+  const [decodeCaution, setDecodeCaution] = useState<string | null>(null)
+  const [hostWarning, setHostWarning] = useState<string | null>(null)
+  const decodeOkRef = useRef(true) // rides every heartbeat so the host's lobby can flag us
 
   // Mutable session handles + identity, read from listeners without stale closures.
   const roleRef = useRef<Role>('none')
@@ -209,6 +219,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     roleRef.current = role
   }, [role])
 
+  // Host preflight: while hosting, keep an eye on the battery — the host phone IS the session
+  // (PRD §8), so "plug in" needs saying before the movie dies with it.
+  useEffect(() => {
+    if (role !== 'host') return
+    const check = () => {
+      const b = RailReelHost.getBatteryStatus()
+      setHostWarning(batteryWarning(b.level, b.charging))
+    }
+    check()
+    const id = setInterval(check, 60_000)
+    return () => clearInterval(id)
+  }, [role])
+
   // ── host roster helpers ─────────────────────────────────────────────────────
   const broadcastRoster = useCallback((list: Participant[]) => {
     const payload: ParticipantInfo[] = list.map((p) => ({
@@ -218,6 +241,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       progress: p.progress,
       bufferedAheadSec: p.bufferedAheadSec,
       downloadMbps: p.downloadMbps,
+      decodeOk: p.decodeOk,
     }))
     // media rides along so clients can do their own buffer math (duration/size).
     const media = mediaRef.current ?? undefined
@@ -281,7 +305,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         grantsRef.current.set(msg.id, msg.grant)
         updateParticipants((prev) => {
           const without = prev.filter((p) => p.id !== msg.id)
-          return [...without, { id: msg.id, name, status: 'requested', progress: 0, downloadMbps: 0, bufferedAheadSec: 0, stalled: false, inShow: false, lastBeatAt: Date.now() }]
+          return [...without, { id: msg.id, name, status: 'requested', progress: 0, downloadMbps: 0, bufferedAheadSec: 0, stalled: false, inShow: false, decodeOk: true, lastBeatAt: Date.now() }]
         })
       } else if (msg.t === 'heartbeat') {
         if (!ownsId(msg.id, msg.grant) || !Number.isFinite(msg.progress)) return
@@ -309,6 +333,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                     bufferedAheadSec: buffered,
                     stalled: msg.stalled === true,
                     inShow: msg.inShow === true,
+                    decodeOk: msg.decodeOk !== false,
                     status: newStatus,
                     lastBeatAt: Date.now(),
                   }
@@ -426,12 +451,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const fastStart = probed.fastStart === true
       const sizeBytes = asset.size ?? 0
       const title = cleanTitle(asset.name)
+      // Quick integrity fingerprint (head+tail+size) — clients verify their copy against it after
+      // the download. Best-effort: an unprobeable source just skips verification.
+      const hash = sizeBytes > 0 ? await RailReelHost.fingerprint(asset.uri, sizeBytes).catch(() => '') : ''
       mediaRef.current = {
         title,
         sizeBytes,
         durationSec,
         bitrateMbps: durationSec > 0 ? (sizeBytes * 8) / durationSec / 1e6 : 0,
-        hash: '', // integrity metadata lands with the media-probe milestone
+        hash,
         format: '',
         fastStart,
         width: probed.width || 0,
@@ -443,7 +471,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // Seed the roster with the host (it already has the file).
       grantsRef.current.clear()
       // Named "Host" so guests see "Host"; the host's own lobby relabels this entry to "You".
-      updateParticipants(() => [{ id: 'host', name: 'Host', status: 'ready', progress: 1, downloadMbps: 0, bufferedAheadSec: Infinity, stalled: false, inShow: false, lastBeatAt: Date.now() }], false)
+      updateParticipants(() => [{ id: 'host', name: 'Host', status: 'ready', progress: 1, downloadMbps: 0, bufferedAheadSec: Infinity, stalled: false, inShow: false, decodeOk: true, lastBeatAt: Date.now() }], false)
 
       setRole('host')
       roleRef.current = 'host'
@@ -529,6 +557,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       progress: progressRef.current,
       stalled: stalledRef.current,
       inShow: inShowRef.current,
+      decodeOk: decodeOkRef.current,
       downloadMbps: mbpsRef.current,
       bufferedAheadSec: downloadBufferedAheadSec(progressRef.current, durationSec, positionRef.current),
       positionSec: positionRef.current,
@@ -604,6 +633,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // never after another attempt may have started (deleting a file mid-write detaches the
       // writer onto a deleted inode while the proxy reads the path).
       await LegacyFS.deleteAsync(MOVIE_CACHE, { idempotent: true }).catch(() => {})
+
+      // Storage preflight (PRD §8: surface the 1–4 GB requirement up front, not at 97%).
+      const freeBytes = await LegacyFS.getFreeDiskStorageAsync().catch(() => -1)
+      const storageMsg = storageWarning(freeBytes, mediaRef.current?.sizeBytes ?? 0)
+      if (storageMsg) {
+        setError(storageMsg)
+        setClientPhase('approved') // freeing space + a re-approval retries
+        return
+      }
       const dl = LegacyFS.createDownloadResumable(url, MOVIE_CACHE, {}, (p) => {
         if (stale()) return // a newer session owns the telemetry refs now
         const total = p.totalBytesExpectedToWrite
@@ -657,6 +695,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         await LegacyFS.deleteAsync(MOVIE_CACHE, { idempotent: true }).catch(() => {})
         throw new Error(`download failed (HTTP ${res?.status ?? '?'})`)
       }
+      // Integrity: our copy must match the host's fingerprint — but only pre-show. During a
+      // progressive show the proxy is actively serving this file (deleting it would kill the
+      // playback that's demonstrably working); a truly wrong file would never have decoded.
+      const expected = mediaRef.current?.hash ?? ''
+      const expectedSize = mediaRef.current?.sizeBytes ?? 0
+      if (!inShowRef.current && expected.startsWith('qf1:') && expectedSize > 0) {
+        const local = await RailReelHost.fingerprint(MOVIE_CACHE, expectedSize).catch(() => '')
+        if (local !== expected) {
+          await LegacyFS.deleteAsync(MOVIE_CACHE, { idempotent: true }).catch(() => {})
+          throw new Error('The downloaded copy failed its integrity check — try approving again.')
+        }
+      }
       progressRef.current = 1
       setProgress(1)
       // If the proxy is serving the show (or about to — its .then/.catch sets the source), leave
@@ -709,6 +759,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 durationSec: m.media.durationSec,
                 fastStart: m.media.fastStart === true,
               })
+              // Decode preflight: can THIS phone's hardware handle the movie's frame size?
+              // (PRD accepts H.264 only, so video/avc.) Warn here, and flag the host via beats.
+              const w = m.media.width ?? 0
+              const h = m.media.height ?? 0
+              const ok = w > 0 && h > 0 ? RailReelHost.canDecode('video/avc', w, h) : true
+              decodeOkRef.current = ok
+              setDecodeCaution(decodeWarning(ok, h))
             }
             const list: Participant[] = m.participants
               .filter(isParticipantInfo)
@@ -721,6 +778,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 bufferedAheadSec: Number.isFinite(q.bufferedAheadSec) ? q.bufferedAheadSec : 0,
                 stalled: false, // roster is a lobby-phase view; stall is host-tracked during playback
                 inShow: false,
+                decodeOk: q.decodeOk !== false,
                 lastBeatAt: Date.now(),
               }))
             participantsRef.current = list
@@ -829,6 +887,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setMovie(null)
       setChatLog([])
       setReactions([])
+      setDecodeCaution(null)
+      decodeOkRef.current = true
       try {
         const session = await openClient({ payload, myId, grant, name }, true)
         clientRef.current = { session, payload, grant, myId, name }
@@ -873,6 +933,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setPlayback(null)
     setChatLog([])
     setReactions([])
+    setDecodeCaution(null)
+    decodeOkRef.current = true
+    setHostWarning(null)
     setError(null)
     setRole('none')
     roleRef.current = 'none'
@@ -915,6 +978,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       progress,
       hostName,
       reconnecting,
+      decodeCaution,
+      hostWarning,
       movieUri,
       playback,
       waitingFor,
@@ -932,7 +997,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       connect,
       leave,
     }),
-    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave],
+    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave],
   )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>

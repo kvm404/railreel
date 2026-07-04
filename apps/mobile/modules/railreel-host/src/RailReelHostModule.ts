@@ -40,6 +40,12 @@ declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
   startProxy(filePath: string, expectedBytes: number): Promise<number>
   /** Stop the playback proxy (idempotent). */
   stopProxy(): Promise<void>
+  /** Can this device's decoder handle the frame size? (Unknown size → true; never blocks on a diagnostic.) */
+  canDecode(mime: string, width: number, height: number): boolean
+  /** Battery preflight for the hosting phone. level is 0..1, or -1 when unknown. */
+  getBatteryStatus(): { level: number; charging: boolean }
+  /** Quick integrity fingerprint: sha256(head 1MB + tail 1MB + size), as "qf1:<hex>". */
+  fingerprint(fileUri: string, sizeBytes: number): Promise<string>
   /** DEV (M1): write an N-MB test file to cache and return its file:// uri. */
   createTestFile(sizeMb: number): Promise<string>
 }
@@ -61,6 +67,9 @@ const androidOnly = (): RailReelHostModule => {
     probe: unavailable,
     startProxy: unavailable,
     stopProxy: async () => {},
+    canDecode: () => true,
+    getBatteryStatus: () => ({ level: -1, charging: false }),
+    fingerprint: unavailable,
     createTestFile: unavailable,
     addListener: () => ({ remove: () => {} }),
     removeAllListeners: () => {},
