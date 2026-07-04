@@ -63,8 +63,16 @@ export function LobbyScreen() {
     nav.navigate('Player')
   }
 
+  // Backing out of the lobby is LEAVING the session — the host ends it for everyone (it is the
+  // session's lifeline), a guest disconnects cleanly. Without this, a zombie download/socket
+  // survives into the next session and poisons its start-gate math.
+  const exitSession = () => {
+    s.leave()
+    nav.navigate('Home')
+  }
+
   return (
-    <Screen title="LOBBY" scroll>
+    <Screen title="LOBBY" scroll onBack={exitSession}>
       <View style={styles.body}>
         <View style={styles.head}>
           <Text variant="title" numberOfLines={1}>

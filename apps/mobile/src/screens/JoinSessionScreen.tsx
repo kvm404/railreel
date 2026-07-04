@@ -34,6 +34,13 @@ export function JoinSessionScreen() {
     s.connect(data, name.trim())
   }
 
+  // Backing out mid-connect abandons the attempt cleanly (closes the socket, stops any transfer)
+  // so a half-joined session can't linger into the next one.
+  const exitJoin = () => {
+    if (s.role === 'client' || s.clientPhase !== 'idle') s.leave()
+    nav.goBack()
+  }
+
   const inputStyle = [
     styles.input,
     { color: t.palette.textPrimary, borderColor: t.palette.hairline, backgroundColor: t.palette.raised, fontFamily: t.fonts.monoRegular },
@@ -41,7 +48,7 @@ export function JoinSessionScreen() {
 
   return (
     <>
-      <Screen title="JOIN" scroll>
+      <Screen title="JOIN" scroll onBack={exitJoin}>
         <View style={styles.body}>
         <View style={styles.field}>
           <Text variant="eyebrow" tone="tertiary">

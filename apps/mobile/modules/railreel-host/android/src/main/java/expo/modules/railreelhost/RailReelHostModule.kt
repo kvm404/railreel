@@ -157,12 +157,25 @@ class RailReelHostModule : Module() {
           .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
           ?.toLongOrNull()
           ?: throw CodedException("Media has no readable duration")
+        // Resolution feeds the (future) client decode-capability check — a 4K file plays as a
+        // slideshow on phones whose hardware decoder tops out at 1080p.
+        val width = retriever
+          .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+          ?.toIntOrNull() ?: 0
+        val height = retriever
+          .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+          ?.toIntOrNull() ?: 0
         val fastStart = runCatching {
           openMediaStream(ctx.contentResolver, fileUri).use { isFastStart(it) }
         }.getOrNull()
         // Undeterminable layout (odd container, read error) → treat as NOT faststart: the cost of
         // being wrong is only a later start, never a frozen room.
-        mapOf("durationSec" to durationMs / 1000.0, "fastStart" to (fastStart ?: false))
+        mapOf(
+          "durationSec" to durationMs / 1000.0,
+          "fastStart" to (fastStart ?: false),
+          "width" to width,
+          "height" to height,
+        )
       } catch (e: CodedException) {
         throw e
       } catch (e: Exception) {

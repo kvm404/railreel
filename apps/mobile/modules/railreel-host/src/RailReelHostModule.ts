@@ -28,9 +28,10 @@ declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
   /**
    * Read media metadata from a file:// or content:// source, for the start-gate math.
    * `fastStart` = the MP4's moov atom precedes mdat, i.e. a player can open a partial file —
-   * false means only a full pre-cache start is safe.
+   * false means only a full pre-cache start is safe. `width`/`height` are 0 when unknown and
+   * feed the (future) client decode-capability check.
    */
-  probe(fileUri: string): Promise<{ durationSec: number; fastStart: boolean }>
+  probe(fileUri: string): Promise<{ durationSec: number; fastStart: boolean; width: number; height: number }>
   /**
    * Client: start the localhost playback proxy over the still-downloading movie file, declaring
    * its final size — the player streams from this instead of opening a partially-written file.

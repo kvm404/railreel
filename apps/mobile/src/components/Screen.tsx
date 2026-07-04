@@ -15,12 +15,15 @@ export function Screen({
   children,
   showBack = true,
   scroll = false,
+  onBack,
 }: {
   title?: string
   children: ReactNode
   showBack?: boolean
   /** Wrap the body in a ScrollView so tall content stays reachable on small screens / large fonts. */
   scroll?: boolean
+  /** Override the back action (e.g. leave a live session before navigating). Default: goBack. */
+  onBack?: () => void
 }) {
   const t = useTheme()
   const insets = useSafeAreaInsets()
@@ -32,7 +35,7 @@ export function Screen({
         <View style={styles.header}>
           {showBack && nav.canGoBack ? (
             <Pressable
-              onPress={nav.goBack}
+              onPress={onBack ?? nav.goBack}
               hitSlop={12}
               accessibilityRole="button"
               accessibilityLabel="Go back"
