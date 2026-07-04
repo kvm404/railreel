@@ -1,17 +1,23 @@
 import { useEffect, useState } from 'react'
-import { StyleSheet, TextInput, View } from 'react-native'
-import { QrCode } from 'lucide-react-native'
+import { Pressable, StyleSheet, TextInput, View } from 'react-native'
+import { QrCode, TrainFront } from 'lucide-react-native'
+import RailReelHost from '../../modules/railreel-host'
 import { Screen } from '@/components/Screen'
 import { QrScanner } from '@/components/QrScanner'
 import { Button, Text } from '@/ui'
 import { useNavigation } from '@/navigation/context'
 import { useTheme } from '@/theme/ThemeProvider'
 import { useSession } from '@/session/SessionProvider'
+import { encodeJoinUrl, PROTOCOL_VERSION } from '@/lib/protocol'
 
 /**
- * Join a session. Primary path is scanning the host's QR; pasting the railreel:// link is the
- * fallback. mDNS auto-discovery lands later in M6. See docs/design-language.md.
+ * Join a session. Primary path: nearby cabins appear automatically (mDNS) — tap the one whose
+ * code matches the host's flap board. QR scan and the pasted railreel:// link stay as robust
+ * fallbacks (some networks block mDNS). See docs/design-language.md.
  */
+
+/** A discovered session, ready to join with one tap. */
+type Cabin = { name: string; title: string; code: string; link: string }
 
 export function JoinSessionScreen() {
   const t = useTheme()
@@ -20,6 +26,36 @@ export function JoinSessionScreen() {
   const [name, setName] = useState('')
   const [link, setLink] = useState('')
   const [scanning, setScanning] = useState(false)
+  const [cabins, setCabins] = useState<Cabin[]>([])
+
+  // Discover nearby cabins while this screen is open. The advert's TXT mirrors the QR payload;
+  // the host address comes from the mDNS resolution itself.
+  useEffect(() => {
+    const found = RailReelHost.addListener('onNsdFound', (e) => {
+      const txt = e.txt ?? {}
+      const httpPort = Number(txt.h)
+      if (!txt.t || !txt.s || !Number.isFinite(httpPort)) return
+      const joinLink = encodeJoinUrl({
+        v: Number(txt.v) || PROTOCOL_VERSION,
+        host: e.host,
+        wsPort: e.port,
+        httpPort,
+        sessionId: txt.s,
+        token: txt.t,
+      })
+      setCabins((prev) => [
+        ...prev.filter((c) => c.name !== e.name),
+        { name: e.name, title: txt.n || 'A nearby cabin', code: txt.c ?? '', link: joinLink },
+      ])
+    })
+    const lost = RailReelHost.addListener('onNsdLost', (e) => setCabins((prev) => prev.filter((c) => c.name !== e.name)))
+    RailReelHost.startDiscovery().catch(() => {})
+    return () => {
+      found.remove()
+      lost.remove()
+      RailReelHost.stopDiscovery().catch(() => {})
+    }
+  }, [])
 
   // Once the store has us connected as a client, move into the lobby.
   useEffect(() => {
@@ -63,6 +99,40 @@ export function JoinSessionScreen() {
             style={inputStyle}
           />
         </View>
+
+        {cabins.length > 0 ? (
+          <View style={styles.field}>
+            <Text variant="eyebrow" tone="tertiary">
+              NEARBY CABINS
+            </Text>
+            {cabins.map((c) => (
+              <Pressable
+                key={c.name}
+                disabled={!hasName || connecting}
+                onPress={() => s.connect(c.link, name.trim())}
+                style={({ pressed }) => [
+                  styles.cabin,
+                  { borderColor: t.palette.hairline, backgroundColor: t.palette.raised },
+                  pressed && { transform: [{ scale: 0.98 }] },
+                  !hasName && { opacity: 0.5 },
+                ]}
+              >
+                <TrainFront size={20} color={t.palette.cyan} strokeWidth={2} />
+                <View style={{ flex: 1 }}>
+                  <Text variant="cardTitle" numberOfLines={1}>
+                    {c.title}
+                  </Text>
+                  <Text variant="caption" tone="tertiary">
+                    {hasName ? 'Tap to join' : 'Enter your name first'}
+                  </Text>
+                </View>
+                <Text variant="data" tone="amber">
+                  {c.code}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
 
         <Button
           title="Scan QR code"
@@ -117,6 +187,14 @@ export function JoinSessionScreen() {
 const styles = StyleSheet.create({
   body: { flex: 1, gap: 16, paddingTop: 8 },
   field: { gap: 8 },
+  cabin: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderRadius: 14,
+  },
   input: { borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15 },
   orRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 4 },
   rule: { flex: 1, height: 1 },
