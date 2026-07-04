@@ -65,6 +65,8 @@ export type ClientMsg =
       stalled?: boolean
       /** This follower's player is live in the show — only then may it hold the room (buffer floor). */
       inShow?: boolean
+      /** False when this device's decoder can't handle the movie's frame size (lobby warns). */
+      decodeOk?: boolean
       bufferedAheadSec: number
       downloadMbps: number
       positionSec: number

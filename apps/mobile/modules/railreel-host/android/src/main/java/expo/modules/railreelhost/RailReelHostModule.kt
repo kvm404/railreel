@@ -185,6 +185,63 @@ class RailReelHostModule : Module() {
       }
     }
 
+    // Can THIS device's hardware decoder handle a frame size? (PRD: H.264 only, so callers pass
+    // video/avc.) A 4K file on a 1080p-max decoder falls back to software = slideshow — the lobby
+    // warns before the show instead of the phone stuttering during it. Unknown size (0) → true.
+    Function("canDecode") { mime: String, width: Int, height: Int ->
+      if (width <= 0 || height <= 0) true
+      else try {
+        val codecs = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+        codecs.codecInfos.any { info ->
+          !info.isEncoder &&
+            info.supportedTypes.any { it.equals(mime, ignoreCase = true) } &&
+            runCatching {
+              info.getCapabilitiesForType(mime).videoCapabilities?.isSizeSupported(width, height) == true
+            }.getOrDefault(false)
+        }
+      } catch (e: Exception) {
+        true // capability query failed — don't block playback on a diagnostic
+      }
+    }
+
+    // Host preflight: battery level (0..1) + charging, read from the sticky battery intent.
+    Function("getBatteryStatus") {
+      val ctx = appContext.reactContext ?: return@Function mapOf("level" to -1.0, "charging" to false)
+      val intent = ctx.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+      val level = intent?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1
+      val scale = intent?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1) ?: -1
+      val status = intent?.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) ?: -1
+      val charging = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING ||
+        status == android.os.BatteryManager.BATTERY_STATUS_FULL
+      mapOf(
+        "level" to if (level >= 0 && scale > 0) level.toDouble() / scale else -1.0,
+        "charging" to charging,
+      )
+    }
+
+    // Quick integrity fingerprint: sha256 over (head 1MB + tail 1MB + size). Not a full-file hash
+    // (2+ GB would take ~a minute on a phone) but catches the real failure modes: wrong file,
+    // truncation, corrupted tail. Same function runs host-side (stamped into MediaInfo.hash) and
+    // client-side (verified after the download completes).
+    AsyncFunction("fingerprint") { fileUri: String, sizeBytes: Double ->
+      val ctx = appContext.reactContext ?: throw CodedException("No app context")
+      val size = sizeBytes.toLong()
+      if (size <= 0) throw CodedException("fingerprint needs the real size")
+      val md = java.security.MessageDigest.getInstance("SHA-256")
+      val chunk = FP_CHUNK_BYTES
+      openMediaStream(ctx.contentResolver, fileUri).use { s ->
+        if (size <= 2L * chunk) {
+          digestFully(md, s, size)
+        } else {
+          digestFully(md, s, chunk)
+          if (!skipFully(s, size - 2L * chunk)) throw CodedException("fingerprint: short read")
+          digestFully(md, s, chunk)
+        }
+      }
+      md.update(size.toString().toByteArray())
+      "qf1:" + md.digest().joinToString("") { "%02x".format(it) }
+    }
+
     // Client: start the localhost playback proxy over the still-downloading movie file.
     // `expectedBytes` is the final size (from the host's Content-Length); crosses the bridge as a
     // Double because the bridge has no 64-bit int, exact for sizes < 2^53. Returns the bound port.
@@ -310,6 +367,18 @@ class RailReelHostModule : Module() {
     return true
   }
 
+  /** Feed exactly [count] bytes from the stream into the digest. */
+  private fun digestFully(md: java.security.MessageDigest, s: InputStream, count: Long) {
+    val buf = ByteArray(64 * 1024)
+    var left = count
+    while (left > 0) {
+      val n = s.read(buf, 0, minOf(left, buf.size.toLong()).toInt())
+      if (n <= 0) throw CodedException("fingerprint: unexpected EOF")
+      md.update(buf, 0, n)
+      left -= n
+    }
+  }
+
   /** skip() may short-skip (esp. content:// streams); loop, falling back to reads. */
   private fun skipFully(s: InputStream, count: Long): Boolean {
     var left = count
@@ -345,6 +414,9 @@ class RailReelHostModule : Module() {
 
     /** Give up the faststart box walk after this many bytes of top-level headers/skips. */
     const val FASTSTART_SCAN_CAP = 64L * 1024 * 1024
+
+    /** Bytes hashed from each end of the file for the quick integrity fingerprint. */
+    const val FP_CHUNK_BYTES = 1L * 1024 * 1024
 
     /**
      * A real grant is base64url of 16 random bytes (22 chars). Accept a small range to allow

@@ -98,6 +98,11 @@ export function LobbyScreen() {
                 <Text variant="data" tone="tertiary">
                   {statusLabel(p)}
                 </Text>
+                {p.decodeOk === false ? (
+                  <Text variant="data" tone="amber" style={{ marginTop: 2 }}>
+                    ⚠ may lag — decoder
+                  </Text>
+                ) : null}
                 {isHost && requested ? (
                   <View style={styles.approveRow}>
                     <Button title="Approve" intent="amber" height={40} onPress={() => s.approve(p.id)} />
@@ -110,6 +115,13 @@ export function LobbyScreen() {
         </View>
 
         <View style={{ flex: 1 }} />
+
+        {/* preflight cautions: honest, in-world, above the fold of the main action */}
+        {(isHost ? s.hostWarning : (s.decodeCaution ?? s.error)) ? (
+          <Text variant="caption" tone="amber" style={{ textAlign: 'center', marginBottom: 10 }}>
+            {isHost ? s.hostWarning : (s.decodeCaution ?? s.error)}
+          </Text>
+        ) : null}
 
         {isHost ? (
           <Button

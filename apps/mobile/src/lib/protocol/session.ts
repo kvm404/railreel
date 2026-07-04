@@ -65,6 +65,8 @@ export interface ParticipantInfo {
   bufferedAheadSec: number
   /** Last measured download throughput (Mbps) under real conditions. */
   downloadMbps: number
+  /** False when this client's decoder can't handle the movie's frame size. */
+  decodeOk?: boolean
 }
 
 export const PROTOCOL_VERSION = 1
