@@ -19,7 +19,6 @@ import type { PlaybackState } from '@/lib/protocol'
 const SKIP_SEC = 10
 const CORRECT_MS = 500 // client drift-check cadence
 const HOST_BEAT_MS = 2000 // host re-stamps state so followers stay fresh
-const CONTROLS_HIDE_MS = 3500
 const SEEK_SETTLE_MS = 2500 // after a corrective seek, leave the player alone to actually land + buffer
 const IN_SYNC_SEC = 0.5 // |drift| under this shows the "in sync" badge
 
@@ -54,24 +53,16 @@ export function PlayerScreen() {
   const [ended, setEnded] = useState(false)
   const lastSeekAtRef = useRef(0) // client: when we last issued a corrective seek (settle window)
   const appliedRateRef = useRef(1) // client: the playbackRate we last set (avoid redundant churn)
-  const hideRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const posRef = useRef(0) // last known playhead; read at unmount when the player may be released
   const autoPausedRef = useRef(false) // host: the room-hold paused us (vs. a manual pause)
   const overrideRef = useRef(false) // host: chose to play through a hold; don't auto-pause again
   const notReadySinceRef = useRef<number | null>(null) // client: when our player first went not-ready
 
+  // Controls never auto-hide (a vanishing play button reads as broken and eats taps) — the
+  // viewer hides/shows them deliberately by tapping the video.
   const revealControls = useCallback(() => {
     setShowControls(true)
-    if (hideRef.current) clearTimeout(hideRef.current)
-    hideRef.current = setTimeout(() => setShowControls(false), CONTROLS_HIDE_MS)
   }, [])
-
-  useEffect(() => {
-    revealControls()
-    return () => {
-      if (hideRef.current) clearTimeout(hideRef.current)
-    }
-  }, [revealControls])
 
   // Lightweight position readout for the overlay (also mirrored to a ref for the exit handler).
   useEffect(() => {
@@ -259,7 +250,7 @@ export function PlayerScreen() {
 
   return (
     <View style={styles.fill}>
-      <Pressable style={StyleSheet.absoluteFill} onPress={revealControls}>
+      <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowControls((v) => !v)}>
         <VideoView style={StyleSheet.absoluteFill} player={player} contentFit="contain" nativeControls={false} />
       </Pressable>
 
