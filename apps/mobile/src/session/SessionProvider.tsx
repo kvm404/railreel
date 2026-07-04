@@ -6,6 +6,7 @@ import * as LegacyFS from 'expo-file-system/legacy'
 
 import RailReelHost from '../../modules/railreel-host'
 import { openSyncSession, type SyncSession } from '@/net/syncClient'
+import { reconnectDelayMs } from '@/lib/net/backoff'
 import { randomBytes } from '@/net/random'
 import {
   decodeJoinUrl,
@@ -39,6 +40,9 @@ const MOVIE_CACHE = `${LegacyFS.cacheDirectory}railreel-movie.bin`
 /** A stalled follower that hasn't sent a heartbeat in this long is treated as gone — clear its
  *  stall so it can't hang the room (followers beat every ~500ms during playback). */
 const STALE_BEAT_MS = 4000
+/** Give up reconnecting (and tear down) after this many failed attempts. */
+const MAX_RECONNECT_ATTEMPTS = 8
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 export type Role = 'none' | 'host' | 'client'
 
@@ -83,6 +87,8 @@ export interface SessionStore {
   clientPhase: ClientPhase
   progress: number // this client's own download fraction
   hostName: string | null
+  /** Client: the WS dropped and we're re-handshaking with backoff (the Player shows "Reconnecting…"). */
+  reconnecting: boolean
 
   // playback (the show)
   /** The local movie file the player should open (host: the picked source; client: the cached copy). */
@@ -132,6 +138,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const [clientPhase, setClientPhase] = useState<ClientPhase>('idle')
   const [progress, setProgress] = useState(0)
+  const [reconnecting, setReconnecting] = useState(false)
   // Reserved for M6 when the join link carries the host's name; null in M5.
   const [hostName] = useState<string | null>(null)
   const [movieUri, setMovieUri] = useState<string | null>(null)
@@ -142,8 +149,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const hostTokenRef = useRef<string | null>(null)
   const grantsRef = useRef<GrantMap>(new Map())
   const participantsRef = useRef<Participant[]>([])
-  const clientRef = useRef<{ session: SyncSession; payload: JoinPayload; grant: string; myId: string } | null>(null)
+  const clientRef = useRef<{ session: SyncSession; payload: JoinPayload; grant: string; myId: string; name: string } | null>(null)
   const lastBeatRef = useRef(0)
+  const leavingRef = useRef(false) // a deliberate leave() is in progress — don't try to reconnect
+  const reconnectingRef = useRef(false) // a reconnect loop is already running
+  const reconnectRef = useRef<() => void>(() => {})
+  const approvedRef = useRef(false) // host has approved us — a reconnect must NOT re-join (that would reset us to 'requested')
+  const epochRef = useRef(0) // bumps on every connect()/leave() so an in-flight reconnect loop can detect it's stale and bail
   // Enough to rebuild the join link if the reachable IP changes (e.g. after the hotspot comes up).
   const joinMetaRef = useRef<{ sessionId: string; token: string; httpPort: number; wsPort: number } | null>(null)
   const downloadRef = useRef<LegacyFS.DownloadResumable | null>(null)
@@ -415,14 +427,117 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setProgress(1)
       setMovieUri(MOVIE_CACHE) // the cached copy is what the player will open
       setClientPhase('ready')
+      // Send over the LIVE session: a reconnect during download swaps clientRef's socket, so the
+      // captured `c.session` may be the old, closed one. (sendBeat already reads clientRef fresh.)
       sendBeat(1, 0)
-      c.session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: 0 })
+      ;(clientRef.current ?? c).session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: 0 })
     } catch (e) {
       downloadRef.current = null
       setError(String(e))
       setClientPhase('approved') // allow a retry
     }
   }, [sendBeat])
+
+  // Open a client WS session (clock handshake + handlers). On the FIRST connect we send `join`;
+  // on a reconnect we don't — the host still has our approved grant and our cached file, so we just
+  // resume the same `id` (a fresh join would reset us to "requested" and force re-approval).
+  type ClientParams = { payload: JoinPayload; myId: string; grant: string; name: string }
+  const openClient = useCallback(
+    async (p: ClientParams, initial: boolean): Promise<SyncSession> => {
+      const { payload, myId, grant, name } = p
+      const session = await openSyncSession(
+        payload.host,
+        payload.wsPort,
+        payload.token,
+        (raw) => {
+          const r = parseServerMsg(JSON.stringify(raw))
+          if (!r.ok) return
+          const m = r.msg
+          if (m.t === 'requestDecision' && m.id === myId) {
+            if (m.approved) {
+              approvedRef.current = true // from now on, reconnects resume silently (no re-join)
+              setClientPhase('approved')
+              startDownload()
+            } else {
+              setClientPhase('denied')
+            }
+          } else if (m.t === 'roster' && Array.isArray(m.participants)) {
+            const list: Participant[] = m.participants
+              .filter(isParticipantInfo)
+              .map((q) => ({
+                id: q.id,
+                name: q.id === myId ? 'You' : q.name,
+                status: q.status,
+                progress: clamp01(q.progress),
+                downloadMbps: Number.isFinite(q.downloadMbps) ? q.downloadMbps : 0,
+                stalled: false, // roster is a lobby-phase view; stall is host-tracked during playback
+                lastBeatAt: Date.now(),
+              }))
+            participantsRef.current = list
+            setParticipants(list)
+          } else if (m.t === 'state') {
+            setPlayback(m.state) // host's authoritative playback; the Player drift-corrects to it
+          } else if (m.t === 'ended') {
+            leave()
+          }
+        },
+        // Socket dropped after we were live: kick off a reconnect (unless we're deliberately leaving).
+        () => {
+          if (!leavingRef.current && roleRef.current === 'client') reconnectRef.current()
+        },
+      )
+      if (initial) session.send({ t: 'join', id: myId, name, token: payload.token, grant })
+      return session
+    },
+    [startDownload],
+  )
+
+  // Reconnect loop: re-handshake with exponential backoff, then resume the same session identity.
+  // Gives up (and tears down) after MAX_RECONNECT_ATTEMPTS so the UI can't hang forever.
+  const reconnect = useCallback(async () => {
+    const c = clientRef.current
+    if (!c || reconnectingRef.current || leavingRef.current) return
+    const myEpoch = epochRef.current // a leave()/new connect() bumps this → this loop is stale, abort
+    const stale = (): boolean => leavingRef.current || epochRef.current !== myEpoch
+    // Re-join only if the host hasn't approved us yet (e.g. it approved during the outage and we
+    // missed the decision); an approved client resumes silently so it isn't reset to 'requested'.
+    const rejoin = !approvedRef.current
+    reconnectingRef.current = true
+    setReconnecting(true)
+    for (let attempt = 0; attempt < MAX_RECONNECT_ATTEMPTS; attempt++) {
+      await sleep(reconnectDelayMs(attempt))
+      if (stale()) {
+        reconnectingRef.current = false
+        setReconnecting(false)
+        return
+      }
+      try {
+        const session = await openClient({ payload: c.payload, myId: c.myId, grant: c.grant, name: c.name }, rejoin)
+        if (stale()) {
+          session.close() // we were torn down / re-connected while handshaking — drop this socket
+          reconnectingRef.current = false
+          setReconnecting(false)
+          return
+        }
+        clientRef.current = { ...c, session }
+        reconnectingRef.current = false
+        setReconnecting(false)
+        return
+      } catch {
+        // keep retrying until the attempt budget runs out
+      }
+    }
+    reconnectingRef.current = false
+    setReconnecting(false)
+    if (!stale()) {
+      leave() // tear down first — leave() clears error, so surface ours afterwards
+      setError('Lost connection to the host')
+    }
+  }, [openClient])
+
+  useEffect(() => {
+    reconnectRef.current = reconnect
+  }, [reconnect])
 
   const connect = useCallback(
     async (joinLink: string, name: string) => {
@@ -438,68 +553,30 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }
       const myId = generateSessionId(randomBytes)
       const grant = generateGrant(randomBytes)
+      leavingRef.current = false
+      approvedRef.current = false
+      epochRef.current++ // a fresh session — invalidate any reconnect loop left over from a prior one
       try {
-        const onClose = () => {
-          // The socket dropped after we were live (host stopped / WiFi loss). Tear down so the UI
-          // doesn't sit on a dead session. (Reconnection is M6.)
-          if (roleRef.current === 'client') {
-            setError('Disconnected from host')
-            leave()
-          }
-        }
-        const session = await openSyncSession(
-          payload.host,
-          payload.wsPort,
-          payload.token,
-          (raw) => {
-            const r = parseServerMsg(JSON.stringify(raw))
-            if (!r.ok) return
-            const m = r.msg
-            if (m.t === 'requestDecision' && m.id === myId) {
-              if (m.approved) {
-                setClientPhase('approved')
-                startDownload()
-              } else {
-                setClientPhase('denied')
-              }
-            } else if (m.t === 'roster' && Array.isArray(m.participants)) {
-              const list: Participant[] = m.participants
-                .filter(isParticipantInfo)
-                .map((p) => ({
-                  id: p.id,
-                  name: p.id === myId ? 'You' : p.name,
-                  status: p.status,
-                  progress: clamp01(p.progress),
-                  downloadMbps: Number.isFinite(p.downloadMbps) ? p.downloadMbps : 0,
-                  stalled: false, // roster is a lobby-phase view; stall is host-tracked during playback
-                  lastBeatAt: Date.now(),
-                }))
-              participantsRef.current = list
-              setParticipants(list)
-            } else if (m.t === 'state') {
-              setPlayback(m.state) // host's authoritative playback; the Player drift-corrects to it
-            } else if (m.t === 'ended') {
-              leave()
-            }
-          },
-          onClose,
-        )
-        clientRef.current = { session, payload, grant, myId }
-        // hostName stays null in M5 — the join link doesn't carry the host's name yet (M6).
+        const session = await openClient({ payload, myId, grant, name }, true)
+        clientRef.current = { session, payload, grant, myId, name }
+        // hostName stays null — the join link doesn't carry the host's name yet.
         setRole('client')
         roleRef.current = 'client'
         setClientPhase('requested')
-        session.send({ t: 'join', id: myId, name, token: payload.token, grant })
       } catch (e) {
         setError(String(e))
         setClientPhase('idle')
       }
     },
-    // `leave` (stable, no deps) is referenced via closure; startDownload is the only changing dep.
-    [startDownload],
+    [openClient],
   )
 
   const leave = useCallback(() => {
+    leavingRef.current = true // a deliberate teardown — stop any reconnect loop from firing/looping
+    reconnectingRef.current = false
+    approvedRef.current = false
+    epochRef.current++ // invalidate any in-flight reconnect loop so it can't resurrect this session
+    setReconnecting(false)
     downloadRef.current?.cancelAsync().catch(() => {})
     downloadRef.current = null
     clientRef.current?.session.close()
@@ -546,6 +623,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       clientPhase,
       progress,
       hostName,
+      reconnecting,
       movieUri,
       playback,
       waitingFor,
@@ -559,7 +637,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       connect,
       leave,
     }),
-    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, movieUri, playback, waitingFor, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave],
+    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, movieUri, playback, waitingFor, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave],
   )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
