@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   canJoinShow,
+  departureClock,
   decideStartGate,
   downloadBufferedAheadSec,
   secondsToFinish,
@@ -219,5 +220,23 @@ describe('canJoinShow', () => {
   it('waits for the whole file when the duration is unknown', () => {
     expect(canJoinShow(0.9, 0, 0)).toBe(false)
     expect(canJoinShow(1, 0, 0)).toBe(true) // finished still trumps
+  })
+})
+
+describe('departureClock', () => {
+  it('formats seconds as M:SS with a padded seconds field', () => {
+    expect(departureClock(252)).toBe('4:12')
+    expect(departureClock(9)).toBe('0:09')
+    expect(departureClock(60)).toBe('1:00')
+  })
+
+  it('shows dashes when the ETA is unknown', () => {
+    expect(departureClock(null)).toBe('--:--')
+    expect(departureClock(Infinity)).toBe('--:--')
+  })
+
+  it('floors at 0:00 and clamps a huge pre-cache ETA', () => {
+    expect(departureClock(-5)).toBe('0:00')
+    expect(departureClock(999_999)).toBe('99:59')
   })
 })

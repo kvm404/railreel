@@ -4,6 +4,7 @@ import { QrCode, TrainFront } from 'lucide-react-native'
 import RailReelHost from '../../modules/railreel-host'
 import { Screen } from '@/components/Screen'
 import { QrScanner } from '@/components/QrScanner'
+import { SyncDots } from '@/components/SyncDots'
 import { Button, Text } from '@/ui'
 import { useNavigation } from '@/navigation/context'
 import { useTheme } from '@/theme/ThemeProvider'
@@ -100,12 +101,21 @@ export function JoinSessionScreen() {
           />
         </View>
 
-        {cabins.length > 0 ? (
-          <View style={styles.field}>
+        <View style={styles.field}>
+          <View style={styles.nearbyHead}>
             <Text variant="eyebrow" tone="tertiary">
               NEARBY CABINS
             </Text>
-            {cabins.map((c) => (
+            {cabins.length === 0 ? <SyncDots count={3} /> : null}
+          </View>
+          {cabins.length === 0 ? (
+            <View style={[styles.scanning, { borderColor: t.palette.hairline }]}>
+              <Text variant="data" tone="tertiary">
+                Scanning for cabins on this network…
+              </Text>
+            </View>
+          ) : (
+            cabins.map((c) => (
               <Pressable
                 key={c.name}
                 disabled={!hasName || connecting}
@@ -130,9 +140,9 @@ export function JoinSessionScreen() {
                   {c.code}
                 </Text>
               </Pressable>
-            ))}
-          </View>
-        ) : null}
+            ))
+          )}
+        </View>
 
         <Button
           title="Scan QR code"
@@ -187,6 +197,14 @@ export function JoinSessionScreen() {
 const styles = StyleSheet.create({
   body: { flex: 1, gap: 16, paddingTop: 8 },
   field: { gap: 8 },
+  nearbyHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  scanning: {
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderRadius: 14,
+    paddingVertical: 18,
+    alignItems: 'center',
+  },
   cabin: {
     flexDirection: 'row',
     alignItems: 'center',

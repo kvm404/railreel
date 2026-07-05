@@ -172,6 +172,18 @@ export function updateFloorHolds(
   return held
 }
 
+/**
+ * The boarding-board departure clock: seconds-until-start → "M:SS" for the split-flap display.
+ * null (unknown/unmeasurable) shows dashes; a huge pre-cache ETA is clamped so the board never
+ * overflows. Ready (etaSec 0/negative) reads "0:00" — the caller flips the board to ALL ABOARD.
+ */
+export function departureClock(etaSec: number | null): string {
+  if (etaSec == null || !Number.isFinite(etaSec)) return '--:--'
+  const s = Math.max(0, Math.min(Math.round(etaSec), 99 * 60 + 59))
+  const m = Math.floor(s / 60)
+  return `${m}:${(s % 60).toString().padStart(2, '0')}`
+}
+
 /** Lead a late joiner needs beyond the live playhead before it may enter the show (seconds). */
 export const CATCH_UP_LEAD_SEC = 30
 

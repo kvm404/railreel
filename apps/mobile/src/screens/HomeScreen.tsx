@@ -10,10 +10,12 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { RadioTower, Radar } from 'lucide-react-native'
+import { RadioTower, Radar, MoonStar, WifiOff } from 'lucide-react-native'
 import { Button, FlapText, Text } from '@/ui'
 import { SyncDots } from '@/components/SyncDots'
+import { StatusScreen } from '@/components/StatusScreen'
 import { useNavigation } from '@/navigation/context'
+import { useSession } from '@/session/SessionProvider'
 import { useTheme } from '@/theme/ThemeProvider'
 import { motion } from '@/theme/tokens'
 
@@ -29,6 +31,7 @@ export function HomeScreen() {
   const reduced = useReducedMotion()
   const { width } = useWindowDimensions()
   const nav = useNavigation()
+  const s = useSession()
 
   // Fit "RAILREEL" (8 cells) to the available width; cap at the design size.
   const logoSize = Math.max(22, Math.min(40, Math.floor((width - H_PADDING * 2) / 8.4)))
@@ -104,6 +107,24 @@ export function HomeScreen() {
           </View>
         </Animated.View>
       </View>
+
+      {/* An abnormal end (host left / lost signal) lands here as a designed moment. */}
+      {s.sessionEnd ? (
+        <StatusScreen
+          icon={
+            s.sessionEnd.kind === 'lost' ? (
+              <WifiOff size={44} color={t.palette.cyan} strokeWidth={1.75} />
+            ) : (
+              <MoonStar size={44} color={t.palette.amber} strokeWidth={1.75} />
+            )
+          }
+          tone={s.sessionEnd.kind === 'lost' ? 'cyan' : 'amber'}
+          eyebrow={s.sessionEnd.eyebrow}
+          headline={s.sessionEnd.headline}
+          body={s.sessionEnd.body}
+          primary={{ label: 'Back to the platform', onPress: s.dismissEnd }}
+        />
+      ) : null}
     </View>
   )
 }

@@ -222,22 +222,20 @@ class RailReelHostModule : Module() {
 
     // Quick integrity fingerprint: sha256 over (head 1MB + tail 1MB + size). Not a full-file hash
     // (2+ GB would take ~a minute on a phone) but catches the real failure modes: wrong file,
-    // truncation, corrupted tail. Same function runs host-side (stamped into MediaInfo.hash) and
-    // client-side (verified after the download completes).
+    // truncation, corrupted tail. The tail is read by SEEKING to it (positioned fd) — never by
+    // streaming through the whole file, or a 2GB content:// source would stall the host for
+    // seconds before its QR even appears. Same function runs host- and client-side.
     AsyncFunction("fingerprint") { fileUri: String, sizeBytes: Double ->
       val ctx = appContext.reactContext ?: throw CodedException("No app context")
       val size = sizeBytes.toLong()
       if (size <= 0) throw CodedException("fingerprint needs the real size")
       val md = java.security.MessageDigest.getInstance("SHA-256")
       val chunk = FP_CHUNK_BYTES
-      openMediaStream(ctx.contentResolver, fileUri).use { s ->
-        if (size <= 2L * chunk) {
-          digestFully(md, s, size)
-        } else {
-          digestFully(md, s, chunk)
-          if (!skipFully(s, size - 2L * chunk)) throw CodedException("fingerprint: short read")
-          digestFully(md, s, chunk)
-        }
+      if (size <= 2L * chunk) {
+        openAt(ctx.contentResolver, fileUri, 0).use { digestFully(md, it, size) }
+      } else {
+        openAt(ctx.contentResolver, fileUri, 0).use { digestFully(md, it, chunk) }
+        openAt(ctx.contentResolver, fileUri, size - chunk).use { digestFully(md, it, chunk) }
       }
       md.update(size.toString().toByteArray())
       "qf1:" + md.digest().joinToString("") { "%02x".format(it) }
@@ -347,6 +345,38 @@ class RailReelHostModule : Module() {
     } else {
       FileInputStream(File(fileUri.removePrefix("file://")))
     }
+
+  /**
+   * Open the media positioned at [offset] using a SEEK (fd channel.position), not a stream skip —
+   * so reading the tail of a multi-GB file is instant instead of a full read-through. Works for
+   * file:// and content:// (SAF) sources; the caller closes the stream (which releases the fd).
+   */
+  private fun openAt(resolver: ContentResolver, fileUri: String, offset: Long): InputStream {
+    if (fileUri.startsWith("content://")) {
+      val pfd = resolver.openFileDescriptor(Uri.parse(fileUri), "r") ?: throw IOException("cannot open $fileUri")
+      val fis = FileInputStream(pfd.fileDescriptor)
+      try {
+        if (offset > 0) fis.channel.position(offset)
+      } catch (e: Exception) {
+        runCatching { fis.close() }; runCatching { pfd.close() }
+        throw e
+      }
+      return object : FilterInputStream(fis) {
+        override fun close() {
+          try { super.close() } finally { pfd.close() }
+        }
+      }
+    }
+    val fis = FileInputStream(File(fileUri.removePrefix("file://")))
+    if (offset > 0) {
+      try {
+        fis.channel.position(offset)
+      } catch (e: Exception) {
+        fis.close(); throw e
+      }
+    }
+    return fis
+  }
 
   /**
    * Walk the top-level MP4 boxes: `true` iff `moov` appears before `mdat` (faststart), `null` if
