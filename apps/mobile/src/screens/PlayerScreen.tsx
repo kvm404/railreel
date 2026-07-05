@@ -25,6 +25,7 @@ const CORRECT_MS = 500 // client drift-check cadence
 const HOST_BEAT_MS = 2000 // host re-stamps state so followers stay fresh
 const SEEK_SETTLE_MS = 2500 // after a corrective seek, leave the player alone to actually land + buffer
 const IN_SYNC_SEC = 0.35 // |drift| under this shows the "in sync" badge
+const CONTROLS_HIDE_MS = 3500 // while playing, chrome (controls + reaction rail) melts away after this
 
 function fmt(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) sec = 0
@@ -72,12 +73,27 @@ export function PlayerScreen() {
   const autoPausedRef = useRef(false) // host: the room-hold paused us (vs. a manual pause)
   const overrideRef = useRef(false) // host: chose to play through a hold; don't auto-pause again
   const notReadySinceRef = useRef<number | null>(null) // client: when our player first went not-ready
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Controls never auto-hide (a vanishing play button reads as broken and eats taps) — the
-  // viewer hides/shows them deliberately by tapping the video.
+  // Reveal controls (+ the reaction rail), and while the movie is PLAYING arm an auto-hide so the
+  // chrome melts away and the film is unobstructed. While paused (e.g. waiting for the host to
+  // press play) they stay put — a vanishing play button reads as broken.
   const revealControls = useCallback(() => {
     setShowControls(true)
-  }, [])
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+    if (playing) hideTimerRef.current = setTimeout(() => setShowControls(false), CONTROLS_HIDE_MS)
+  }, [playing])
+
+  // Re-arm (or cancel) the auto-hide whenever play/pause flips: hide the chrome once we start
+  // playing, bring it back and keep it when we pause.
+  useEffect(() => {
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+    if (playing && showControls) hideTimerRef.current = setTimeout(() => setShowControls(false), CONTROLS_HIDE_MS)
+    else if (!playing) setShowControls(true)
+    return () => {
+      if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+    }
+  }, [playing, showControls])
 
   // Lightweight position readout for the overlay (also mirrored to a ref for the exit handler).
   useEffect(() => {
@@ -305,7 +321,7 @@ export function PlayerScreen() {
 
   return (
     <View style={styles.fill}>
-      <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowControls((v) => !v)}>
+      <Pressable style={StyleSheet.absoluteFill} onPress={() => (showControls ? setShowControls(false) : revealControls())}>
         <VideoView style={StyleSheet.absoluteFill} player={player} contentFit="contain" nativeControls={false} />
       </Pressable>
 
@@ -398,14 +414,19 @@ export function PlayerScreen() {
         </View>
       ) : null}
 
-      {/* always reachable, even with controls hidden; lifts above the position readout when
-          the controls are showing */}
-      <ReactionRail
-        onReact={s.sendReaction}
-        onOpenChat={() => setChatOpen(true)}
-        unread={unread}
-        bottom={insets.bottom + (showControls || ended ? 64 : 16)}
-      />
+      {/* The reaction rail rides with the controls — tap the film to bring both back — so the
+          movie plays unobstructed. Chat open pins it up (you're mid-conversation). */}
+      {showControls || ended || chatOpen ? (
+        <ReactionRail
+          onReact={(e) => {
+            revealControls() // reacting is interaction — keep the chrome up a bit longer
+            s.sendReaction(e)
+          }}
+          onOpenChat={() => setChatOpen(true)}
+          unread={unread}
+          bottom={insets.bottom + 64}
+        />
+      ) : null}
 
       <ChatSheet visible={chatOpen} log={s.chatLog} onSend={s.sendChat} onClose={() => setChatOpen(false)} />
     </View>
