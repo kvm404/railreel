@@ -116,6 +116,8 @@ export interface SessionStore {
   decodeCaution: string | null
   /** Host: preflight warning while hosting (battery, for now). */
   hostWarning: string | null
+  /** An abnormal end (host left, lost signal) that Home surfaces as a designed StatusScreen. */
+  sessionEnd: SessionEnd | null
 
   // playback (the show)
   /** The local movie file the player should open (host: the picked source; client: the cached copy). */
@@ -149,6 +151,18 @@ export interface SessionStore {
   deny: (id: string) => void
   connect: (joinLink: string, name: string) => Promise<void>
   leave: () => void
+  /** Client: retry a failed download without re-joining (the grant + approval still stand). */
+  retryDownload: () => void
+  /** Clear the session-end status once the user acknowledges it. */
+  dismissEnd: () => void
+}
+
+/** A designed end-of-the-road moment (see components/StatusScreen). */
+export type SessionEnd = {
+  kind: 'host-ended' | 'lost'
+  eyebrow: string
+  headline: string
+  body: string
 }
 
 const SessionContext = createContext<SessionStore | null>(null)
@@ -186,6 +200,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const lastReactionSentRef = useRef(0) // client-side reaction rate limit
   const [decodeCaution, setDecodeCaution] = useState<string | null>(null)
   const [hostWarning, setHostWarning] = useState<string | null>(null)
+  const [sessionEnd, setSessionEnd] = useState<SessionEnd | null>(null)
   const decodeOkRef = useRef(true) // rides every heartbeat so the host's lobby can flag us
 
   // Mutable session handles + identity, read from listeners without stale closures.
@@ -809,7 +824,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               ingestReaction(m.from === name ? 'You' : m.from, m.emoji)
             }
           } else if (m.t === 'ended') {
+            // The host wrapped the show / left. leave() clears everything (incl. sessionEnd), so
+            // set the designed end-state right after — Home surfaces it.
             leave()
+            setSessionEnd({
+              kind: 'host-ended',
+              eyebrow: 'THE SHOW HAS ENDED',
+              headline: 'The cabin went dark',
+              body: 'The host ended the session. Thanks for riding along.',
+            })
           }
         },
         // Socket dropped after we were live: kick off a reconnect (unless we're deliberately leaving).
@@ -861,8 +884,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     reconnectingRef.current = false
     setReconnecting(false)
     if (!stale()) {
-      leave() // tear down first — leave() clears error, so surface ours afterwards
-      setError('Lost connection to the host')
+      leave() // tear down first — leave() clears state, so surface the end-state afterwards
+      setSessionEnd({
+        kind: 'lost',
+        eyebrow: 'SIGNAL LOST',
+        headline: 'Lost the cabin',
+        body: "Couldn't reach the host — they may have left, or the hotspot dropped.",
+      })
     }
   }, [openClient])
 
@@ -929,7 +957,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     clientRef.current?.session.close()
     clientRef.current = null
     if (roleRef.current === 'host') {
-      RailReelHost.stop().catch(() => {})
+      // Tell guests the cabin's closing BEFORE the servers die — they get the graceful
+      // "cabin went dark" moment instantly, instead of a ~30s reconnect timeout → "lost".
+      RailReelHost.broadcast(JSON.stringify({ t: 'ended', reason: 'host-left' })).catch(() => {})
+      setTimeout(() => RailReelHost.stop().catch(() => {}), 200) // let the frame flush first
       deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
     }
     hostTokenRef.current = null
@@ -949,10 +980,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setDecodeCaution(null)
     decodeOkRef.current = true
     setHostWarning(null)
+    setSessionEnd(null)
     setError(null)
     setRole('none')
     roleRef.current = 'none'
   }, [resetTransfer])
+
+  // Client: retry a download that failed (bad HTTP, integrity mismatch). The grant + approval
+  // still stand, so we just kick the transfer again.
+  const retryDownload = useCallback(() => {
+    setError(null)
+    startDownload()
+  }, [startDownload])
+
+  const dismissEnd = useCallback(() => setSessionEnd(null), [])
 
   // Group buffer floor (PRD §7 rule 2): advance the hysteretic held-set whenever new telemetry
   // lands (an effect, not render math — the held set is real state). Held under 15s of buffer,
@@ -993,6 +1034,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       reconnecting,
       decodeCaution,
       hostWarning,
+      sessionEnd,
       movieUri,
       playback,
       waitingFor,
@@ -1009,8 +1051,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       deny,
       connect,
       leave,
+      retryDownload,
+      dismissEnd,
     }),
-    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave],
+    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, retryDownload, dismissEnd],
   )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>

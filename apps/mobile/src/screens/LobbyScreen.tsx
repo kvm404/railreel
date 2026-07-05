@@ -2,9 +2,10 @@ import { useEffect, useMemo, useRef } from 'react'
 import { StyleSheet, View } from 'react-native'
 import Animated, { FadeIn, useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from 'react-native-reanimated'
 import * as Haptics from 'expo-haptics'
-import { Check, X } from 'lucide-react-native'
+import { Check, X, DoorClosed } from 'lucide-react-native'
 import { Screen } from '@/components/Screen'
 import { FilamentBar } from '@/components/FilamentBar'
+import { StatusScreen } from '@/components/StatusScreen'
 import { Button, FlapText, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { useNavigation } from '@/navigation/context'
@@ -74,7 +75,23 @@ export function LobbyScreen() {
     nav.navigate('Home')
   }
 
+  // The host said no — a designed dead-end, not a stuck lobby.
+  if (s.clientPhase === 'denied') {
+    return (
+      <StatusScreen
+        icon={<DoorClosed size={44} color={t.palette.cyan} strokeWidth={1.75} />}
+        tone="cyan"
+        eyebrow="NOT THIS TIME"
+        headline="The host didn't let you in"
+        body="Only the host can approve who boards. Ask them to try again, or find another cabin."
+        primary={{ label: 'Back to the platform', onPress: exitSession }}
+      />
+    )
+  }
+
   const sizeLabel = movie ? fmtSize(movie.sizeBytes) : ''
+  // A failed download drops us back to 'approved' with an error — offer a retry (grant still valid).
+  const downloadFailed = !isHost && s.clientPhase === 'approved' && !!s.error
   const preflight = isHost ? s.hostWarning : (s.decodeCaution ?? s.error)
 
   return (
@@ -150,16 +167,16 @@ export function LobbyScreen() {
             disabled={!readyToDepart}
             onPress={startShow}
           />
+        ) : downloadFailed ? (
+          <Button title="The reel snagged — try again" intent="amber" height={68} onPress={s.retryDownload} />
         ) : (
           <View style={[styles.status, { borderColor: t.palette.hairline }]}>
             <Text variant="cardTitle" tone="cyan">
               {playback
                 ? 'Catching up to the show…'
-                : s.clientPhase === 'denied'
-                  ? 'Not approved'
-                  : readyToDepart
-                    ? 'Ready — waiting for host'
-                    : 'Boarding…'}
+                : readyToDepart
+                  ? 'Ready — waiting for host'
+                  : 'Boarding…'}
             </Text>
           </View>
         )}
