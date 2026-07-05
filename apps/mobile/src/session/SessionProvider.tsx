@@ -479,15 +479,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const fastStart = probed.fastStart === true
       const sizeBytes = asset.size ?? 0
       const title = cleanTitle(asset.name)
-      // Quick integrity fingerprint (head+tail+size) — clients verify their copy against it after
-      // the download. Best-effort: an unprobeable source just skips verification.
-      const hash = sizeBytes > 0 ? await RailReelHost.fingerprint(asset.uri, sizeBytes).catch(() => '') : ''
       mediaRef.current = {
         title,
         sizeBytes,
         durationSec,
         bitrateMbps: durationSec > 0 ? (sizeBytes * 8) / durationSec / 1e6 : 0,
-        hash,
+        hash: '', // integrity fingerprint fills in a moment later (off the critical path — below)
         format: '',
         fastStart,
         width: probed.width || 0,
@@ -504,13 +501,29 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setRole('host')
       roleRef.current = 'host'
       setHostPhase('live')
+
+      // The QR is up — the show can gather. Compute the integrity fingerprint OFF the critical
+      // path so a slow/large file can never stall the invite screen, then patch it into the media
+      // and re-broadcast so guests verify their download against it. Downloads take minutes; the
+      // fingerprint lands in ~a moment, so the window where a client would skip verification is
+      // negligible (and skipping is a safe no-op, not a failure).
+      if (sizeBytes > 0) {
+        const hostEpoch = epochRef.current
+        RailReelHost.fingerprint(asset.uri, sizeBytes)
+          .then((hash) => {
+            if (epochRef.current !== hostEpoch || !mediaRef.current) return // session changed — drop
+            mediaRef.current = { ...mediaRef.current, hash }
+            if (roleRef.current === 'host') broadcastRoster(participantsRef.current)
+          })
+          .catch(() => {})
+      }
     } catch (e) {
       setError(String(e))
       setHostPhase('idle')
       await RailReelHost.stop().catch(() => {})
       await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
     }
-  }, [updateParticipants, resetTransfer])
+  }, [updateParticipants, resetTransfer, broadcastRoster])
 
   // Re-read the device IP and rebuild the join link — call after enabling the hotspot, when the
   // reachable address may have changed (or only just appeared).

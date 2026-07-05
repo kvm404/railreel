@@ -75,25 +75,30 @@ export function PlayerScreen() {
   const notReadySinceRef = useRef<number | null>(null) // client: when our player first went not-ready
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // "Is the show playing?" — the host owns its local transport; a follower's own `playing` state
+  // is never set (its player is driven by drift-correction), so it reads the host's authoritative
+  // isPlaying. Without this a follower's chrome would never auto-hide.
+  const showIsPlaying = isHost ? playing : (playback?.isPlaying ?? false)
+
   // Reveal controls (+ the reaction rail), and while the movie is PLAYING arm an auto-hide so the
   // chrome melts away and the film is unobstructed. While paused (e.g. waiting for the host to
   // press play) they stay put — a vanishing play button reads as broken.
   const revealControls = useCallback(() => {
     setShowControls(true)
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
-    if (playing) hideTimerRef.current = setTimeout(() => setShowControls(false), CONTROLS_HIDE_MS)
-  }, [playing])
+    if (showIsPlaying) hideTimerRef.current = setTimeout(() => setShowControls(false), CONTROLS_HIDE_MS)
+  }, [showIsPlaying])
 
-  // Re-arm (or cancel) the auto-hide whenever play/pause flips: hide the chrome once we start
-  // playing, bring it back and keep it when we pause.
+  // Re-arm (or cancel) the auto-hide whenever play/pause flips: hide the chrome once playing,
+  // bring it back and keep it when paused.
   useEffect(() => {
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
-    if (playing && showControls) hideTimerRef.current = setTimeout(() => setShowControls(false), CONTROLS_HIDE_MS)
-    else if (!playing) setShowControls(true)
+    if (showIsPlaying && showControls) hideTimerRef.current = setTimeout(() => setShowControls(false), CONTROLS_HIDE_MS)
+    else if (!showIsPlaying) setShowControls(true)
     return () => {
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     }
-  }, [playing, showControls])
+  }, [showIsPlaying, showControls])
 
   // Lightweight position readout for the overlay (also mirrored to a ref for the exit handler).
   useEffect(() => {
