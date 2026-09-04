@@ -39,7 +39,7 @@ reactions and chat. A private cinema that fits in your pocket.
 
 ## Tech
 
-- **React Native + Expo** (custom dev client), TypeScript, **iOS + Android**.
+- **React Native + Expo** (custom dev client), TypeScript, **Android**.
 - **bun** workspaces monorepo.
 - Local **mDNS** discovery, embedded **HTTP** (range) + **WebSocket** servers on the host.
 - Fully **offline** — no backend, no accounts, no cloud.
@@ -50,7 +50,6 @@ reactions and chat. A private cinema that fits in your pocket.
 bun install
 bun run mobile:start      # start the Expo dev server (custom dev client)
 bun run mobile:android    # build & run on a connected Android device
-bun run mobile:ios        # build & run on iOS
 bun run lint && bun run test
 ```
 

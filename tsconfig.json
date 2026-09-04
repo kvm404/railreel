@@ -11,5 +11,5 @@
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true
   },
-  "exclude": ["node_modules", "**/node_modules", "**/.expo", "**/android", "**/ios"]
+  "exclude": ["node_modules", "**/node_modules", "**/.expo", "**/android"]
 }

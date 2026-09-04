@@ -8,22 +8,6 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
-    "ios": {
-      "supportsTablet": true,
-      "bundleIdentifier": "com.kvm404.railreel",
-      "infoPlist": {
-        "NSLocalNetworkUsageDescription": "RailReel uses your local network to discover nearby friends and share the movie over the host's hotspot. No internet is used.",
-        "NSBonjourServices": [
-          "_railreel._tcp"
-        ],
-        "UIBackgroundModes": [
-          "audio"
-        ],
-        "NSAppTransportSecurity": {
-          "NSAllowsArbitraryLoadsInLocalNetworking": true
-        }
-      }
-    },
     "android": {
       "package": "com.kvm404.railreel",
       "usesCleartextTraffic": true,

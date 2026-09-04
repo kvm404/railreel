@@ -30,16 +30,14 @@ There is no server beyond the host's phone. Everything is on the LAN.
 
 - **Transport:** the host's WiFi hotspot puts everyone on one LAN. The OS will not let an app
   toggle the hotspot, so onboarding *guides* the host to enable it manually.
-- **Discovery:** mDNS/Bonjour — `NSD` on Android, `Bonjour`/`NWBrowser` on iOS — for the
-  tap-to-join *convenience* path. It is **best-effort**: iOS gates local networking behind the
-  Local Network permission (blocked until granted; Bonjour types must be in `Info.plist`), and
-  Android NSD is async/lifecycle-sensitive.
+- **Discovery:** mDNS via Android `NSD` for the tap-to-join *convenience* path. It is
+  **best-effort**: Android NSD is async/lifecycle-sensitive.
   **Robust fallback = QR code / link** encoding `host-ip`, ports, session id, and the **secret
   join token**. (A bare 4-digit code can't resolve the host's IP offline — it's only a human
   confirmation, never transport or auth.)
 - **Control plane:** a WebSocket server on the host. Small JSON messages (see §6). **The
   session token is required to connect.**
-- **Data plane:** a **native** HTTP server (Swift/Kotlin) serving the movie with `Range`
+- **Data plane:** a **native** HTTP server (Kotlin) serving the movie with `Range`
   support, bounded buffers, per-client throttling, cancellation, and `sendfile`-style reads —
   *not* a JS-bridge server (multi-GB range reads to 4–5 clients would drown the bridge). Byte
   serving requires the token and an approved client; supports resume after drops.
@@ -104,7 +102,7 @@ offset = ((t2 - t1) + (t3 - t4)) / 2      // = hostTime − clientTime
 rtt    =  (t4 - t1) - (t3 - t2)
 ```
 Keep the offset from the lowest-RTT samples. **All of `t1..t4` must come from a MONOTONIC clock
-(`CACurrentMediaTime`/`mach_absolute_time` on iOS, `elapsedRealtimeNanos` on Android) — never
+(`elapsedRealtimeNanos` on Android) — never
 `Date.now()`**, which jumps with NTP/user changes. Timestamp at the native socket edge, not in
 JS, to avoid bridge jitter. (The pure math in `lib/sync/clock.ts` is clock-source agnostic; the
 *caller* must feed it monotonic values.)
@@ -121,7 +119,7 @@ and corrects:
 - drift `≥ ~250ms` (sustained) or discontinuity → hard `seek` to target.
 
 **Actuation is the hard part (not the math).** `play()`/`seek()`/decoder-ready latencies on
-AVPlayer & ExoPlayer can exceed 100ms, so:
+ExoPlayer can exceed 100ms, so:
 - **Schedule** start/resume for a *future host time* and have each client arm locally → all fire
   together rather than "resume now" racing the network.
 - Require **"seek-complete / ready" ACKs** from clients before the group resumes after a seek.
@@ -171,9 +169,9 @@ type ClientMsg =
   huge files, and 2× temporary storage. Reject non-conforming files with a clear message.
 - **Progressive playback must not point the player at a partially-written file.** A growing
   file with a changing length/index is unreliable across players. Instead feed playback through
-  a **caching source**: ExoPlayer `CacheDataSource` on Android, an `AVAssetResourceLoader`
-  delegate (or a localhost proxy) on iOS — the player requests ranges, the cache layer satisfies
-  them from disk or fetches-and-stores. The fully-downloaded file is persisted separately.
+  a **caching source**: ExoPlayer `CacheDataSource` on Android (or a localhost proxy) — the
+  player requests ranges, the cache layer satisfies them from disk or fetches-and-stores. The
+  fully-downloaded file is persisted separately.
 - For **full pre-cache** mode the file is complete before play, so a plain local file URL is fine.
 
 ## 8. App architecture (client app, both roles)
@@ -209,7 +207,7 @@ battery or thermal shutdown. Instead:
   warn/refuse if marginal.
 - **Keep-awake** on while hosting; encourage the host to stay plugged in.
 - **Honest UX:** "Your session ends if you leave the app or turn off the hotspot." No
-  background-hosting reliability promise (worse on iOS).
+  background-hosting reliability promise.
 - Clients handle host disappearance gracefully (clear "host left — session ended" state).
 
 ## 10. Security model (v1)
@@ -223,15 +221,15 @@ battery or thermal shutdown. Instead:
 
 ## 11. Open technical questions (to validate on-device)
 
-- Best cross-platform libs for mDNS; confirm we own the native data-plane (HTTP range) + sync
+- Best Android libs for mDNS; confirm we own the native data-plane (HTTP range) + sync
   timing modules rather than relying on JS-bridge servers.
 - Real **aggregate** hotspot throughput with 4–6 clients downloading simultaneously on
   representative phones; tune §4 constants and the progressive-vs-pre-cache threshold.
-- iOS Local Network permission flow + background-audio/networking limits while screen is on.
-- Caching-player-source approach per platform (ExoPlayer `CacheDataSource` / iOS
-  resource-loader / local proxy) and how seek interacts with a partially-cached asset.
+- Android background-audio/networking limits while screen is on.
+- Caching-player-source approach (ExoPlayer `CacheDataSource` / local proxy) and how seek interacts
+  with a partially-cached asset.
 - AP/client isolation on some hotspots (can clients reach the host's server at all?).
-- Real-device **soak testing** (full 2h movie, mixed OS, lock/call/background, reconnect).
+- Real-device **soak testing** (full 2h movie on Android, lock/call/background, reconnect).
 
 ## Appendix: design review (codex, 2026-06-27)
 

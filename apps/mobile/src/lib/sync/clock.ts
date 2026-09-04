@@ -5,8 +5,8 @@
  * decide how to correct playback drift. No React Native / IO here — keep it pure so
  * it can be tested in Node and reasoned about in isolation. See docs/architecture.md §5.
  *
- * IMPORTANT: callers must feed t1..t4 from a MONOTONIC clock (CACurrentMediaTime /
- * mach_absolute_time on iOS, elapsedRealtimeNanos on Android) — never Date.now(), which
+ * IMPORTANT: callers must feed t1..t4 from a MONOTONIC clock (e.g.
+ * elapsedRealtimeNanos on Android) — never Date.now(), which
  * jumps with NTP/user changes. This module is clock-source agnostic; the caller guarantees it.
  */
 

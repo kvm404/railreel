@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native'
+import { FlatList, KeyboardAvoidingView, Pressable, StyleSheet, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import Animated, { FadeIn, FadeOut, SlideInDown, SlideOutDown } from 'react-native-reanimated'
 import { Send } from 'lucide-react-native'
@@ -42,7 +42,7 @@ export function ChatSheet({
       <Animated.View entering={FadeIn.duration(160)} exiting={FadeOut.duration(160)} style={styles.backdrop}>
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close chat" />
       </Animated.View>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.avoider} pointerEvents="box-none">
+      <KeyboardAvoidingView style={styles.avoider} pointerEvents="box-none">
         <Animated.View
           entering={SlideInDown.duration(260)}
           exiting={SlideOutDown.duration(200)}
