@@ -260,7 +260,7 @@ export function PlayerScreen() {
 
     // A hard seek (big desync) — but not while a previous seek is still landing, or we thrash.
     if (c.seekToSec != null && !settling) {
-      player.currentTime = c.seekToSec
+      player.currentTime = Math.max(0, c.seekToSec)
       lastSeekAtRef.current = now
       pendingSeekAtRef.current = now
     }

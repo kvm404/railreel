@@ -23,9 +23,20 @@ describe('targetPositionSec', () => {
   it('is frozen when paused', () => {
     expect(targetPositionSec(state({ isPlaying: false }), 99_999)).toBe(100)
   })
+
+  it('never returns negative even when hostNowMs is slightly behind hostMonotonicMs', () => {
+    expect(targetPositionSec(state({ positionSec: 0 }), 9_950)).toBe(0)
+  })
 })
 
 describe('decideCorrection', () => {
+  it('clamps seekToSec to >= 0 when target is negative', () => {
+    const c = decideCorrection({ targetSec: -0.5, actualSec: 10, isPlaying: true })
+    expect(c.seekToSec).toBe(0)
+    const cPause = decideCorrection({ targetSec: -0.5, actualSec: 10, isPlaying: false })
+    expect(cPause.seekToSec).toBe(0)
+  })
+
   it('pauses and holds position when off while paused', () => {
     expect(decideCorrection({ targetSec: 100, actualSec: 105, isPlaying: false })).toEqual({
       action: 'pause',

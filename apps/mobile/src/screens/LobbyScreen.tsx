@@ -62,10 +62,14 @@ export function LobbyScreen() {
   )
   const readyToDepart = gate?.start ?? false
 
+  const resumePos = s.playback?.positionSec ?? 0
+  const isResuming = resumePos > 0
+
   const startShow = () => {
     if (!isHost) return
-    // Open the player for everyone PAUSED at the top; the host then presses Play to roll in sync.
-    s.setHostPlayback(0, false, 1)
+    // Open the player for everyone PAUSED at the resume position (or 0 if starting fresh);
+    // the host then presses Play to roll in sync.
+    s.setHostPlayback(resumePos, false, 1)
     nav.navigate('Player')
   }
 
@@ -154,12 +158,22 @@ export function LobbyScreen() {
 
         {isHost ? (
           <Button
-            title={readyToDepart ? 'Start the show' : gate?.mode === 'precache' ? 'Pre-caching…' : 'Building head starts…'}
+            title={
+              !readyToDepart
+                ? gate?.mode === 'precache'
+                  ? 'Pre-caching…'
+                  : 'Building head starts…'
+                : isResuming
+                  ? 'Resume the show'
+                  : 'Start the show'
+            }
             subtitle={
               readyToDepart
-                ? aboard === people.length
-                  ? 'Lights down — everyone in sync'
-                  : 'Head starts locked — downloads finish during the show'
+                ? isResuming
+                  ? `Paused at ${fmtTime(resumePos)}`
+                  : aboard === people.length
+                    ? 'Lights down — everyone in sync'
+                    : 'Head starts locked — downloads finish during the show'
                 : undefined
             }
             intent="amber"
@@ -297,6 +311,13 @@ function fmtSize(bytes: number): string {
   if (!(bytes > 0)) return ''
   const gb = bytes / 1e9
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1e6)} MB`
+}
+
+function fmtTime(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) sec = 0
+  const m = Math.floor(sec / 60)
+  const s = Math.floor(sec % 60)
+  return `${m}:${s.toString().padStart(2, '0')}`
 }
 
 const styles = StyleSheet.create({

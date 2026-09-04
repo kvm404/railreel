@@ -15,9 +15,9 @@ import type { PlaybackState } from '@/lib/protocol'
 
 /** Where the playhead should be now, given the host's last state and the current host-monotonic ms. */
 export function targetPositionSec(state: PlaybackState, hostNowMs: number): number {
-  if (!state.isPlaying) return state.positionSec
+  if (!state.isPlaying) return Math.max(0, state.positionSec)
   const elapsedSec = (hostNowMs - state.hostMonotonicMs) / 1000
-  return state.positionSec + elapsedSec * state.rate
+  return Math.max(0, state.positionSec + elapsedSec * state.rate)
 }
 
 export type Correction =
@@ -143,14 +143,14 @@ export function decideCorrection(p: CorrectionParams): Correction {
   if (!p.isPlaying) {
     // Paused: hold at the host's position; only seek if we're meaningfully off. No lead — a
     // paused target doesn't move while the seek lands.
-    return { action: 'pause', seekToSec: Math.abs(drift) > deadband ? p.targetSec : undefined }
+    return { action: 'pause', seekToSec: Math.abs(drift) > deadband ? Math.max(0, p.targetSec) : undefined }
   }
   if (Math.abs(drift) > seekThreshold) {
     // Too far to nudge — jump there, leading by the device's measured seek latency so the seek
     // lands ON the moving target rather than behind it. Never lead a backwards seek past the
     // target itself (an ahead-of-host device is already fast; overshooting would flip the error).
     const lead = drift > 0 ? seekLead : 0
-    return { action: 'play', rate: baseRate, seekToSec: p.targetSec + lead }
+    return { action: 'play', rate: baseRate, seekToSec: Math.max(0, p.targetSec + lead) }
   }
   if (Math.abs(drift) <= deadband) {
     return { action: 'play', rate: baseRate }
