@@ -7,6 +7,7 @@ import java.io.IOException
 import java.util.Collections
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * WebSocket control plane for the host. Carries clock sync + play/pause/seek/chat/reactions.
@@ -31,7 +32,7 @@ class CtrlServer(
   /** Send a text frame to every connected client concurrently with timeout. Prune any whose send fails or times out. */
   fun broadcast(text: String) {
     val snapshot = synchronized(clients) { clients.toList() }
-    if (snapshot.isEmpty()) return
+    if (snapshot.isEmpty() || broadcastExecutor.isShutdown) return
 
     val futures = snapshot.map { c ->
       c to broadcastExecutor.submit {
@@ -41,17 +42,12 @@ class CtrlServer(
 
     val deadline = System.currentTimeMillis() + 1500L
     for ((c, future) in futures) {
-      val remaining = deadline - System.currentTimeMillis()
+      val remaining = maxOf(0L, deadline - System.currentTimeMillis())
       try {
-        if (remaining > 0) {
-          future.get(remaining, TimeUnit.MILLISECONDS)
-        } else {
-          future.cancel(true)
-          c.abort("timeout")
-        }
+        future.get(remaining, TimeUnit.MILLISECONDS)
       } catch (e: Exception) {
         future.cancel(true)
-        c.abort("timeout")
+        c.abort(if (remaining == 0L) "timeout" else "failed")
       }
     }
   }
@@ -65,17 +61,20 @@ class CtrlServer(
     // True once the socket passed the token gate and was added to `clients`. Guards against
     // emitting a phantom "close" for a connection that was never accepted (NanoWSD still runs
     // onClose after we reject an unauthorized upgrade).
-    private var accepted = false
-    private var closedEmitted = false
+    @Volatile private var accepted = false
+    private val closedEmitted = AtomicBoolean(false)
     @Volatile var clientId: String? = null
+
+    private fun emitCloseOnce() {
+      if (accepted && closedEmitted.compareAndSet(false, true)) {
+        onEvent("close", clientId)
+      }
+    }
 
     fun abort(reason: String) {
       clients.remove(this)
       runCatching { close(WebSocketFrame.CloseCode.NormalClosure, reason, false) }
-      if (accepted && !closedEmitted) {
-        closedEmitted = true
-        onEvent("close", clientId)
-      }
+      emitCloseOnce()
     }
 
     override fun onOpen() {
@@ -90,10 +89,7 @@ class CtrlServer(
 
     override fun onClose(code: WebSocketFrame.CloseCode?, reason: String?, initiatedByRemote: Boolean) {
       clients.remove(this)
-      if (accepted && !closedEmitted) {
-        closedEmitted = true
-        onEvent("close", clientId)
-      }
+      emitCloseOnce()
     }
 
     override fun onMessage(message: WebSocketFrame) {
@@ -125,10 +121,7 @@ class CtrlServer(
 
     override fun onException(exception: IOException?) {
       clients.remove(this)
-      if (accepted && !closedEmitted) {
-        closedEmitted = true
-        onEvent("close", clientId)
-      }
+      emitCloseOnce()
     }
   }
 

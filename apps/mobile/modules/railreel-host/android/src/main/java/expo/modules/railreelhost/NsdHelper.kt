@@ -93,42 +93,43 @@ class NsdHelper(
 
   /** One resolve at a time; NsdManager rejects concurrent resolves. Caller holds `lock`. */
   private fun drainResolveQueueLocked() {
-    if (resolving || discovery == null) return
-    val next = resolveQueue.removeFirstOrNull() ?: return
-    resolving = true
-    try {
-      nsd.resolveService(next, object : NsdManager.ResolveListener {
-        override fun onResolveFailed(info: NsdServiceInfo, error: Int) {
-          synchronized(lock) {
-            resolving = false
-            drainResolveQueueLocked()
-          }
-        }
-        override fun onServiceResolved(info: NsdServiceInfo) {
-          synchronized(lock) {
-            if (discovery != null) {
-              val host = info.host?.hostAddress
-              if (host != null) {
-                val txt = info.attributes.entries.associate { (k, v) -> k to (v?.toString(Charsets.UTF_8) ?: "") }
-                emit(
-                  "found",
-                  mapOf(
-                    "name" to info.serviceName,
-                    "host" to host,
-                    "port" to info.port,
-                    "txt" to txt,
-                  ),
-                )
-              }
+    while (!resolving && discovery != null) {
+      val next = resolveQueue.removeFirstOrNull() ?: break
+      resolving = true
+      try {
+        nsd.resolveService(next, object : NsdManager.ResolveListener {
+          override fun onResolveFailed(info: NsdServiceInfo, error: Int) {
+            synchronized(lock) {
+              resolving = false
+              drainResolveQueueLocked()
             }
-            resolving = false
-            drainResolveQueueLocked()
           }
-        }
-      })
-    } catch (e: Exception) {
-      resolving = false
-      drainResolveQueueLocked()
+          override fun onServiceResolved(info: NsdServiceInfo) {
+            synchronized(lock) {
+              if (discovery != null) {
+                val host = info.host?.hostAddress
+                if (host != null) {
+                  val txt = info.attributes.entries.associate { (k, v) -> k to (v?.toString(Charsets.UTF_8) ?: "") }
+                  emit(
+                    "found",
+                    mapOf(
+                      "name" to info.serviceName,
+                      "host" to host,
+                      "port" to info.port,
+                      "txt" to txt,
+                    ),
+                  )
+                }
+              }
+              resolving = false
+              drainResolveQueueLocked()
+            }
+          }
+        })
+        break
+      } catch (e: Exception) {
+        resolving = false
+      }
     }
   }
 
