@@ -129,6 +129,8 @@ export function PlayerScreen() {
   const togglePlay = useCallback(() => {
     revealControls()
     if (playing) {
+      autoPausedRef.current = false
+      overrideRef.current = false
       player.pause()
       setPlaying(false)
       setHostPlayback(player.currentTime, false)
@@ -136,7 +138,8 @@ export function PlayerScreen() {
       // Pressing Play while the gate is actively holding the room is a deliberate override (play on
       // without that straggler). Only then — NOT for the normal start where guests are still loading,
       // which should still wait for them.
-      if (autoPausedRef.current) overrideRef.current = true
+      autoPausedRef.current = false
+      overrideRef.current = true
       setEnded(false)
       player.play()
       setPlaying(true)
