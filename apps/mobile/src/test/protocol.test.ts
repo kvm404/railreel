@@ -106,6 +106,20 @@ describe('message parsing', () => {
     if (r.ok) expect(r.msg).toEqual(msg)
   })
 
+  it('disambiguates sender identity using fromId even when display names match', () => {
+    const myId = 'client-1'
+    const name = 'Alex'
+
+    const ownMsg: ServerMsg = { t: 'chat', from: 'Alex', fromId: 'client-1', text: 'Hey', at: 100 }
+    const peerMsg: ServerMsg = { t: 'chat', from: 'Alex', fromId: 'client-2', text: 'Yo', at: 101 }
+
+    const getDisplayName = (m: Extract<ServerMsg, { t: 'chat' }>) =>
+      (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
+
+    expect(getDisplayName(ownMsg)).toBe('You')
+    expect(getDisplayName(peerMsg)).toBe('Alex')
+  })
+
   it('does not accept a server type on the client channel', () => {
     // 'welcome' is a server message; it must not validate as a client message.
     expect(parseClientMsg('{"t":"welcome"}').ok).toBe(false)

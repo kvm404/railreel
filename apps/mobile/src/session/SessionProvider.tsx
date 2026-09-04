@@ -406,7 +406,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     })
     const onClose = RailReelHost.addListener('onWsClose', (event?: { id?: string }) => {
       if (roleRef.current !== 'host') return
-      if (event?.id) {
+      if (event?.id && event.id !== 'host') {
         updateParticipants((prev) =>
           prev.map((p) => (p.id === event.id ? { ...p, status: 'left', stalled: false, inShow: false } : p)),
           true,
@@ -603,6 +603,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const approve = useCallback(
     (id: string) => {
+      if (id === 'host') return
       const grant = grantsRef.current.get(id)
       if (!grant) return
       RailReelHost.approve(grant)
@@ -619,6 +620,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const deny = useCallback(
     (id: string) => {
+      if (id === 'host') return
       const grant = grantsRef.current.get(id)
       if (grant) RailReelHost.revoke(grant).catch(() => {})
       grantsRef.current.delete(id)

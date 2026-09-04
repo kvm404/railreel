@@ -62,7 +62,7 @@ export function LobbyScreen() {
   )
   const readyToDepart = gate?.start ?? false
 
-  const resumePos = s.playback?.positionSec ?? 0
+  const resumePos = s.playback?.ended ? 0 : (s.playback?.positionSec ?? 0)
   const isResuming = resumePos > 0
 
   const startShow = () => {
@@ -262,13 +262,13 @@ function ManifestRow({
       ) : !requested && !left ? (
         <View style={{ marginTop: 10 }}>
           <FilamentBar progress={ready ? 1 : p.progress} />
-          {isHost && (
+          {isHost && p.id !== 'host' && (
             <View style={{ marginTop: 8, alignItems: 'flex-end' }}>
               <Button title="Remove" intent="cyan" height={32} onPress={onDeny} />
             </View>
           )}
         </View>
-      ) : left && isHost ? (
+      ) : left && isHost && p.id !== 'host' ? (
         <View style={{ marginTop: 8, alignItems: 'flex-end' }}>
           <Button title="Dismiss" intent="cyan" height={32} onPress={onDeny} />
         </View>
