@@ -1,0 +1,80 @@
+name: Build and Release Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to attach APK to'
+        required: false
+        default: 'v0.1.0'
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build Android Release APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Prebuild Android project
+        run: bun run --cwd apps/mobile prebuild --platform android
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Android Release APK
+        run: |
+          cd apps/mobile/android
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Locate and Prepare APK
+        id: apk
+        run: |
+          APK_PATH=$(find apps/mobile/android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Error: Release APK not found"
+            exit 1
+          fi
+          TAG="${{ github.event.inputs.tag || github.event.release.tag_name || 'v0.1.0' }}"
+          OUTPUT_NAME="RailReel-${TAG}.apk"
+          cp "$APK_PATH" "$OUTPUT_NAME"
+          echo "apk_path=$OUTPUT_NAME" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Upload APK to Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.apk_path }}
+          path: ${{ steps.apk.outputs.apk_path }}
+          if-no-files-found: error
+
+      - name: Attach APK to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.apk.outputs.tag }}
+          APK_FILE: ${{ steps.apk.outputs.apk_path }}
+        run: |
+          echo "Attaching $APK_FILE to release $TAG..."
+          gh release upload "$TAG" "$APK_FILE" --clobber
