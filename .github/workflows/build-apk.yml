@@ -41,21 +41,38 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: |
+          bun install --frozen-lockfile
+          echo "NODE_PATH=${{ github.workspace }}/node_modules:${{ github.workspace }}/apps/mobile/node_modules" >> $GITHUB_ENV
 
       - name: Prebuild Android project and configure ARM64
+        env:
+          NODE_PATH: ${{ github.workspace }}/node_modules:${{ github.workspace }}/apps/mobile/node_modules
         run: |
           bun run --cwd apps/mobile prebuild --platform android
-          echo "reactNativeArchitectures=arm64-v8a" >> apps/mobile/android/gradle.properties
-          echo "org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m" >> apps/mobile/android/gradle.properties
+          if grep -q "reactNativeArchitectures" apps/mobile/android/gradle.properties; then
+            sed -i 's/.*reactNativeArchitectures=.*/reactNativeArchitectures=arm64-v8a/' apps/mobile/android/gradle.properties
+          else
+            echo "reactNativeArchitectures=arm64-v8a" >> apps/mobile/android/gradle.properties
+          fi
+          if grep -q "org.gradle.jvmargs" apps/mobile/android/gradle.properties; then
+            sed -i 's/.*org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m/' apps/mobile/android/gradle.properties
+          else
+            echo "org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m" >> apps/mobile/android/gradle.properties
+          fi
+          echo "=== Configured gradle.properties ==="
+          grep -E "reactNativeArchitectures|org.gradle.jvmargs" apps/mobile/android/gradle.properties
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build Android Release APK
+        env:
+          NODE_PATH: ${{ github.workspace }}/node_modules:${{ github.workspace }}/apps/mobile/node_modules
         run: |
           cd apps/mobile/android
-          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon --max-workers=2 --stacktrace
+          chmod +x gradlew
+          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon --max-workers=2 --stacktrace --console=plain
 
       - name: Locate and Prepare APK
         id: apk
@@ -85,5 +102,8 @@ jobs:
           TAG: ${{ steps.apk.outputs.tag }}
           APK_FILE: ${{ steps.apk.outputs.apk_path }}
         run: |
+          echo "Checking release $TAG..."
+          gh release view "$TAG" || gh release create "$TAG" --title "$TAG" --notes "Release $TAG"
           echo "Attaching $APK_FILE to release $TAG..."
           gh release upload "$TAG" "$APK_FILE" --clobber
+
