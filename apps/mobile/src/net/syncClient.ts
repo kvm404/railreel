@@ -24,6 +24,7 @@ const isFiniteNum = (v: unknown): v is number => typeof v === 'number' && Number
 /** Keepalive ping cadence. Must stay well under the host's WS read timeout (30s) so a missed
  *  ping does not drop the control channel. See RailReelHostModule WS_SOCKET_READ_TIMEOUT_MS. */
 const KEEPALIVE_MS = 10000
+const ROLLING_WINDOW_SIZE = 8
 
 /**
  * Open a WS session: do `rounds` ping/pong exchanges, resolve with the best clock estimate,
@@ -41,6 +42,8 @@ export function openSyncSession(
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://${host}:${wsPort}/?tk=${encodeURIComponent(token)}`)
     const samples: ClockSample[] = []
+    const rollingSamples: ClockSample[] = []
+    let currentEstimate: ClockEstimate | null = null
     let settled = false
     let keepalive: ReturnType<typeof setInterval> | undefined
     const ping = () => ws.send(JSON.stringify({ t: 'syncPing', t1: nowMs() }))
@@ -73,7 +76,21 @@ export function openSyncSession(
         return
       }
       if (msg.t === 'syncPong') {
-        if (settled) return // keepalive pong after initial handshake — ignore
+        if (settled) {
+          // Keepalive pong after initial handshake: update rolling window to compensate for thermal clock drift
+          if (isFiniteNum(msg.t1) && isFiniteNum(msg.t2) && isFiniteNum(msg.t3)) {
+            rollingSamples.push({ t1: msg.t1, t2: msg.t2, t3: msg.t3, t4: nowMs() })
+            if (rollingSamples.length > ROLLING_WINDOW_SIZE) {
+              rollingSamples.shift()
+            }
+            const updated = bestEstimate(rollingSamples)
+            if (updated && currentEstimate) {
+              currentEstimate.offsetMs = updated.offsetMs
+              currentEstimate.rttMs = updated.rttMs
+            }
+          }
+          return
+        }
         // Only sample a well-formed pong; a malformed one must not yield a NaN offset/RTT.
         if (isFiniteNum(msg.t1) && isFiniteNum(msg.t2) && isFiniteNum(msg.t3)) {
           samples.push({ t1: msg.t1, t2: msg.t2, t3: msg.t3, t4: nowMs() })
@@ -82,6 +99,8 @@ export function openSyncSession(
           const estimate = bestEstimate(samples)
           if (!estimate) return
           settled = true
+          currentEstimate = { ...estimate }
+          rollingSamples.push(...samples.slice(-ROLLING_WINDOW_SIZE))
           clearTimeout(timeout)
           // Keepalive: NanoWSD has no idle ping, and the host closes a connection that sends
           // nothing for its socket read timeout (WS_SOCKET_READ_TIMEOUT_MS = 30s). A periodic
@@ -95,9 +114,9 @@ export function openSyncSession(
             }
           }, KEEPALIVE_MS)
           resolve({
-            estimate,
+            estimate: currentEstimate,
             samples: samples.length,
-            toHostTime: (clientMs) => clientMs + estimate.offsetMs,
+            toHostTime: (clientMs) => clientMs + currentEstimate!.offsetMs,
             send: (msg) => {
               try {
                 ws.send(JSON.stringify(msg))
