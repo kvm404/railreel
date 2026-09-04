@@ -39,19 +39,20 @@ class CtrlServer(
       }
     }
 
-    val dead = mutableListOf<CtrlSocket>()
+    val deadline = System.currentTimeMillis() + 1500L
     for ((c, future) in futures) {
+      val remaining = deadline - System.currentTimeMillis()
       try {
-        future.get(1500, TimeUnit.MILLISECONDS)
+        if (remaining > 0) {
+          future.get(remaining, TimeUnit.MILLISECONDS)
+        } else {
+          future.cancel(true)
+          c.abort("timeout")
+        }
       } catch (e: Exception) {
         future.cancel(true)
-        runCatching { c.close(WebSocketFrame.CloseCode.NormalClosure, "timeout", false) }
-        dead.add(c)
+        c.abort("timeout")
       }
-    }
-
-    if (dead.isNotEmpty()) {
-      synchronized(clients) { clients.removeAll(dead.toSet()) }
     }
   }
 
@@ -67,6 +68,15 @@ class CtrlServer(
     private var accepted = false
     private var closedEmitted = false
     @Volatile var clientId: String? = null
+
+    fun abort(reason: String) {
+      clients.remove(this)
+      runCatching { close(WebSocketFrame.CloseCode.NormalClosure, reason, false) }
+      if (accepted && !closedEmitted) {
+        closedEmitted = true
+        onEvent("close", clientId)
+      }
+    }
 
     override fun onOpen() {
       if (handshake.parameters["tk"]?.firstOrNull() != token) {
@@ -91,7 +101,7 @@ class CtrlServer(
       val text = message.textPayload ?: return
       val obj = runCatching { JSONObject(text) }.getOrNull()
       val id = obj?.optString("id")
-      if (!id.isNullOrEmpty()) {
+      if (clientId == null && !id.isNullOrEmpty() && id != "host") {
         clientId = id
       }
       if (obj?.optString("t") == "syncPing") {

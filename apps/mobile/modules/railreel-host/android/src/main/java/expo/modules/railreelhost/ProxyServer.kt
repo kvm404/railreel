@@ -105,7 +105,12 @@ class ProxyServer(
           }
         }
         if (waitedMs >= EDGE_STALL_TIMEOUT_MS) throw IOException("download edge stalled")
-        Thread.sleep(EDGE_POLL_MS)
+        try {
+          Thread.sleep(EDGE_POLL_MS)
+        } catch (e: InterruptedException) {
+          Thread.currentThread().interrupt()
+          throw IOException("stream interrupted", e)
+        }
         waitedMs += EDGE_POLL_MS
       }
       throw IOException(if (closed) "stream closed" else "proxy stopped")
