@@ -754,7 +754,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
         // Progressive playback: as soon as we know the final size, stand up the localhost proxy
         // over the growing file and hand THAT to the player — never the partially-written file.
-        if (total > 0 && proxyStateRef.current === 'idle') {
+        // FastStart required: non-faststart MP4 has moov at EOF which causes proxy stalls and ExoPlayer crashes.
+        if (total > 0 && proxyStateRef.current === 'idle' && mediaRef.current?.fastStart === true) {
           proxyStateRef.current = 'starting'
           RailReelHost.startProxy(MOVIE_CACHE, total)
             .then((port) => {

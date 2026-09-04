@@ -72,6 +72,7 @@ class ProxyServer(
     private val endExclusive: Long,
   ) : InputStream() {
     private var pos = start
+    @Volatile private var closed = false
     private var raf: RandomAccessFile? = null
 
     override fun read(): Int {
@@ -81,11 +82,17 @@ class ProxyServer(
     }
 
     override fun read(b: ByteArray, off: Int, len: Int): Int {
+      if (len == 0) return 0
+      if (stopped || closed) throw IOException("stream closed")
       if (pos >= endExclusive) return -1
       var waitedMs = 0L
-      while (!stopped) {
+      while (!stopped && !closed) {
         // The file may not exist yet (download about to create it): open lazily, position once.
-        val r = raf ?: if (file.exists()) RandomAccessFile(file, "r").also { it.seek(pos); raf = it } else null
+        val r = synchronized(this) {
+          if (closed) return@synchronized null
+          raf ?: if (file.exists()) RandomAccessFile(file, "r").also { it.seek(pos); raf = it } else null
+        }
+        if (closed || stopped) throw IOException("stream closed")
         if (r != null) {
           val available = r.length() - pos
           if (available > 0) {
@@ -101,12 +108,15 @@ class ProxyServer(
         Thread.sleep(EDGE_POLL_MS)
         waitedMs += EDGE_POLL_MS
       }
-      throw IOException("proxy stopped")
+      throw IOException(if (closed) "stream closed" else "proxy stopped")
     }
 
     override fun close() {
-      raf?.close()
-      raf = null
+      closed = true
+      synchronized(this) {
+        raf?.close()
+        raf = null
+      }
       super.close()
     }
   }

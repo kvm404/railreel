@@ -459,12 +459,14 @@ class RailReelHostModule : Module() {
     return true
   }
 
-  /** Stop the HTTP + WS servers, the advert, and the foreground service. Caller holds `lock`. */
+  /** Stop the HTTP + WS servers, proxy, advert, and the foreground service. Caller holds `lock`. */
   private fun teardown(ctx: android.content.Context) {
     server?.stop()
     server = null
     ctrl?.stop()
     ctrl = null
+    proxy?.let { runCatching { it.stop() } }
+    proxy = null
     nsd?.stopAdvertise()
     RailReelHostService.stop(ctx)
   }
