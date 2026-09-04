@@ -92,6 +92,20 @@ describe('message parsing', () => {
     if (!r.ok) expect(r.error).toMatch(/unknown client message/)
   })
 
+  it('accepts a valid server chat message with fromId', () => {
+    const msg: ServerMsg = { t: 'chat', from: 'Alice', fromId: 'c1', text: 'Hello!', at: 1234567890 }
+    const r = parseServerMsg(encodeMsg(msg))
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.msg).toEqual(msg)
+  })
+
+  it('accepts a valid server reaction message with fromId', () => {
+    const msg: ServerMsg = { t: 'reaction', from: 'Alice', fromId: 'c1', emoji: '🔥', at: 1234567890 }
+    const r = parseServerMsg(encodeMsg(msg))
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.msg).toEqual(msg)
+  })
+
   it('does not accept a server type on the client channel', () => {
     // 'welcome' is a server message; it must not validate as a client message.
     expect(parseClientMsg('{"t":"welcome"}').ok).toBe(false)

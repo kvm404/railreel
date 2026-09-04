@@ -40,8 +40,8 @@ export type ServerMsg =
   // is re-broadcast on every membership change, so late joiners always catch it.
   | { t: 'roster'; participants: ParticipantInfo[]; media?: MediaInfo }
   | { t: 'requestDecision'; id: string; approved: boolean }
-  | { t: 'chat'; from: string; text: string; at: number }
-  | { t: 'reaction'; from: string; emoji: string; at: number }
+  | { t: 'chat'; from: string; fromId?: string; text: string; at: number }
+  | { t: 'reaction'; from: string; fromId?: string; emoji: string; at: number }
   | { t: 'syncPong'; t1: number; t2: number; t3: number }
   | { t: 'ended'; reason: 'host-left' | 'host-ended' }
 

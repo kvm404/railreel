@@ -327,6 +327,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           !isValidSecret(msg.grant, 22) ||
           typeof msg.id !== 'string' ||
           msg.id.length === 0 ||
+          msg.id === 'host' ||
           typeof msg.name !== 'string' ||
           msg.name.length === 0
         ) {
@@ -384,18 +385,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           true,
         )
       } else if (msg.t === 'chat') {
-        // Hub: validate ownership + content, stamp the sender's NAME and our clock, fan out.
+        // Hub: validate ownership + approval + content, stamp the sender's NAME and our clock, fan out.
         if (!ownsId(msg.id, msg.grant)) return
+        const sender = participantsRef.current.find((p) => p.id === msg.id)
+        if (!sender || sender.status === 'requested' || sender.status === 'left') return
         const text = sanitizeChatText(typeof msg.text === 'string' ? msg.text : '')
         if (!text) return
-        const name = participantsRef.current.find((p) => p.id === msg.id)?.name ?? 'Guest'
+        const name = sender.name ?? 'Guest'
         const at = Date.now()
-        RailReelHost.broadcast(JSON.stringify({ t: 'chat', from: name, text, at })).catch(() => {})
+        RailReelHost.broadcast(JSON.stringify({ t: 'chat', from: name, fromId: msg.id, text, at })).catch(() => {})
         ingestChat(name, text, at)
       } else if (msg.t === 'reaction') {
         if (!ownsId(msg.id, msg.grant) || !isValidReaction(msg.emoji)) return
-        const name = participantsRef.current.find((p) => p.id === msg.id)?.name ?? 'Guest'
-        RailReelHost.broadcast(JSON.stringify({ t: 'reaction', from: name, emoji: msg.emoji, at: Date.now() })).catch(() => {})
+        const sender = participantsRef.current.find((p) => p.id === msg.id)
+        if (!sender || sender.status === 'requested' || sender.status === 'left') return
+        const name = sender.name ?? 'Guest'
+        RailReelHost.broadcast(JSON.stringify({ t: 'reaction', from: name, fromId: msg.id, emoji: msg.emoji, at: Date.now() })).catch(() => {})
         ingestReaction(name, msg.emoji)
       }
     })
@@ -676,7 +681,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (!text) return
       if (roleRef.current === 'host') {
         const at = Date.now()
-        RailReelHost.broadcast(JSON.stringify({ t: 'chat', from: 'Host', text, at })).catch(() => {})
+        RailReelHost.broadcast(JSON.stringify({ t: 'chat', from: 'Host', fromId: 'host', text, at })).catch(() => {})
         ingestChat('You', text, at)
       } else {
         const c = clientRef.current
@@ -693,7 +698,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (now - lastReactionSentRef.current < REACTION_SEND_GAP_MS) return
       lastReactionSentRef.current = now
       if (roleRef.current === 'host') {
-        RailReelHost.broadcast(JSON.stringify({ t: 'reaction', from: 'Host', emoji, at: now })).catch(() => {})
+        RailReelHost.broadcast(JSON.stringify({ t: 'reaction', from: 'Host', fromId: 'host', emoji, at: now })).catch(() => {})
         ingestReaction('You', emoji)
       } else {
         const c = clientRef.current
@@ -885,11 +890,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             // The host's echo is the single source of ordering — we never append optimistically,
             // so our own line arrives here too and gets relabelled.
             if (typeof m.from === 'string' && typeof m.text === 'string' && Number.isFinite(m.at)) {
-              ingestChat(m.from === name ? 'You' : m.from, m.text.slice(0, 280), m.at)
+              const displayName = (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
+              ingestChat(displayName, m.text.slice(0, 280), m.at)
             }
           } else if (m.t === 'reaction') {
             if (typeof m.from === 'string' && isValidReaction(m.emoji)) {
-              ingestReaction(m.from === name ? 'You' : m.from, m.emoji)
+              const displayName = (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
+              ingestReaction(displayName, m.emoji)
             }
           } else if (m.t === 'ended') {
             // The host wrapped the show / left. leave() clears everything (incl. sessionEnd), so
