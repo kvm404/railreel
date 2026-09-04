@@ -14,6 +14,8 @@
  * All pure: the host feeds heartbeat data in, decisions come out. Unit-tested against fixtures.
  */
 
+import type { ParticipantStatus } from '../protocol/session'
+
 export interface GateMedia {
   /** Total bytes of the movie file. */
   sizeBytes: number
@@ -30,6 +32,8 @@ export interface GateClient {
   /** Roster identity (gate results name who the room is waiting on). */
   id: string
   name: string
+  /** Participant lifecycle status (guests that left or are unapproved requested do not hold the start gate). */
+  status?: ParticipantStatus
   /** Fraction of the movie cached (0–1). */
   progress: number
   /** Measured download throughput, Mbps. 0/unknown while downloading = can't prove a safe start. */
@@ -67,8 +71,10 @@ const GATE_DEFAULTS = { minStartBufferSec: 60, finishMarginSec: 60 }
  * gate/floor (H.264 MP4s the app accepts are near-CBR at this granularity); never negative.
  */
 export function downloadBufferedAheadSec(progress: number, durationSec: number, positionSec: number): number {
-  const p = progress < 0 ? 0 : progress > 1 ? 1 : progress
-  const ahead = p * durationSec - positionSec
+  const p = !Number.isFinite(progress) || progress < 0 ? 0 : progress > 1 ? 1 : progress
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0
+  const pos = Number.isFinite(positionSec) && positionSec > 0 ? positionSec : 0
+  const ahead = p * dur - pos
   return ahead > 0 ? ahead : 0
 }
 
@@ -100,6 +106,7 @@ export function decideStartGate(
   let etaSec = 0
 
   for (const c of clients) {
+    if (c.status === 'left' || c.status === 'requested') continue
     if (c.progress >= 1) continue
     const finish = secondsToFinish(c, media)
     if (unprovable) {

@@ -103,8 +103,9 @@ export function PlayerScreen() {
   // Lightweight position readout for the overlay (also mirrored to a ref for the exit handler).
   useEffect(() => {
     const id = setInterval(() => {
-      posRef.current = player.currentTime
-      setPos(player.currentTime)
+      const cur = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
+      posRef.current = cur
+      setPos(cur)
     }, 250)
     return () => clearInterval(id)
   }, [player])
@@ -129,6 +130,8 @@ export function PlayerScreen() {
   const togglePlay = useCallback(() => {
     revealControls()
     if (playing) {
+      autoPausedRef.current = false
+      overrideRef.current = false
       player.pause()
       setPlaying(false)
       setHostPlayback(player.currentTime, false)
@@ -136,7 +139,8 @@ export function PlayerScreen() {
       // Pressing Play while the gate is actively holding the room is a deliberate override (play on
       // without that straggler). Only then — NOT for the normal start where guests are still loading,
       // which should still wait for them.
-      if (autoPausedRef.current) overrideRef.current = true
+      autoPausedRef.current = false
+      overrideRef.current = true
       setEnded(false)
       player.play()
       setPlaying(true)
@@ -148,7 +152,8 @@ export function PlayerScreen() {
     (delta: number) => {
       revealControls()
       setEnded(false)
-      const to = Math.max(0, player.currentTime + delta)
+      const cur = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
+      const to = Math.max(0, cur + delta)
       player.currentTime = to
       setHostPlayback(to, playing)
     },
@@ -180,7 +185,11 @@ export function PlayerScreen() {
     if (!isHost) return
     const pb = playbackRef.current
     if (!pb) return
-    if (pb.positionSec > 0) player.currentTime = pb.positionSec
+    if (pb.positionSec > 0) {
+      player.currentTime = pb.positionSec
+      posRef.current = pb.positionSec
+      setPos(pb.positionSec)
+    }
     if (pb.isPlaying) {
       player.play()
       setPlaying(true)
@@ -188,12 +197,17 @@ export function PlayerScreen() {
     // mount-only: the host owns playback from here via the controls.
   }, [])
 
-  // Host: if it leaves the show (back), pause everyone rather than letting followers run on alone.
+  // If host leaves the show (back), pause everyone rather than letting followers run on alone.
+  // If follower leaves the show (back), notify session so inShow resets and lobby does not trap.
   const exitRef = useRef<() => void>(() => {})
   exitRef.current = () => {
     // Use the mirrored position, never the player — by unmount expo-video may have released it
     // (touching a released player throws "shared object already released").
-    if (isHost) setHostPlayback(posRef.current, false)
+    if (isHost) {
+      setHostPlayback(posRef.current, false)
+    } else {
+      s.exitShow()
+    }
   }
   useEffect(() => () => exitRef.current(), [])
 
@@ -230,7 +244,7 @@ export function PlayerScreen() {
     const pb = playbackRef.current
     if (!pb) return
     const target = targetPositionSec(pb, hostNowMs())
-    const actual = player.currentTime
+    const actual = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
     const now = Date.now()
     const settling = now - lastSeekAtRef.current < SEEK_SETTLE_MS
 
@@ -252,7 +266,7 @@ export function PlayerScreen() {
 
     // A hard seek (big desync) — but not while a previous seek is still landing, or we thrash.
     if (c.seekToSec != null && !settling) {
-      player.currentTime = c.seekToSec
+      player.currentTime = Math.max(0, c.seekToSec)
       lastSeekAtRef.current = now
       pendingSeekAtRef.current = now
     }
@@ -311,7 +325,8 @@ export function PlayerScreen() {
     const report = () => {
       const r = stallReport(player.status !== 'readyToPlay', notReadySinceRef.current, Date.now())
       notReadySinceRef.current = r.notReadySince
-      reportPlayback(r.stalled, player.currentTime)
+      const cur = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
+      reportPlayback(r.stalled, cur)
     }
     report()
     const id = setInterval(report, CORRECT_MS)

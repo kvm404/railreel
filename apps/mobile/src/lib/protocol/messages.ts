@@ -40,8 +40,8 @@ export type ServerMsg =
   // is re-broadcast on every membership change, so late joiners always catch it.
   | { t: 'roster'; participants: ParticipantInfo[]; media?: MediaInfo }
   | { t: 'requestDecision'; id: string; approved: boolean }
-  | { t: 'chat'; from: string; text: string; at: number }
-  | { t: 'reaction'; from: string; emoji: string; at: number }
+  | { t: 'chat'; from: string; fromId?: string; text: string; at: number }
+  | { t: 'reaction'; from: string; fromId?: string; emoji: string; at: number }
   | { t: 'syncPong'; t1: number; t2: number; t3: number }
   | { t: 'ended'; reason: 'host-left' | 'host-ended' }
 
@@ -74,6 +74,7 @@ export type ClientMsg =
   // ACK after a seek / when buffered to start. `grant` proves the sender owns `id`.
   | { t: 'ready'; id: string; grant: string; positionSec: number }
   | { t: 'request'; id: string; action: RequestAction; arg?: number }
+  | { t: 'leave'; id: string; grant: string }
   // Chat + reactions are attributed and grant-proved like every client→host message: the host
   // validates ownership, stamps the sender's NAME and its own clock, and broadcasts the ServerMsg
   // form to everyone (including the sender — the host's echo is the single source of ordering).
@@ -102,6 +103,7 @@ export const CLIENT_MSG_TYPES = [
   'heartbeat',
   'ready',
   'request',
+  'leave',
   'chat',
   'reaction',
   'syncPing',

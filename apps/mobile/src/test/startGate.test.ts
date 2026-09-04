@@ -34,6 +34,13 @@ describe('downloadBufferedAheadSec', () => {
     expect(downloadBufferedAheadSec(1.4, 7200, 0)).toBe(7200)
     expect(downloadBufferedAheadSec(-1, 7200, 0)).toBe(0)
   })
+
+  it('handles NaN or non-finite inputs safely', () => {
+    expect(downloadBufferedAheadSec(NaN, 7200, 0)).toBe(0)
+    expect(downloadBufferedAheadSec(0.5, NaN, 0)).toBe(0)
+    expect(downloadBufferedAheadSec(0.5, 7200, NaN)).toBe(3600)
+    expect(downloadBufferedAheadSec(NaN, NaN, NaN)).toBe(0)
+  })
 })
 
 describe('secondsToFinish', () => {
@@ -149,6 +156,24 @@ describe('decideStartGate', () => {
     const c = client({ progress: 0.005, downloadMbps: 12 }) // 36s buffered
     expect(decideStartGate([c], MOVIE, { minStartBufferSec: 30 }).start).toBe(true)
     expect(decideStartGate([c], MOVIE, { minStartBufferSec: 60 }).start).toBe(false)
+  })
+
+  it('excludes clients with status left from start gate decisions', () => {
+    // A left client with 0% progress would normally block start gate (precache)
+    const leftClient = client({ id: 'c-left', name: 'LeftGuest', progress: 0, downloadMbps: 0, status: 'left' })
+    const readyClient = client({ id: 'c-ready', name: 'ReadyGuest', progress: 1, status: 'ready' })
+    const d = decideStartGate([readyClient, leftClient], MOVIE)
+    expect(d.start).toBe(true)
+    expect(d.waitingOn).toEqual([])
+  })
+
+  it('excludes clients with status requested from start gate decisions', () => {
+    // An unapproved requested guest with 0% progress must not block start gate
+    const reqClient = client({ id: 'c-req', name: 'Stranger', progress: 0, downloadMbps: 0, status: 'requested' })
+    const readyClient = client({ id: 'c-ready', name: 'ReadyGuest', progress: 1, status: 'ready' })
+    const d = decideStartGate([readyClient, reqClient], MOVIE)
+    expect(d.start).toBe(true)
+    expect(d.waitingOn).toEqual([])
   })
 })
 

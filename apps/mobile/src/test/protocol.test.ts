@@ -59,6 +59,13 @@ describe('message parsing', () => {
     if (r.ok) expect(r.msg).toEqual(msg)
   })
 
+  it('accepts a valid leave client message', () => {
+    const msg: ClientMsg = { t: 'leave', id: 'c1', grant: 'g' }
+    const r = parseClientMsg(encodeMsg(msg))
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.msg).toEqual(msg)
+  })
+
   it('accepts a valid server message', () => {
     const msg: ServerMsg = { t: 'resume', atHostMonotonicMs: 12345 }
     const r = parseServerMsg(encodeMsg(msg))
@@ -83,6 +90,34 @@ describe('message parsing', () => {
     const r = parseClientMsg('{"t":"hack"}')
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.error).toMatch(/unknown client message/)
+  })
+
+  it('accepts a valid server chat message with fromId', () => {
+    const msg: ServerMsg = { t: 'chat', from: 'Alice', fromId: 'c1', text: 'Hello!', at: 1234567890 }
+    const r = parseServerMsg(encodeMsg(msg))
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.msg).toEqual(msg)
+  })
+
+  it('accepts a valid server reaction message with fromId', () => {
+    const msg: ServerMsg = { t: 'reaction', from: 'Alice', fromId: 'c1', emoji: '🔥', at: 1234567890 }
+    const r = parseServerMsg(encodeMsg(msg))
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.msg).toEqual(msg)
+  })
+
+  it('disambiguates sender identity using fromId even when display names match', () => {
+    const myId = 'client-1'
+    const name = 'Alex'
+
+    const ownMsg: ServerMsg = { t: 'chat', from: 'Alex', fromId: 'client-1', text: 'Hey', at: 100 }
+    const peerMsg: ServerMsg = { t: 'chat', from: 'Alex', fromId: 'client-2', text: 'Yo', at: 101 }
+
+    const getDisplayName = (m: Extract<ServerMsg, { t: 'chat' }>) =>
+      (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
+
+    expect(getDisplayName(ownMsg)).toBe('You')
+    expect(getDisplayName(peerMsg)).toBe('Alex')
   })
 
   it('does not accept a server type on the client channel', () => {

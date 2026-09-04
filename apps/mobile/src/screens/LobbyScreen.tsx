@@ -31,13 +31,13 @@ export function LobbyScreen() {
 
   // A guest enters the show once the host has started it AND its own download covers the live
   // playhead (+lead) — for a late joiner mid-movie, it waits here until buffered past that point.
-  const { playback, hostNowMs, progress, movie } = s
+  const { playback, hostNowMs, progress, movie, userLeftShow } = s
   const durationSec = movie?.durationSec ?? 0
   useEffect(() => {
-    if (isHost || !playback) return
+    if (isHost || !playback || userLeftShow) return
     const livePos = targetPositionSec(playback, hostNowMs())
     if (canJoinShow(progress, durationSec, livePos)) nav.navigate('Player')
-  }, [isHost, playback, hostNowMs, progress, durationSec, nav])
+  }, [isHost, playback, hostNowMs, progress, durationSec, nav, userLeftShow])
 
   // Relabel the host's own entry to "You"; show our own ring from local progress (smoother echo).
   const people: Participant[] = s.participants.map((p) => {
@@ -45,8 +45,9 @@ export function LobbyScreen() {
     if (!isHost && p.name === 'You') return { ...p, progress: s.progress }
     return p
   })
-  const guests = people.filter((p) => p.id !== 'host')
+  const guests = people.filter((p) => p.id !== 'host' && p.status !== 'requested' && p.status !== 'left')
   const aboard = people.filter((p) => p.status === 'ready').length
+  const activeCount = people.filter((p) => p.status !== 'requested' && p.status !== 'left').length
 
   // The progressive start gate (PRD §7), computed on BOTH roles from the shared roster + media —
   // so the departure clock reads the same on every phone.
@@ -54,7 +55,7 @@ export function LobbyScreen() {
     () =>
       movie
         ? decideStartGate(
-            guests.map((p) => ({ id: p.id, name: p.name, progress: p.progress, downloadMbps: p.downloadMbps, positionSec: 0 })),
+            guests.map((p) => ({ id: p.id, name: p.name, status: p.status, progress: p.progress, downloadMbps: p.downloadMbps, positionSec: 0 })),
             { sizeBytes: movie.sizeBytes, durationSec: movie.durationSec, precacheOnly: !movie.fastStart },
           )
         : null,
@@ -62,10 +63,14 @@ export function LobbyScreen() {
   )
   const readyToDepart = gate?.start ?? false
 
+  const resumePos = Number.isFinite(s.playback?.positionSec) && !s.playback?.ended ? Math.max(0, s.playback!.positionSec) : 0
+  const isResuming = resumePos > 0
+
   const startShow = () => {
     if (!isHost) return
-    // Open the player for everyone PAUSED at the top; the host then presses Play to roll in sync.
-    s.setHostPlayback(0, false, 1)
+    // Open the player for everyone PAUSED at the resume position (or 0 if starting fresh);
+    // the host then presses Play to roll in sync.
+    s.setHostPlayback(resumePos, false, 1)
     nav.navigate('Player')
   }
 
@@ -154,12 +159,22 @@ export function LobbyScreen() {
 
         {isHost ? (
           <Button
-            title={readyToDepart ? 'Start the show' : gate?.mode === 'precache' ? 'Pre-caching…' : 'Building head starts…'}
+            title={
+              !readyToDepart
+                ? gate?.mode === 'precache'
+                  ? 'Pre-caching…'
+                  : 'Building head starts…'
+                : isResuming
+                  ? 'Resume the show'
+                  : 'Start the show'
+            }
             subtitle={
               readyToDepart
-                ? aboard === people.length
-                  ? 'Lights down — everyone in sync'
-                  : 'Head starts locked — downloads finish during the show'
+                ? isResuming
+                  ? `Paused at ${fmtTime(resumePos)}`
+                  : aboard === activeCount && activeCount > 0
+                    ? 'Lights down — everyone in sync'
+                    : 'Head starts locked — downloads finish during the show'
                 : undefined
             }
             intent="amber"
@@ -169,6 +184,16 @@ export function LobbyScreen() {
           />
         ) : downloadFailed ? (
           <Button title="The reel snagged — try again" intent="amber" height={68} onPress={s.retryDownload} />
+        ) : !isHost && userLeftShow && playback && canJoinShow(progress, durationSec, targetPositionSec(playback, hostNowMs())) ? (
+          <Button
+            title="Rejoin the show"
+            intent="amber"
+            height={68}
+            onPress={() => {
+              s.enterShow()
+              nav.navigate('Player')
+            }}
+          />
         ) : (
           <View style={[styles.status, { borderColor: t.palette.hairline }]}>
             <Text variant="cardTitle" tone="cyan">
@@ -202,6 +227,7 @@ function ManifestRow({
   const t = useTheme()
   const p = person
   const requested = p.status === 'requested'
+  const left = p.status === 'left'
   const ready = p.status === 'ready'
   const pct = Math.round(p.progress * 100)
 
@@ -214,6 +240,10 @@ function ManifestRow({
         </Text>
         {ready ? (
           <FlapText value="ABOARD" size={13} tone="amber" stagger={30} />
+        ) : left ? (
+          <Text variant="data" tone="tertiary">
+            left
+          </Text>
         ) : requested ? (
           <Text variant="data" tone="cyan">
             wants in
@@ -230,9 +260,18 @@ function ManifestRow({
           <Button title="Approve" icon={<Check size={16} color={t.palette.onAmber} strokeWidth={2.5} />} intent="amber" height={40} onPress={onApprove} style={{ flex: 1 }} />
           <Button title="Deny" icon={<X size={16} color={t.palette.cyan} strokeWidth={2.5} />} intent="cyan" height={40} onPress={onDeny} style={{ flex: 1 }} />
         </View>
-      ) : !requested ? (
+      ) : !requested && !left ? (
         <View style={{ marginTop: 10 }}>
           <FilamentBar progress={ready ? 1 : p.progress} />
+          {isHost && p.id !== 'host' && (
+            <View style={{ marginTop: 8, alignItems: 'flex-end' }}>
+              <Button title="Remove" intent="cyan" height={32} onPress={onDeny} />
+            </View>
+          )}
+        </View>
+      ) : left && isHost && p.id !== 'host' ? (
+        <View style={{ marginTop: 8, alignItems: 'flex-end' }}>
+          <Button title="Dismiss" intent="cyan" height={32} onPress={onDeny} />
         </View>
       ) : null}
 
@@ -273,6 +312,13 @@ function fmtSize(bytes: number): string {
   if (!(bytes > 0)) return ''
   const gb = bytes / 1e9
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1e6)} MB`
+}
+
+function fmtTime(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) sec = 0
+  const m = Math.floor(sec / 60)
+  const s = Math.floor(sec % 60)
+  return `${m}:${s.toString().padStart(2, '0')}`
 }
 
 const styles = StyleSheet.create({

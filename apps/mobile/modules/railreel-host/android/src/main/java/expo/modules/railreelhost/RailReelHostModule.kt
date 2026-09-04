@@ -80,7 +80,7 @@ class RailReelHostModule : Module() {
           appContext.runtime.schedule {
             when (type) {
               "open" -> sendEvent("onWsOpen", mapOf<String, Any?>())
-              "close" -> sendEvent("onWsClose", mapOf<String, Any?>())
+              "close" -> sendEvent("onWsClose", if (payload != null) mapOf("id" to payload) else mapOf<String, Any?>())
               "message" -> sendEvent("onWsMessage", mapOf("data" to payload))
             }
           }
@@ -330,9 +330,10 @@ class RailReelHostModule : Module() {
           .filter { !it.isLoopbackAddress && it is Inet4Address }
           .mapNotNull { addr -> addr.hostAddress?.let { nif.name to it } }
       }
-    val preferred = candidates.firstOrNull { (name, _) ->
-      name.startsWith("ap") || name.startsWith("swlan") || name.startsWith("wlan")
-    }
+    val preferred = candidates.firstOrNull { (_, ip) -> ip.startsWith("192.168.43.") }
+      ?: candidates.firstOrNull { (name, _) ->
+        name.startsWith("ap") || name.startsWith("softap") || name.startsWith("tether") || name.startsWith("swlan") || name.startsWith("wlan")
+      }
     (preferred ?: candidates.firstOrNull())?.second
   } catch (e: Exception) {
     null
@@ -459,12 +460,14 @@ class RailReelHostModule : Module() {
     return true
   }
 
-  /** Stop the HTTP + WS servers, the advert, and the foreground service. Caller holds `lock`. */
+  /** Stop the HTTP + WS servers, proxy, advert, and the foreground service. Caller holds `lock`. */
   private fun teardown(ctx: android.content.Context) {
     server?.stop()
     server = null
     ctrl?.stop()
     ctrl = null
+    proxy?.let { runCatching { it.stop() } }
+    proxy = null
     nsd?.stopAdvertise()
     RailReelHostService.stop(ctx)
   }
@@ -643,8 +646,9 @@ internal sealed interface ByteRange {
  * answer the identical Range request identically.
  */
 internal fun parseByteRange(header: String?, totalLen: Long): ByteRange {
-  if (header == null || !header.startsWith("bytes=")) return ByteRange.Full
-  val spec = header.removePrefix("bytes=").trim()
+  val trimmed = header?.trim() ?: return ByteRange.Full
+  if (!trimmed.startsWith("bytes=", ignoreCase = true)) return ByteRange.Full
+  val spec = trimmed.substring(6).trim()
   if (spec.contains(",")) return ByteRange.Full // multi-range unsupported → serve full body
   val dash = spec.indexOf('-')
   if (dash < 0) return ByteRange.Full

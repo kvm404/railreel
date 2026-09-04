@@ -151,6 +151,10 @@ export interface SessionStore {
   deny: (id: string) => void
   connect: (joinLink: string, name: string) => Promise<void>
   leave: () => void
+  /** Follower: left the player screen to return to lobby */
+  userLeftShow: boolean
+  exitShow: () => void
+  enterShow: () => void
   /** Client: retry a failed download without re-joining (the grant + approval still stand). */
   retryDownload: () => void
   /** Clear the session-end status once the user acknowledges it. */
@@ -200,8 +204,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const lastReactionSentRef = useRef(0) // client-side reaction rate limit
   const [decodeCaution, setDecodeCaution] = useState<string | null>(null)
   const [hostWarning, setHostWarning] = useState<string | null>(null)
+  const [userLeftShow, setUserLeftShow] = useState(false)
   const [sessionEnd, setSessionEnd] = useState<SessionEnd | null>(null)
   const decodeOkRef = useRef(true) // rides every heartbeat so the host's lobby can flag us
+  const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const downloadingRef = useRef(false) // synchronous re-entrancy guard for startDownload
+  const clientPhaseRef = useRef<ClientPhase>('idle')
 
   // Mutable session handles + identity, read from listeners without stale closures.
   const roleRef = useRef<Role>('none')
@@ -231,8 +239,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const proxyStateRef = useRef<'idle' | 'starting' | 'up' | 'failed'>('idle')
 
   useEffect(() => {
+    return () => {
+      if (stopTimerRef.current) {
+        clearTimeout(stopTimerRef.current)
+        stopTimerRef.current = null
+      }
+    }
+  }, [])
+
+  useEffect(() => {
     roleRef.current = role
   }, [role])
+
+  useEffect(() => {
+    clientPhaseRef.current = clientPhase
+  }, [clientPhase])
 
   // Host preflight: while hosting, keep an eye on the battery — the host phone IS the session
   // (PRD §8), so "plug in" needs saying before the movie dies with it.
@@ -311,6 +332,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           !isValidSecret(msg.grant, 22) ||
           typeof msg.id !== 'string' ||
           msg.id.length === 0 ||
+          msg.id === 'host' ||
           typeof msg.name !== 'string' ||
           msg.name.length === 0
         ) {
@@ -361,23 +383,46 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         updateParticipants((prev) =>
           prev.map((p) => (p.id === msg.id && p.status !== 'requested' ? { ...p, status: 'ready', progress: 1 } : p)),
         )
-      } else if (msg.t === 'chat') {
-        // Hub: validate ownership + content, stamp the sender's NAME and our clock, fan out.
+      } else if (msg.t === 'leave') {
         if (!ownsId(msg.id, msg.grant)) return
+        grantsRef.current.delete(msg.id)
+        updateParticipants((prev) =>
+          prev.map((p) => (p.id === msg.id ? { ...p, status: 'left', stalled: false, inShow: false } : p)),
+          true,
+        )
+      } else if (msg.t === 'chat') {
+        // Hub: validate ownership + approval + content, stamp the sender's NAME and our clock, fan out.
+        if (!ownsId(msg.id, msg.grant)) return
+        const sender = participantsRef.current.find((p) => p.id === msg.id)
+        if (!sender || sender.status === 'requested' || sender.status === 'left') return
         const text = sanitizeChatText(typeof msg.text === 'string' ? msg.text : '')
         if (!text) return
-        const name = participantsRef.current.find((p) => p.id === msg.id)?.name ?? 'Guest'
+        const name = sender.name ?? 'Guest'
         const at = Date.now()
-        RailReelHost.broadcast(JSON.stringify({ t: 'chat', from: name, text, at })).catch(() => {})
+        RailReelHost.broadcast(JSON.stringify({ t: 'chat', from: name, fromId: msg.id, text, at })).catch(() => {})
         ingestChat(name, text, at)
       } else if (msg.t === 'reaction') {
         if (!ownsId(msg.id, msg.grant) || !isValidReaction(msg.emoji)) return
-        const name = participantsRef.current.find((p) => p.id === msg.id)?.name ?? 'Guest'
-        RailReelHost.broadcast(JSON.stringify({ t: 'reaction', from: name, emoji: msg.emoji, at: Date.now() })).catch(() => {})
+        const sender = participantsRef.current.find((p) => p.id === msg.id)
+        if (!sender || sender.status === 'requested' || sender.status === 'left') return
+        const name = sender.name ?? 'Guest'
+        RailReelHost.broadcast(JSON.stringify({ t: 'reaction', from: name, fromId: msg.id, emoji: msg.emoji, at: Date.now() })).catch(() => {})
         ingestReaction(name, msg.emoji)
       }
     })
-    return () => onMessage.remove()
+    const onClose = RailReelHost.addListener('onWsClose', (event?: { id?: string }) => {
+      if (roleRef.current !== 'host') return
+      if (event?.id && event.id !== 'host') {
+        updateParticipants((prev) =>
+          prev.map((p) => (p.id === event.id ? { ...p, status: 'left', stalled: false, inShow: false } : p)),
+          true,
+        )
+      }
+    })
+    return () => {
+      onMessage.remove()
+      onClose.remove()
+    }
   }, [updateParticipants, ownsId, ingestChat, ingestReaction])
 
   // Host: a client whose heartbeats have gone quiet (left / backgrounded / crashed) must stop
@@ -405,6 +450,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // connect, re-hosting) must pass through here — a prior session's dying download otherwise
   // keeps feeding near-zero Mbps into the new session's gate (the "~232 min ETA" bug).
   const resetTransfer = useCallback(() => {
+    downloadingRef.current = false
     downloadRef.current?.cancelAsync().catch(() => {})
     downloadRef.current = null
     RailReelHost.stopProxy().catch(() => {})
@@ -421,6 +467,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   // ── host actions ────────────────────────────────────────────────────────────
   const startHost = useCallback(async () => {
+    if (stopTimerRef.current) {
+      clearTimeout(stopTimerRef.current)
+      stopTimerRef.current = null
+    }
+    setUserLeftShow(false)
     setError(null)
     setHostPhase('starting')
     // Re-hosting (or hosting after having been a guest) must not inherit the previous session:
@@ -558,6 +609,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const approve = useCallback(
     (id: string) => {
+      if (id === 'host') return
       const grant = grantsRef.current.get(id)
       if (!grant) return
       RailReelHost.approve(grant)
@@ -574,6 +626,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const deny = useCallback(
     (id: string) => {
+      if (id === 'host') return
       const grant = grantsRef.current.get(id)
       if (grant) RailReelHost.revoke(grant).catch(() => {})
       grantsRef.current.delete(id)
@@ -611,11 +664,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     (stalled: boolean, positionSec: number) => {
       inShowRef.current = true // only the PlayerScreen calls this — our player is live
       stalledRef.current = stalled
-      positionRef.current = positionSec
+      positionRef.current = Number.isFinite(positionSec) ? Math.max(0, positionSec) : 0
       sendBeat()
     },
     [sendBeat],
   )
+
+  const exitShow = useCallback(() => {
+    inShowRef.current = false
+    setUserLeftShow(true)
+    sendBeat()
+  }, [sendBeat])
+
+  const enterShow = useCallback(() => {
+    setUserLeftShow(false)
+  }, [])
 
   // ── social (the cabin) ──────────────────────────────────────────────────────
   // Both role-aware: the host IS the hub (stamp + broadcast + local append); a guest routes via
@@ -626,7 +689,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (!text) return
       if (roleRef.current === 'host') {
         const at = Date.now()
-        RailReelHost.broadcast(JSON.stringify({ t: 'chat', from: 'Host', text, at })).catch(() => {})
+        RailReelHost.broadcast(JSON.stringify({ t: 'chat', from: 'Host', fromId: 'host', text, at })).catch(() => {})
         ingestChat('You', text, at)
       } else {
         const c = clientRef.current
@@ -643,7 +706,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (now - lastReactionSentRef.current < REACTION_SEND_GAP_MS) return
       lastReactionSentRef.current = now
       if (roleRef.current === 'host') {
-        RailReelHost.broadcast(JSON.stringify({ t: 'reaction', from: 'Host', emoji, at: now })).catch(() => {})
+        RailReelHost.broadcast(JSON.stringify({ t: 'reaction', from: 'Host', fromId: 'host', emoji, at: now })).catch(() => {})
         ingestReaction('You', emoji)
       } else {
         const c = clientRef.current
@@ -660,9 +723,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     // reconnect) must NOT start a second download — two writers on the same cache file, and
     // either one's failure path deleting the file out from under the other (the player then
     // streams a ghost inode the proxy can't see).
-    if (downloadRef.current) {
+    if (downloadRef.current || downloadingRef.current) {
       return
     }
+    downloadingRef.current = true
     // Session epoch at start: if a leave()/new connect() bumps it, this download is a zombie —
     // it must not write telemetry, state, or errors into whatever session came after it.
     const myEpoch = epochRef.current
@@ -679,6 +743,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const freeBytes = await LegacyFS.getFreeDiskStorageAsync().catch(() => -1)
       const storageMsg = storageWarning(freeBytes, mediaRef.current?.sizeBytes ?? 0)
       if (storageMsg) {
+        downloadingRef.current = false
         setError(storageMsg)
         setClientPhase('approved') // freeing space + a re-approval retries
         return
@@ -702,11 +767,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
         // Progressive playback: as soon as we know the final size, stand up the localhost proxy
         // over the growing file and hand THAT to the player — never the partially-written file.
-        if (total > 0 && proxyStateRef.current === 'idle') {
+        // FastStart required: non-faststart MP4 has moov at EOF which causes proxy stalls and ExoPlayer crashes.
+        if (total > 0 && proxyStateRef.current === 'idle' && mediaRef.current?.fastStart === true) {
           proxyStateRef.current = 'starting'
           RailReelHost.startProxy(MOVIE_CACHE, total)
             .then((port) => {
-              if (stale()) return // a newer session owns the proxy state (its own startProxy replaces this server)
+              if (stale()) {
+                RailReelHost.stopProxy().catch(() => {})
+                return
+              }
               proxyStateRef.current = 'up'
               setMovieUri(`http://127.0.0.1:${port}/movie`)
             })
@@ -730,6 +799,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const res = await dl.downloadAsync()
       if (stale() || downloadRef.current !== dl) return // superseded — not ours to finish
       downloadRef.current = null
+      downloadingRef.current = false
       // downloadAsync resolves even on 4xx/5xx (writing the error body to disk) — verify the status
       // before trusting the file, or a 403 would show up as "ready".
       if (!res || res.status < 200 || res.status >= 300) {
@@ -758,6 +828,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       sendBeat()
       ;(clientRef.current ?? c).session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: positionRef.current })
     } catch (e) {
+      downloadingRef.current = false
       if (stale()) return // a zombie's failure must not clobber the next session's phase/error
       downloadRef.current = null
       // NOTE: no deleteAsync here — a failed transfer's partial bytes are harmless (a retry
@@ -788,7 +859,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               setClientPhase('approved')
               startDownload()
             } else {
+              approvedRef.current = false
               setClientPhase('denied')
+              resetTransfer()
             }
           } else if (m.t === 'roster' && Array.isArray(m.participants)) {
             // The roster carries the movie's metadata — what our own buffer math needs.
@@ -830,11 +903,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             // The host's echo is the single source of ordering — we never append optimistically,
             // so our own line arrives here too and gets relabelled.
             if (typeof m.from === 'string' && typeof m.text === 'string' && Number.isFinite(m.at)) {
-              ingestChat(m.from === name ? 'You' : m.from, m.text.slice(0, 280), m.at)
+              const displayName = (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
+              ingestChat(displayName, m.text.slice(0, 280), m.at)
             }
           } else if (m.t === 'reaction') {
             if (typeof m.from === 'string' && isValidReaction(m.emoji)) {
-              ingestReaction(m.from === name ? 'You' : m.from, m.emoji)
+              const displayName = (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
+              ingestReaction(displayName, m.emoji)
             }
           } else if (m.t === 'ended') {
             // The host wrapped the show / left. leave() clears everything (incl. sessionEnd), so
@@ -863,7 +938,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Gives up (and tears down) after MAX_RECONNECT_ATTEMPTS so the UI can't hang forever.
   const reconnect = useCallback(async () => {
     const c = clientRef.current
-    if (!c || reconnectingRef.current || leavingRef.current) return
+    if (!c || reconnectingRef.current || leavingRef.current || clientPhaseRef.current === 'denied') return
     const myEpoch = epochRef.current // a leave()/new connect() bumps this → this loop is stale, abort
     const stale = (): boolean => leavingRef.current || epochRef.current !== myEpoch
     // Re-join only if the host hasn't approved us yet (e.g. it approved during the outage and we
@@ -889,6 +964,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         clientRef.current = { ...c, session }
         reconnectingRef.current = false
         setReconnecting(false)
+        sendBeat()
         return
       } catch {
         // keep retrying until the attempt budget runs out
@@ -905,7 +981,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         body: "Couldn't reach the host — they may have left, or the hotspot dropped.",
       })
     }
-  }, [openClient])
+  }, [openClient, sendBeat])
 
   useEffect(() => {
     reconnectRef.current = reconnect
@@ -925,9 +1001,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }
       const myId = generateSessionId(randomBytes)
       const grant = generateGrant(randomBytes)
+      setUserLeftShow(false)
       leavingRef.current = false
       approvedRef.current = false
       epochRef.current++ // a fresh session — invalidate any reconnect loop left over from a prior one
+      const myEpoch = epochRef.current
       // A fresh join must not inherit ANYTHING from a previous session: no zombie download feeding
       // the gate a dying transfer rate, no stale playback state yanking us straight into the
       // Player, no leftover roster/media.
@@ -945,6 +1023,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       decodeOkRef.current = true
       try {
         const session = await openClient({ payload, myId, grant, name }, true)
+        if (epochRef.current !== myEpoch || leavingRef.current) {
+          session.close()
+          return
+        }
         clientRef.current = { session, payload, grant, myId, name }
         // hostName stays null — the join link doesn't carry the host's name yet.
         setRole('client')
@@ -963,17 +1045,35 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     reconnectingRef.current = false
     approvedRef.current = false
     epochRef.current++ // invalidate any in-flight reconnect loop so it can't resurrect this session
+    setUserLeftShow(false)
+    inShowRef.current = false
+    downloadingRef.current = false
     setReconnecting(false)
     resetTransfer()
     mediaRef.current = null
     setFloorHeld(new Set())
-    clientRef.current?.session.close()
-    clientRef.current = null
+    if (clientRef.current) {
+      try {
+        clientRef.current.session.send({
+          t: 'leave',
+          id: clientRef.current.myId,
+          grant: clientRef.current.grant,
+        })
+      } catch {
+        // best-effort: socket might already be broken
+      }
+      clientRef.current.session.close()
+      clientRef.current = null
+    }
     if (roleRef.current === 'host') {
       // Tell guests the cabin's closing BEFORE the servers die — they get the graceful
       // "cabin went dark" moment instantly, instead of a ~30s reconnect timeout → "lost".
       RailReelHost.broadcast(JSON.stringify({ t: 'ended', reason: 'host-left' })).catch(() => {})
-      setTimeout(() => RailReelHost.stop().catch(() => {}), 200) // let the frame flush first
+      if (stopTimerRef.current) clearTimeout(stopTimerRef.current)
+      stopTimerRef.current = setTimeout(() => {
+        RailReelHost.stop().catch(() => {})
+        stopTimerRef.current = null
+      }, 200) // let the frame flush first
       deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
     }
     hostTokenRef.current = null
@@ -1064,10 +1164,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       deny,
       connect,
       leave,
+      userLeftShow,
+      exitShow,
+      enterShow,
       retryDownload,
       dismissEnd,
     }),
-    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, retryDownload, dismissEnd],
+    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, userLeftShow, exitShow, enterShow, retryDownload, dismissEnd],
   )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>

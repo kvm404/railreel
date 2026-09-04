@@ -5,7 +5,7 @@ export type HostPorts = { httpPort: number; wsPort: number }
 
 type RailReelHostEvents = {
   onWsOpen: () => void
-  onWsClose: () => void
+  onWsClose: (event?: { id?: string }) => void
   onWsMessage: (event: { data: string }) => void
   /** mDNS discovery: a nearby cabin appeared (TXT mirrors the QR payload). */
   onNsdFound: (event: { name: string; host: string; port: number; txt: Record<string, string> }) => void
