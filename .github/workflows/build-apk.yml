@@ -21,6 +21,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Node 20 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -50,7 +55,7 @@ jobs:
       - name: Build Android Release APK
         run: |
           cd apps/mobile/android
-          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon --max-workers=2
+          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon --max-workers=2 --stacktrace
 
       - name: Locate and Prepare APK
         id: apk
