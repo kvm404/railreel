@@ -80,9 +80,11 @@ export function downloadBufferedAheadSec(progress: number, durationSec: number, 
 
 /** Seconds until this client's download completes at its measured rate (Infinity if unknowable). */
 export function secondsToFinish(client: GateClient, media: GateMedia): number {
-  if (client.progress >= 1) return 0
-  if (!(client.downloadMbps > 0)) return Infinity
-  const remainingBytes = (1 - client.progress) * media.sizeBytes
+  const p = Number.isFinite(client.progress) ? Math.max(0, Math.min(1, client.progress)) : 0
+  if (p >= 1) return 0
+  if (!Number.isFinite(client.downloadMbps) || !(client.downloadMbps > 0)) return Infinity
+  const sizeBytes = Number.isFinite(media.sizeBytes) && media.sizeBytes > 0 ? media.sizeBytes : 0
+  const remainingBytes = (1 - p) * sizeBytes
   return (remainingBytes * 8) / (client.downloadMbps * 1e6)
 }
 
@@ -114,9 +116,10 @@ export function decideStartGate(
       if (Number.isFinite(finish)) etaSec = Math.max(etaSec, finish)
       continue
     }
-    const remainingPlaySec = media.durationSec - c.positionSec
+    const pos = Number.isFinite(c.positionSec) && c.positionSec > 0 ? Math.min(media.durationSec, c.positionSec) : 0
+    const remainingPlaySec = Math.max(0, media.durationSec - pos)
     const outruns = finish < remainingPlaySec - finishMarginSec
-    const buffered = downloadBufferedAheadSec(c.progress, media.durationSec, c.positionSec)
+    const buffered = downloadBufferedAheadSec(c.progress, media.durationSec, pos)
     if (!outruns) {
       // Throughput can't beat the playhead — a progressive start would stall mid-movie. The only
       // safe start for this client is after its download completes.
@@ -174,7 +177,8 @@ export function updateFloorHolds(
   for (const c of clients) {
     if (c.progress >= 1) continue
     const threshold = prevHeld.has(c.id) ? releaseSec : floorSec
-    if (c.bufferedAheadSec < threshold) held.add(c.id)
+    const buffered = Number.isFinite(c.bufferedAheadSec) && c.bufferedAheadSec >= 0 ? c.bufferedAheadSec : 0
+    if (buffered < threshold) held.add(c.id)
   }
   return held
 }
@@ -215,7 +219,9 @@ export function smoothedMbps(
   msDelta: number,
   alpha = 0.5,
 ): number {
-  if (msDelta < 250 || bytesDelta < 0) return prevMbps
+  const prev = Number.isFinite(prevMbps) && prevMbps > 0 ? prevMbps : 0
+  if (!Number.isFinite(msDelta) || !Number.isFinite(bytesDelta) || msDelta < 250 || bytesDelta < 0) return prev
   const instant = (bytesDelta * 8) / (msDelta / 1000) / 1e6
-  return prevMbps > 0 ? prevMbps + alpha * (instant - prevMbps) : instant
+  if (!Number.isFinite(instant)) return prev
+  return prev > 0 ? prev + alpha * (instant - prev) : instant
 }

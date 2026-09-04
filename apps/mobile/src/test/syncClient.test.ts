@@ -93,7 +93,20 @@ describe('openSyncSession and rolling NTP drift compensation', () => {
     const driftedOffset = session.estimate.offsetMs
     expect(Math.abs((driftedOffset - initialOffset) - 50)).toBeLessThan(5)
     expect(session.toHostTime(100)).toBeCloseTo(100 + driftedOffset, 0)
+    expect(session.toHostTime(NaN)).toBeCloseTo(driftedOffset, 0)
 
     session.close()
+  })
+
+  it('cancels pending handshake ping timer when socket closes early', async () => {
+    const onMessage = vi.fn()
+    const sessionPromise = openSyncSession('127.0.0.1', 8081, 'token123', onMessage, undefined, 5)
+
+    // Wait for the first ping/pong
+    await new Promise((r) => setTimeout(r, 20))
+    // Trigger close before remaining 4 rounds complete
+    activeSocket!.close()
+
+    await expect(sessionPromise).rejects.toThrow('WebSocket closed')
   })
 })

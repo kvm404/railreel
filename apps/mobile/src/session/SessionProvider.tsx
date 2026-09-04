@@ -589,9 +589,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Host: publish playback. Stamp it with the host's monotonic clock (the timebase clients sync
   // against) so a follower can compute where the playhead should be right now.
   const setHostPlayback = useCallback((positionSec: number, isPlaying: boolean, rate = 1, ended = false) => {
+    const pos = Number.isFinite(positionSec) ? Math.max(0, positionSec) : 0
+    const r = Number.isFinite(rate) && rate > 0 ? rate : 1
     const state: PlaybackState = {
-      positionSec,
-      rate,
+      positionSec: pos,
+      rate: r,
       isPlaying,
       hostMonotonicMs: RailReelHost.getMonotonicMs(),
       ended,
@@ -829,7 +831,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       ;(clientRef.current ?? c).session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: positionRef.current })
     } catch (e) {
       downloadingRef.current = false
-      if (stale()) return // a zombie's failure must not clobber the next session's phase/error
+      if (stale() || clientPhaseRef.current === 'denied' || !approvedRef.current) return // a zombie's or denied client's failure must not clobber phase/error
       downloadRef.current = null
       // NOTE: no deleteAsync here — a failed transfer's partial bytes are harmless (a retry
       // truncates them) and the path may already belong to a newer attempt.
@@ -862,6 +864,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               approvedRef.current = false
               setClientPhase('denied')
               resetTransfer()
+              clientRef.current?.session.close()
+              clientRef.current = null
             }
           } else if (m.t === 'roster' && Array.isArray(m.participants)) {
             // The roster carries the movie's metadata — what our own buffer math needs.
@@ -1176,7 +1180,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
 }
 
-const clamp01 = (n: number): number => (n < 0 ? 0 : n > 1 ? 1 : n)
+const clamp01 = (n: number): number => (!Number.isFinite(n) || n < 0 ? 0 : n > 1 ? 1 : n)
 
 /** Client monotonic clock — must match openSyncSession's timebase so the offset maps correctly. */
 const nowMs = (): number =>

@@ -34,9 +34,14 @@ class CtrlServer(
     val snapshot = synchronized(clients) { clients.toList() }
     if (snapshot.isEmpty() || broadcastExecutor.isShutdown) return
 
-    val futures = snapshot.map { c ->
-      c to broadcastExecutor.submit {
-        c.send(text)
+    val futures = snapshot.mapNotNull { c ->
+      try {
+        c to broadcastExecutor.submit {
+          c.send(text)
+        }
+      } catch (e: Exception) {
+        c.abort("shutdown")
+        null
       }
     }
 

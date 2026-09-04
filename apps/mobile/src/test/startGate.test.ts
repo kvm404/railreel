@@ -53,6 +53,12 @@ describe('secondsToFinish', () => {
     // half of 3GB left at 12 Mbps → 12e9 bits / 12e6 bps = 1000s
     expect(secondsToFinish(client({ progress: 0.5, downloadMbps: 12 }), MOVIE)).toBeCloseTo(1000)
   })
+
+  it('handles NaN progress, downloadMbps, and media size safely', () => {
+    expect(secondsToFinish(client({ progress: NaN }), MOVIE)).toBeGreaterThan(0)
+    expect(secondsToFinish(client({ downloadMbps: NaN }), MOVIE)).toBe(Infinity)
+    expect(secondsToFinish(client({ progress: 0.5, downloadMbps: 12 }), { sizeBytes: NaN, durationSec: 7200 })).toBe(0)
+  })
 })
 
 describe('decideStartGate', () => {
@@ -175,6 +181,13 @@ describe('decideStartGate', () => {
     expect(d.start).toBe(true)
     expect(d.waitingOn).toEqual([])
   })
+
+  it('handles NaN positionSec and progress without crashing or forcing precache incorrectly', () => {
+    const c = client({ progress: 0.5, downloadMbps: 50, positionSec: NaN })
+    const d = decideStartGate([c], MOVIE)
+    expect(d.start).toBe(true)
+    expect(d.mode).toBe('progressive')
+  })
 })
 
 describe('updateFloorHolds', () => {
@@ -190,6 +203,10 @@ describe('updateFloorHolds', () => {
 
   it('does not hold a healthy client', () => {
     expect(updateFloorHolds(new Set(), [floor(0.5, 40)])).toEqual(new Set())
+  })
+
+  it('holds when bufferedAheadSec is NaN (fails safe)', () => {
+    expect(updateFloorHolds(new Set(), [floor(0.5, NaN)])).toEqual(new Set(['c1']))
   })
 
   it('hysteresis: a held client stays held until it recovers past the release mark', () => {
@@ -221,6 +238,12 @@ describe('smoothedMbps', () => {
 
   it('ignores windows too short to measure', () => {
     expect(smoothedMbps(8, 500_000, 100)).toBe(8)
+  })
+
+  it('handles NaN or non-finite inputs without producing NaN', () => {
+    expect(smoothedMbps(8, NaN, 1000)).toBe(8)
+    expect(smoothedMbps(8, 1_000_000, NaN)).toBe(8)
+    expect(smoothedMbps(NaN, 1_000_000, 1000)).toBeCloseTo(8)
   })
 })
 

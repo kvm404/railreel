@@ -53,6 +53,23 @@ describe('decideCorrection', () => {
     }
   })
 
+  it('handles NaN seekLeadSec and NaN baseRate safely', () => {
+    const cHard = decideCorrection({ targetSec: 120, actualSec: 100, isPlaying: true, seekLeadSec: NaN, baseRate: NaN })
+    expect(cHard.action).toBe('play')
+    if (cHard.action === 'play') {
+      expect(cHard.seekToSec).toBe(120)
+      expect(Number.isFinite(cHard.seekToSec)).toBe(true)
+      expect(cHard.rate).toBe(1)
+    }
+
+    const cNudge = decideCorrection({ targetSec: 100.3, actualSec: 100, isPlaying: true, baseRate: NaN })
+    expect(cNudge.action).toBe('play')
+    if (cNudge.action === 'play') {
+      expect(Number.isFinite(cNudge.rate)).toBe(true)
+      expect(cNudge.rate).toBeGreaterThan(1)
+    }
+  })
+
   it('pauses and holds position when off while paused', () => {
     expect(decideCorrection({ targetSec: 100, actualSec: 105, isPlaying: false })).toEqual({
       action: 'pause',

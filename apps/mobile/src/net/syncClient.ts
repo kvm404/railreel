@@ -46,12 +46,23 @@ export function openSyncSession(
     let currentEstimate: ClockEstimate | null = null
     let settled = false
     let keepalive: ReturnType<typeof setInterval> | undefined
-    const ping = () => ws.send(JSON.stringify({ t: 'syncPing', t1: nowMs() }))
+    let pingTimeout: ReturnType<typeof setTimeout> | undefined
+    const ping = () => {
+      try {
+        ws.send(JSON.stringify({ t: 'syncPing', t1: nowMs() }))
+      } catch {
+        // socket closed; timers cleared from a terminal handler
+      }
+    }
 
-    // Clear both timers from every terminal path (resolve/close, error, close, timeout) so the
-    // keepalive interval can never outlive the socket (host stop, WiFi loss, server timeout).
+    // Clear timers from every terminal path (resolve/close, error, close, timeout) so the
+    // keepalive or handshake retry interval can never outlive the socket (host stop, WiFi loss, server timeout).
     const clearTimers = () => {
       clearTimeout(timeout)
+      if (pingTimeout) {
+        clearTimeout(pingTimeout)
+        pingTimeout = undefined
+      }
       if (keepalive) {
         clearInterval(keepalive)
         keepalive = undefined
@@ -116,7 +127,7 @@ export function openSyncSession(
           resolve({
             estimate: currentEstimate,
             samples: samples.length,
-            toHostTime: (clientMs) => clientMs + currentEstimate!.offsetMs,
+            toHostTime: (clientMs) => (Number.isFinite(clientMs) ? clientMs : 0) + (currentEstimate?.offsetMs ?? 0),
             send: (msg) => {
               try {
                 ws.send(JSON.stringify(msg))
@@ -130,7 +141,7 @@ export function openSyncSession(
             },
           })
         } else {
-          setTimeout(ping, 100)
+          pingTimeout = setTimeout(ping, 100)
         }
         return
       }

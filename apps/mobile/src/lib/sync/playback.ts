@@ -140,8 +140,8 @@ export function decideCorrection(p: CorrectionParams): Correction {
   const nearBand = p.nearBandSec ?? DEFAULTS.nearBandSec
   const maxNudgeNear = p.maxRateNudge ?? DEFAULTS.maxRateNudge
   const maxNudgeFar = p.maxRateNudgeFar ?? DEFAULTS.maxRateNudgeFar
-  const baseRate = p.baseRate ?? 1
-  const seekLead = p.seekLeadSec ?? 0
+  const baseRate = typeof p.baseRate === 'number' && Number.isFinite(p.baseRate) && p.baseRate > 0 ? p.baseRate : 1
+  const seekLead = typeof p.seekLeadSec === 'number' && Number.isFinite(p.seekLeadSec) && p.seekLeadSec > 0 ? p.seekLeadSec : 0
   const target = Number.isFinite(p.targetSec) ? Math.max(0, p.targetSec) : 0
   const actual = Number.isFinite(p.actualSec) ? Math.max(0, p.actualSec) : 0
   const drift = target - actual

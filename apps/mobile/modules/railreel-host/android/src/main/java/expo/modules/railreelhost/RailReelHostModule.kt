@@ -606,7 +606,8 @@ private class FileServer(
       }
     }
 
-    return when (val r = parseByteRange(session.headers["range"], fileLen)) {
+    val rangeHeader = session.headers["range"] ?: session.headers.entries.firstOrNull { it.key.equals("range", ignoreCase = true) }?.value
+    return when (val r = parseByteRange(rangeHeader, fileLen)) {
       ByteRange.Full -> newFixedLengthResponse(Response.Status.OK, MIME, media.openAt(0), fileLen).apply {
         addHeader("Accept-Ranges", "bytes")
         addHeader("ETag", etag)

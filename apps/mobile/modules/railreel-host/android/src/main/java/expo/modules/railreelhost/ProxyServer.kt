@@ -41,7 +41,8 @@ class ProxyServer(
       }
     }
 
-    return when (val r = parseByteRange(session.headers["range"], expectedBytes)) {
+    val rangeHeader = session.headers["range"] ?: session.headers.entries.firstOrNull { it.key.equals("range", ignoreCase = true) }?.value
+    return when (val r = parseByteRange(rangeHeader, expectedBytes)) {
       ByteRange.Full -> newFixedLengthResponse(Response.Status.OK, MIME, GrowingFileInputStream(0, expectedBytes), expectedBytes).apply {
         addHeader("Accept-Ranges", "bytes")
       }
