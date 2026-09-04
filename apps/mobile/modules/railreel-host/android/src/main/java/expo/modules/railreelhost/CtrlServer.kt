@@ -5,6 +5,8 @@ import fi.iki.elonen.NanoWSD
 import org.json.JSONObject
 import java.io.IOException
 import java.util.Collections
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * WebSocket control plane for the host. Carries clock sync + play/pause/seek/chat/reactions.
@@ -17,20 +19,45 @@ import java.util.Collections
 class CtrlServer(
   port: Int,
   private val token: String,
-  /** type ∈ {"open","close","message"}; payload is the text frame for "message". */
+  /** type ∈ {"open","close","message"}; payload is the text frame for "message" or clientId for "close". */
   private val onEvent: (type: String, payload: String?) -> Unit,
 ) : NanoWSD(port) {
 
-  private val clients = Collections.synchronizedSet(mutableSetOf<WebSocket>())
+  private val clients = Collections.synchronizedSet(mutableSetOf<CtrlSocket>())
+  private val broadcastExecutor = Executors.newCachedThreadPool()
 
   override fun openWebSocket(handshake: IHTTPSession): WebSocket = CtrlSocket(handshake)
 
-  /** Send a text frame to every connected client. Prune any whose send fails. */
+  /** Send a text frame to every connected client concurrently with timeout. Prune any whose send fails or times out. */
   fun broadcast(text: String) {
-    // Snapshot under the lock, then write outside it so a slow client can't block the others.
     val snapshot = synchronized(clients) { clients.toList() }
-    val dead = snapshot.filter { c -> runCatching { c.send(text) }.isFailure }
-    if (dead.isNotEmpty()) synchronized(clients) { clients.removeAll(dead.toSet()) }
+    if (snapshot.isEmpty()) return
+
+    val futures = snapshot.map { c ->
+      c to broadcastExecutor.submit {
+        c.send(text)
+      }
+    }
+
+    val dead = mutableListOf<CtrlSocket>()
+    for ((c, future) in futures) {
+      try {
+        future.get(1500, TimeUnit.MILLISECONDS)
+      } catch (e: Exception) {
+        future.cancel(true)
+        runCatching { c.close(WebSocketFrame.CloseCode.NormalClosure, "timeout", false) }
+        dead.add(c)
+      }
+    }
+
+    if (dead.isNotEmpty()) {
+      synchronized(clients) { clients.removeAll(dead.toSet()) }
+    }
+  }
+
+  override fun stop() {
+    runCatching { broadcastExecutor.shutdownNow() }
+    super.stop()
   }
 
   private inner class CtrlSocket(private val handshake: IHTTPSession) : WebSocket(handshake) {
@@ -38,6 +65,8 @@ class CtrlServer(
     // emitting a phantom "close" for a connection that was never accepted (NanoWSD still runs
     // onClose after we reject an unauthorized upgrade).
     private var accepted = false
+    private var closedEmitted = false
+    @Volatile var clientId: String? = null
 
     override fun onOpen() {
       if (handshake.parameters["tk"]?.firstOrNull() != token) {
@@ -51,13 +80,20 @@ class CtrlServer(
 
     override fun onClose(code: WebSocketFrame.CloseCode?, reason: String?, initiatedByRemote: Boolean) {
       clients.remove(this)
-      if (accepted) onEvent("close", null)
+      if (accepted && !closedEmitted) {
+        closedEmitted = true
+        onEvent("close", clientId)
+      }
     }
 
     override fun onMessage(message: WebSocketFrame) {
       val recvMs = nowMs() // capture receipt time immediately (monotonic)
       val text = message.textPayload ?: return
       val obj = runCatching { JSONObject(text) }.getOrNull()
+      val id = obj?.optString("id")
+      if (!id.isNullOrEmpty()) {
+        clientId = id
+      }
       if (obj?.optString("t") == "syncPing") {
         // Answer the clock handshake natively for accuracy. Only reply to a well-formed ping
         // (finite t1) so a malformed frame can't produce a NaN sample on the client.
@@ -79,6 +115,10 @@ class CtrlServer(
 
     override fun onException(exception: IOException?) {
       clients.remove(this)
+      if (accepted && !closedEmitted) {
+        closedEmitted = true
+        onEvent("close", clientId)
+      }
     }
   }
 

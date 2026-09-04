@@ -45,7 +45,7 @@ export function LobbyScreen() {
     if (!isHost && p.name === 'You') return { ...p, progress: s.progress }
     return p
   })
-  const guests = people.filter((p) => p.id !== 'host')
+  const guests = people.filter((p) => p.id !== 'host' && p.status !== 'requested' && p.status !== 'left')
   const aboard = people.filter((p) => p.status === 'ready').length
 
   // The progressive start gate (PRD §7), computed on BOTH roles from the shared roster + media —
@@ -54,7 +54,7 @@ export function LobbyScreen() {
     () =>
       movie
         ? decideStartGate(
-            guests.map((p) => ({ id: p.id, name: p.name, progress: p.progress, downloadMbps: p.downloadMbps, positionSec: 0 })),
+            guests.map((p) => ({ id: p.id, name: p.name, status: p.status, progress: p.progress, downloadMbps: p.downloadMbps, positionSec: 0 })),
             { sizeBytes: movie.sizeBytes, durationSec: movie.durationSec, precacheOnly: !movie.fastStart },
           )
         : null,
@@ -202,6 +202,7 @@ function ManifestRow({
   const t = useTheme()
   const p = person
   const requested = p.status === 'requested'
+  const left = p.status === 'left'
   const ready = p.status === 'ready'
   const pct = Math.round(p.progress * 100)
 
@@ -214,6 +215,10 @@ function ManifestRow({
         </Text>
         {ready ? (
           <FlapText value="ABOARD" size={13} tone="amber" stagger={30} />
+        ) : left ? (
+          <Text variant="data" tone="tertiary">
+            left
+          </Text>
         ) : requested ? (
           <Text variant="data" tone="cyan">
             wants in
@@ -230,9 +235,18 @@ function ManifestRow({
           <Button title="Approve" icon={<Check size={16} color={t.palette.onAmber} strokeWidth={2.5} />} intent="amber" height={40} onPress={onApprove} style={{ flex: 1 }} />
           <Button title="Deny" icon={<X size={16} color={t.palette.cyan} strokeWidth={2.5} />} intent="cyan" height={40} onPress={onDeny} style={{ flex: 1 }} />
         </View>
-      ) : !requested ? (
+      ) : !requested && !left ? (
         <View style={{ marginTop: 10 }}>
           <FilamentBar progress={ready ? 1 : p.progress} />
+          {isHost && (
+            <View style={{ marginTop: 8, alignItems: 'flex-end' }}>
+              <Button title="Remove" intent="cyan" height={32} onPress={onDeny} />
+            </View>
+          )}
+        </View>
+      ) : left && isHost ? (
+        <View style={{ marginTop: 8, alignItems: 'flex-end' }}>
+          <Button title="Dismiss" intent="cyan" height={32} onPress={onDeny} />
         </View>
       ) : null}
 

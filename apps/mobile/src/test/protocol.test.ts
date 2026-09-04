@@ -59,6 +59,13 @@ describe('message parsing', () => {
     if (r.ok) expect(r.msg).toEqual(msg)
   })
 
+  it('accepts a valid leave client message', () => {
+    const msg: ClientMsg = { t: 'leave', id: 'c1', grant: 'g' }
+    const r = parseClientMsg(encodeMsg(msg))
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.msg).toEqual(msg)
+  })
+
   it('accepts a valid server message', () => {
     const msg: ServerMsg = { t: 'resume', atHostMonotonicMs: 12345 }
     const r = parseServerMsg(encodeMsg(msg))

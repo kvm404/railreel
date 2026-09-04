@@ -361,6 +361,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         updateParticipants((prev) =>
           prev.map((p) => (p.id === msg.id && p.status !== 'requested' ? { ...p, status: 'ready', progress: 1 } : p)),
         )
+      } else if (msg.t === 'leave') {
+        if (!ownsId(msg.id, msg.grant)) return
+        updateParticipants((prev) =>
+          prev.map((p) => (p.id === msg.id ? { ...p, status: 'left', stalled: false, inShow: false } : p)),
+          true,
+        )
       } else if (msg.t === 'chat') {
         // Hub: validate ownership + content, stamp the sender's NAME and our clock, fan out.
         if (!ownsId(msg.id, msg.grant)) return
@@ -377,7 +383,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         ingestReaction(name, msg.emoji)
       }
     })
-    return () => onMessage.remove()
+    const onClose = RailReelHost.addListener('onWsClose', (event?: { id?: string }) => {
+      if (roleRef.current !== 'host') return
+      if (event?.id) {
+        updateParticipants((prev) =>
+          prev.map((p) => (p.id === event.id ? { ...p, status: 'left', stalled: false, inShow: false } : p)),
+          true,
+        )
+      }
+    })
+    return () => {
+      onMessage.remove()
+      onClose.remove()
+    }
   }, [updateParticipants, ownsId, ingestChat, ingestReaction])
 
   // Host: a client whose heartbeats have gone quiet (left / backgrounded / crashed) must stop
@@ -967,8 +985,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     resetTransfer()
     mediaRef.current = null
     setFloorHeld(new Set())
-    clientRef.current?.session.close()
-    clientRef.current = null
+    if (clientRef.current) {
+      try {
+        clientRef.current.session.send({
+          t: 'leave',
+          id: clientRef.current.myId,
+          grant: clientRef.current.grant,
+        })
+      } catch {
+        // best-effort: socket might already be broken
+      }
+      clientRef.current.session.close()
+      clientRef.current = null
+    }
     if (roleRef.current === 'host') {
       // Tell guests the cabin's closing BEFORE the servers die — they get the graceful
       // "cabin went dark" moment instantly, instead of a ~30s reconnect timeout → "lost".

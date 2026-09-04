@@ -74,6 +74,7 @@ export type ClientMsg =
   // ACK after a seek / when buffered to start. `grant` proves the sender owns `id`.
   | { t: 'ready'; id: string; grant: string; positionSec: number }
   | { t: 'request'; id: string; action: RequestAction; arg?: number }
+  | { t: 'leave'; id: string; grant: string }
   // Chat + reactions are attributed and grant-proved like every client→host message: the host
   // validates ownership, stamps the sender's NAME and its own clock, and broadcasts the ServerMsg
   // form to everyone (including the sender — the host's echo is the single source of ordering).
@@ -102,6 +103,7 @@ export const CLIENT_MSG_TYPES = [
   'heartbeat',
   'ready',
   'request',
+  'leave',
   'chat',
   'reaction',
   'syncPing',

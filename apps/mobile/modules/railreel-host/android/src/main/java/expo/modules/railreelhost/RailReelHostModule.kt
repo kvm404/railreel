@@ -80,7 +80,7 @@ class RailReelHostModule : Module() {
           appContext.runtime.schedule {
             when (type) {
               "open" -> sendEvent("onWsOpen", mapOf<String, Any?>())
-              "close" -> sendEvent("onWsClose", mapOf<String, Any?>())
+              "close" -> sendEvent("onWsClose", if (payload != null) mapOf("id" to payload) else mapOf<String, Any?>())
               "message" -> sendEvent("onWsMessage", mapOf("data" to payload))
             }
           }

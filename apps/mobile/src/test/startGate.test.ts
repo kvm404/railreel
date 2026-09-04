@@ -150,6 +150,24 @@ describe('decideStartGate', () => {
     expect(decideStartGate([c], MOVIE, { minStartBufferSec: 30 }).start).toBe(true)
     expect(decideStartGate([c], MOVIE, { minStartBufferSec: 60 }).start).toBe(false)
   })
+
+  it('excludes clients with status left from start gate decisions', () => {
+    // A left client with 0% progress would normally block start gate (precache)
+    const leftClient = client({ id: 'c-left', name: 'LeftGuest', progress: 0, downloadMbps: 0, status: 'left' })
+    const readyClient = client({ id: 'c-ready', name: 'ReadyGuest', progress: 1, status: 'ready' })
+    const d = decideStartGate([readyClient, leftClient], MOVIE)
+    expect(d.start).toBe(true)
+    expect(d.waitingOn).toEqual([])
+  })
+
+  it('excludes clients with status requested from start gate decisions', () => {
+    // An unapproved requested guest with 0% progress must not block start gate
+    const reqClient = client({ id: 'c-req', name: 'Stranger', progress: 0, downloadMbps: 0, status: 'requested' })
+    const readyClient = client({ id: 'c-ready', name: 'ReadyGuest', progress: 1, status: 'ready' })
+    const d = decideStartGate([readyClient, reqClient], MOVIE)
+    expect(d.start).toBe(true)
+    expect(d.waitingOn).toEqual([])
+  })
 })
 
 describe('updateFloorHolds', () => {
