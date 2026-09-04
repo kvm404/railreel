@@ -209,6 +209,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const decodeOkRef = useRef(true) // rides every heartbeat so the host's lobby can flag us
   const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const downloadingRef = useRef(false) // synchronous re-entrancy guard for startDownload
+  const clientPhaseRef = useRef<ClientPhase>('idle')
 
   // Mutable session handles + identity, read from listeners without stale closures.
   const roleRef = useRef<Role>('none')
@@ -249,6 +250,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     roleRef.current = role
   }, [role])
+
+  useEffect(() => {
+    clientPhaseRef.current = clientPhase
+  }, [clientPhase])
 
   // Host preflight: while hosting, keep an eye on the battery — the host phone IS the session
   // (PRD §8), so "plug in" needs saying before the movie dies with it.
@@ -380,6 +385,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         )
       } else if (msg.t === 'leave') {
         if (!ownsId(msg.id, msg.grant)) return
+        grantsRef.current.delete(msg.id)
         updateParticipants((prev) =>
           prev.map((p) => (p.id === msg.id ? { ...p, status: 'left', stalled: false, inShow: false } : p)),
           true,
@@ -658,7 +664,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     (stalled: boolean, positionSec: number) => {
       inShowRef.current = true // only the PlayerScreen calls this — our player is live
       stalledRef.current = stalled
-      positionRef.current = positionSec
+      positionRef.current = Number.isFinite(positionSec) ? Math.max(0, positionSec) : 0
       sendBeat()
     },
     [sendBeat],
@@ -766,7 +772,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           proxyStateRef.current = 'starting'
           RailReelHost.startProxy(MOVIE_CACHE, total)
             .then((port) => {
-              if (stale()) return // a newer session owns the proxy state (its own startProxy replaces this server)
+              if (stale()) {
+                RailReelHost.stopProxy().catch(() => {})
+                return
+              }
               proxyStateRef.current = 'up'
               setMovieUri(`http://127.0.0.1:${port}/movie`)
             })
@@ -850,7 +859,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               setClientPhase('approved')
               startDownload()
             } else {
+              approvedRef.current = false
               setClientPhase('denied')
+              resetTransfer()
             }
           } else if (m.t === 'roster' && Array.isArray(m.participants)) {
             // The roster carries the movie's metadata — what our own buffer math needs.
@@ -927,7 +938,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Gives up (and tears down) after MAX_RECONNECT_ATTEMPTS so the UI can't hang forever.
   const reconnect = useCallback(async () => {
     const c = clientRef.current
-    if (!c || reconnectingRef.current || leavingRef.current) return
+    if (!c || reconnectingRef.current || leavingRef.current || clientPhaseRef.current === 'denied') return
     const myEpoch = epochRef.current // a leave()/new connect() bumps this → this loop is stale, abort
     const stale = (): boolean => leavingRef.current || epochRef.current !== myEpoch
     // Re-join only if the host hasn't approved us yet (e.g. it approved during the outage and we
@@ -953,6 +964,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         clientRef.current = { ...c, session }
         reconnectingRef.current = false
         setReconnecting(false)
+        sendBeat()
         return
       } catch {
         // keep retrying until the attempt budget runs out
@@ -969,7 +981,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         body: "Couldn't reach the host — they may have left, or the hotspot dropped.",
       })
     }
-  }, [openClient])
+  }, [openClient, sendBeat])
 
   useEffect(() => {
     reconnectRef.current = reconnect

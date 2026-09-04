@@ -47,6 +47,7 @@ export function LobbyScreen() {
   })
   const guests = people.filter((p) => p.id !== 'host' && p.status !== 'requested' && p.status !== 'left')
   const aboard = people.filter((p) => p.status === 'ready').length
+  const activeCount = people.filter((p) => p.status !== 'requested' && p.status !== 'left').length
 
   // The progressive start gate (PRD §7), computed on BOTH roles from the shared roster + media —
   // so the departure clock reads the same on every phone.
@@ -62,7 +63,7 @@ export function LobbyScreen() {
   )
   const readyToDepart = gate?.start ?? false
 
-  const resumePos = s.playback?.ended ? 0 : (s.playback?.positionSec ?? 0)
+  const resumePos = Number.isFinite(s.playback?.positionSec) && !s.playback?.ended ? Math.max(0, s.playback!.positionSec) : 0
   const isResuming = resumePos > 0
 
   const startShow = () => {
@@ -171,7 +172,7 @@ export function LobbyScreen() {
               readyToDepart
                 ? isResuming
                   ? `Paused at ${fmtTime(resumePos)}`
-                  : aboard === people.length
+                  : aboard === activeCount && activeCount > 0
                     ? 'Lights down — everyone in sync'
                     : 'Head starts locked — downloads finish during the show'
                 : undefined
