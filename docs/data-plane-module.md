@@ -18,7 +18,7 @@ hotspot, 2026-06-27). See `docs/architecture.md` and `docs/native-modules.md`.
 **Important scoping decision (per codex review):** the "client needs no custom native code" claim
 holds **only for full pre-cache** — download the whole movie, *then* play a complete local file.
 For **progressive** playback (playing while still downloading) the client *would* need native
-player-cache plumbing (ExoPlayer `CacheDataSource` / iOS `AVAssetResourceLoader`), because you
+player-cache plumbing (such as ExoPlayer `CacheDataSource`), because you
 must never point a player at a partially-written file (see `architecture.md` §7).
 
 So **v1 ships full pre-cache** (the lobby's readiness rings already fit this: everyone downloads
@@ -43,7 +43,6 @@ So the only thing we must build natively for v1 is the **host server**. That's t
 builds. Must add:
 - **Android:** `usesCleartextTraffic` (or a network-security-config allowing cleartext to the
   dynamic LAN IP range) via `app.json` `expo.android`.
-- **iOS:** `NSAppTransportSecurity.NSAllowsArbitraryLoadsInLocalNetworking = true` in `infoPlist`.
 Test **both** the `expo-file-system` download and the RN WebSocket over `http`/`ws` (the spike
 used raw sockets, which bypassed this).
 
@@ -56,8 +55,7 @@ HOST (custom native module)            CLIENT (no custom native)
 
 ## 3. The host module: `railreel-host` (Expo native module)
 
-Local Expo module under `apps/mobile/modules/railreel-host`. **Android first** (both your test
-phones are Android; iOS port follows once proven).
+Local Expo module under `apps/mobile/modules/railreel-host` (Android only).
 
 ### 3.1 Responsibilities
 1. **HTTP/1.1 server with `Range`** serving the selected movie file (and a small metadata
@@ -77,7 +75,7 @@ phones are Android; iOS port follows once proven).
   sustained aggregate Mbps, no heap growth.**
 - **Range compliance is not just "supports Range":** must do correct `206`, `416`,
   `Content-Range`, `Accept-Ranges`, `Content-Length`, **`HEAD`**, cancellation, and a stable
-  validator (`ETag`/`Last-Modified`) — iOS `URLSession`/Android resume are picky about validators.
+  validator (`ETag`/`Last-Modified`) — Android download resume is picky about validators.
   **Add a range-compliance check before any throughput number counts.**
 - **File source:** the picked movie is typically a **`content://` URI** (Storage Access
   Framework), not a filesystem path. Stream ranges from a **seekable `ParcelFileDescriptor`/SAF**
@@ -94,12 +92,7 @@ phones are Android; iOS port follows once proven).
 - Permissions: `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `WAKE_LOCK`, `POST_NOTIFICATIONS`
   (+ the WiFi/multicast perms already in `app.json`).
 
-### 3.3 iOS (Swift) approach — after Android
-- **HTTP server:** GCDWebServer (mature, `Range`) or `Network.framework` `NWListener`.
-- **Keep-alive:** iOS won't allow reliable background hosting — v1 keeps the host **foreground**
-  (screen on, app open), per `architecture.md` §9. `UIBackgroundModes: audio` is already set.
-
-### 3.4 JS API (the Expo module surface)
+### 3.3 JS API (the Expo module surface)
 ```ts
 // fileUri = content:// (SAF) or file://; accessMode tells the server how to open it.
 // port 0 = let the OS pick; the resolved port is returned and encoded into the QR/mDNS TXT.
@@ -114,8 +107,8 @@ RailReelHost.setApprovedClients(ids: string[]): void
 - **Port handling:** bind `0` or retry on conflict; return the actual port; never assume a fixed one.
 
 ## 4. Discovery
-- mDNS via `react-native-zeroconf` or `expo-bonjour` (both likely "untested on New Arch" —
-  validate, fall back to interop). **The QR / `railreel://join` link is the guaranteed path** and
+- mDNS via Android NSD (`NsdManager` / `railreel-host`) or `react-native-zeroconf` (both
+  Android-first). **The QR / `railreel://join` link is the guaranteed path** and
   is already implemented (`lib/protocol/joinPayload`). mDNS is convenience, not a dependency.
 
 ## 5. Milestones (each ends in a verifiable on-device check)
@@ -150,7 +143,7 @@ RailReelHost.setApprovedClients(ids: string[]): void
    **cache / no-backup** storage with a cleanup policy.
 6. **M6 — Discovery + polish.** mDNS auto-discovery (QR/link stays the guaranteed path);
    reconnection; error/empty states.
-7. **Later — Progressive playback** (client-side native player cache) and the **iOS port**, once
+7. **Later — Progressive playback** (client-side native player cache), once
    Android pre-cache is proven end-to-end.
 
 ## 6. Notes / risks

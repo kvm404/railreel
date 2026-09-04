@@ -238,7 +238,7 @@ function Glyph({
           width: cellW,
           textAlign: 'center',
           textAlignVertical: 'center',
-          includeFontPadding: false, // Android: keep both halves aligned to the hinge like iOS
+          includeFontPadding: false, // Android: keep both halves aligned to the hinge
           color,
           marginTop: which === 'bottom' ? -cellH / 2 : 0,
         }}

@@ -23,7 +23,7 @@ with live reactions and chat so it still feels like watching *together*.
 ## 3. Target users & scale
 
 - Groups of **4–6 people** in one session.
-- **Mixed iOS + Android** friend groups (both platforms are first-class).
+- Friends with **Android** devices (the application is Android-only).
 - Travel contexts: trains, planes, road trips, hostels, anywhere with no/poor internet.
 
 ## 4. Core experience
@@ -73,16 +73,16 @@ See [`docs/architecture.md`](../architecture.md) for the full networking, sync, 
 
 **In scope**
 
-- Manual hotspot onboarding (guided — apps can't toggle hotspot on iOS/Android).
-- **Discovery:** mDNS/Bonjour for tap-to-join convenience; **robust fallback is a QR code /
+- Manual hotspot onboarding (guided — apps can't toggle hotspot on Android).
+- **Discovery:** mDNS (Android NSD) for tap-to-join convenience; **robust fallback is a QR code /
   link** that encodes host IP + ports + session id + a **secret join token** (a 4-digit code
   alone can't resolve the host's IP offline, so it's only a human confirmation, not transport).
 - Event create → request-to-join → **host approves each person** → readiness lobby.
 - **Native** HTTP data-plane server with `Range` support (not a JS-bridge server) → file
   transfer; **all WS + HTTP access requires the session token**, bytes served only to approved
   clients.
-- Local playback fed through a **caching player source** (ExoPlayer `CacheDataSource` /
-  iOS resource-loader or a local proxy) — never point the player at a partially-written file.
+- Local playback fed through a **caching player source** (ExoPlayer `CacheDataSource` or a
+  local proxy) — never point the player at a partially-written file.
 - **Adaptive start gate** (aggregate-throughput aware) + **group buffer floor with hysteresis
   & a host "continue without client" / evict option** (§7).
 - Clock sync from **monotonic** clocks; resume actuated by **scheduling a future host time +
@@ -95,7 +95,7 @@ See [`docs/architecture.md`](../architecture.md) for the full networking, sync, 
 - **Preflight checks:** measure real aggregate throughput with all clients connected; host
   battery/thermal/storage check; pick progressive-start vs. full pre-cache accordingly.
 - Reconnection: a dropped client rejoins and resyncs to the host's timestamp.
-- iOS + Android.
+- Android.
 
 **Out of scope (later versions)**
 
@@ -127,12 +127,11 @@ Not a flat preload. Two mechanisms:
 - **Fully offline.** Only a local WiFi/hotspot link between phones. No internet, no accounts.
 - **DRM-free files only.** Only movies the host legitimately owns as plain files; encrypted
   store downloads (Netflix/Prime) can't be shared — surfaced clearly in-app.
-- **Cross-platform parity.** Host and client roles work on both iOS and Android.
+- **Android focus.** Both host and client roles work on Android.
 - **Host is the session's lifeline (explicit v1 constraint).** While hosting, the host phone
   must stay **foreground, awake (keep-awake on), powered enough, and on the hotspot**. The app
   does a battery/thermal/storage preflight and states clearly: *if the host leaves/locks/kills
-  the app or the hotspot drops, the session ends.* No background-hosting reliability promise
-  (especially on iOS).
+  the app or the hotspot drops, the session ends.* No background-hosting reliability promise.
 - **Security.** Each session has a high-entropy secret; WS control and HTTP byte-serving both
   require it, and bytes go only to host-approved clients. Anyone merely on the hotspot can't
   pull the movie. Include file hash/size metadata so clients verify integrity.
@@ -142,7 +141,7 @@ Not a flat preload. Two mechanisms:
 
 ## 9. Success criteria (v1)
 
-- A host + 3–5 mixed-OS clients on a hotspot complete the full flow: discover → join →
+- A host + 3–5 Android clients on a hotspot complete the full flow: discover → join →
   approve → lobby → synced playback to the end of a movie.
 - Perceived sync stays tight (no client visibly ahead/behind during normal playback).
 - A client can drop and rejoin mid-movie and resync automatically.

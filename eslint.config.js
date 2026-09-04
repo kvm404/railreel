@@ -7,7 +7,6 @@ export default defineConfig([
   globalIgnores([
     'apps/**/.expo',
     'apps/**/android',
-    'apps/**/ios',
     '**/node_modules',
     '**/dist',
   ]),

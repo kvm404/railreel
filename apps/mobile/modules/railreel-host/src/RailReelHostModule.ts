@@ -59,8 +59,8 @@ declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
   createTestFile(sizeMb: number): Promise<string>
 }
 
-// Android-only native module. On other platforms, expose a stub so importing it (which runs at
-// module-load time) never throws — the host role is Android-first for v1.
+// Android-only native module. In non-Android environments (e.g. tests), expose a stub so importing it
+// (which runs at module-load time) never throws.
 const androidOnly = (): RailReelHostModule => {
   const unavailable = async () => {
     throw new Error('RailReelHost is only available on Android')

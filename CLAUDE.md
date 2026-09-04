@@ -1,7 +1,7 @@
 # RailReel — Claude Code Configuration
 
 RailReel: an **offline, in-sync group movie-watching** app. One host shares a local movie over
-their WiFi hotspot; 4–6 friends (mixed iOS + Android) watch in sync on their own phones, with
+their WiFi hotspot; 4–6 friends watch in sync on their own Android phones, with
 reactions and chat. No internet, no accounts. See `docs/prd/railreel-v1.md` and
 `docs/architecture.md` — read both before non-trivial work.
 
@@ -42,8 +42,7 @@ phones, stop: that's the wrong direction. See `docs/architecture.md` §5.
 - **bun** is the package manager and workspace runner. Use `bun`, not npm/yarn/pnpm.
 - **Expo custom dev client** (`expo-dev-client`) — Expo Go is NOT sufficient (native modules).
 - React Native 0.81 / React 19 / Expo SDK 54, **TypeScript strict**.
-- **Both iOS and Android are first-class.** Don't write Android-only or iOS-only paths without
-  a cross-platform plan.
+- **Android-only.** The app is designed exclusively for Android devices.
 
 ## Testing
 
@@ -59,6 +58,6 @@ phones, stop: that's the wrong direction. See `docs/architecture.md` §5.
 ## Working style
 
 - **Human-agentic loop:** when a manual step is required (enable hotspot, connect a phone via
-  ADB, accept iOS Local Network permission, Apple dev account, etc.), tell the user clearly.
+  ADB, grant Android permissions, etc.), tell the user clearly.
 - **Codex is the review partner.** Use `codex exec` for plan reviews, PR reviews, and second
   opinions, with a strong role prompt each time.
