@@ -151,6 +151,10 @@ export interface SessionStore {
   deny: (id: string) => void
   connect: (joinLink: string, name: string) => Promise<void>
   leave: () => void
+  /** Follower: left the player screen to return to lobby */
+  userLeftShow: boolean
+  exitShow: () => void
+  enterShow: () => void
   /** Client: retry a failed download without re-joining (the grant + approval still stand). */
   retryDownload: () => void
   /** Clear the session-end status once the user acknowledges it. */
@@ -200,8 +204,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const lastReactionSentRef = useRef(0) // client-side reaction rate limit
   const [decodeCaution, setDecodeCaution] = useState<string | null>(null)
   const [hostWarning, setHostWarning] = useState<string | null>(null)
+  const [userLeftShow, setUserLeftShow] = useState(false)
   const [sessionEnd, setSessionEnd] = useState<SessionEnd | null>(null)
   const decodeOkRef = useRef(true) // rides every heartbeat so the host's lobby can flag us
+  const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const downloadingRef = useRef(false) // synchronous re-entrancy guard for startDownload
 
   // Mutable session handles + identity, read from listeners without stale closures.
   const roleRef = useRef<Role>('none')
@@ -229,6 +236,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Playback-proxy lifecycle (client). 'starting' claims synchronously so racing progress
   // callbacks can't double-start; 'failed' pins the pre-cache fallback (no native retry storm).
   const proxyStateRef = useRef<'idle' | 'starting' | 'up' | 'failed'>('idle')
+
+  useEffect(() => {
+    return () => {
+      if (stopTimerRef.current) {
+        clearTimeout(stopTimerRef.current)
+        stopTimerRef.current = null
+      }
+    }
+  }, [])
 
   useEffect(() => {
     roleRef.current = role
@@ -423,6 +439,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // connect, re-hosting) must pass through here — a prior session's dying download otherwise
   // keeps feeding near-zero Mbps into the new session's gate (the "~232 min ETA" bug).
   const resetTransfer = useCallback(() => {
+    downloadingRef.current = false
     downloadRef.current?.cancelAsync().catch(() => {})
     downloadRef.current = null
     RailReelHost.stopProxy().catch(() => {})
@@ -439,6 +456,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   // ── host actions ────────────────────────────────────────────────────────────
   const startHost = useCallback(async () => {
+    if (stopTimerRef.current) {
+      clearTimeout(stopTimerRef.current)
+      stopTimerRef.current = null
+    }
+    setUserLeftShow(false)
     setError(null)
     setHostPhase('starting')
     // Re-hosting (or hosting after having been a guest) must not inherit the previous session:
@@ -635,6 +657,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [sendBeat],
   )
 
+  const exitShow = useCallback(() => {
+    inShowRef.current = false
+    setUserLeftShow(true)
+    sendBeat()
+  }, [sendBeat])
+
+  const enterShow = useCallback(() => {
+    setUserLeftShow(false)
+  }, [])
+
   // ── social (the cabin) ──────────────────────────────────────────────────────
   // Both role-aware: the host IS the hub (stamp + broadcast + local append); a guest routes via
   // the host and waits for the echo — the host's ordering is the only ordering.
@@ -678,9 +710,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     // reconnect) must NOT start a second download — two writers on the same cache file, and
     // either one's failure path deleting the file out from under the other (the player then
     // streams a ghost inode the proxy can't see).
-    if (downloadRef.current) {
+    if (downloadRef.current || downloadingRef.current) {
       return
     }
+    downloadingRef.current = true
     // Session epoch at start: if a leave()/new connect() bumps it, this download is a zombie —
     // it must not write telemetry, state, or errors into whatever session came after it.
     const myEpoch = epochRef.current
@@ -697,6 +730,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const freeBytes = await LegacyFS.getFreeDiskStorageAsync().catch(() => -1)
       const storageMsg = storageWarning(freeBytes, mediaRef.current?.sizeBytes ?? 0)
       if (storageMsg) {
+        downloadingRef.current = false
         setError(storageMsg)
         setClientPhase('approved') // freeing space + a re-approval retries
         return
@@ -748,6 +782,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const res = await dl.downloadAsync()
       if (stale() || downloadRef.current !== dl) return // superseded — not ours to finish
       downloadRef.current = null
+      downloadingRef.current = false
       // downloadAsync resolves even on 4xx/5xx (writing the error body to disk) — verify the status
       // before trusting the file, or a 403 would show up as "ready".
       if (!res || res.status < 200 || res.status >= 300) {
@@ -776,6 +811,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       sendBeat()
       ;(clientRef.current ?? c).session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: positionRef.current })
     } catch (e) {
+      downloadingRef.current = false
       if (stale()) return // a zombie's failure must not clobber the next session's phase/error
       downloadRef.current = null
       // NOTE: no deleteAsync here — a failed transfer's partial bytes are harmless (a retry
@@ -943,9 +979,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }
       const myId = generateSessionId(randomBytes)
       const grant = generateGrant(randomBytes)
+      setUserLeftShow(false)
       leavingRef.current = false
       approvedRef.current = false
       epochRef.current++ // a fresh session — invalidate any reconnect loop left over from a prior one
+      const myEpoch = epochRef.current
       // A fresh join must not inherit ANYTHING from a previous session: no zombie download feeding
       // the gate a dying transfer rate, no stale playback state yanking us straight into the
       // Player, no leftover roster/media.
@@ -963,6 +1001,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       decodeOkRef.current = true
       try {
         const session = await openClient({ payload, myId, grant, name }, true)
+        if (epochRef.current !== myEpoch || leavingRef.current) {
+          session.close()
+          return
+        }
         clientRef.current = { session, payload, grant, myId, name }
         // hostName stays null — the join link doesn't carry the host's name yet.
         setRole('client')
@@ -981,6 +1023,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     reconnectingRef.current = false
     approvedRef.current = false
     epochRef.current++ // invalidate any in-flight reconnect loop so it can't resurrect this session
+    setUserLeftShow(false)
+    inShowRef.current = false
+    downloadingRef.current = false
     setReconnecting(false)
     resetTransfer()
     mediaRef.current = null
@@ -1002,7 +1047,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // Tell guests the cabin's closing BEFORE the servers die — they get the graceful
       // "cabin went dark" moment instantly, instead of a ~30s reconnect timeout → "lost".
       RailReelHost.broadcast(JSON.stringify({ t: 'ended', reason: 'host-left' })).catch(() => {})
-      setTimeout(() => RailReelHost.stop().catch(() => {}), 200) // let the frame flush first
+      if (stopTimerRef.current) clearTimeout(stopTimerRef.current)
+      stopTimerRef.current = setTimeout(() => {
+        RailReelHost.stop().catch(() => {})
+        stopTimerRef.current = null
+      }, 200) // let the frame flush first
       deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
     }
     hostTokenRef.current = null
@@ -1093,10 +1142,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       deny,
       connect,
       leave,
+      userLeftShow,
+      exitShow,
+      enterShow,
       retryDownload,
       dismissEnd,
     }),
-    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, retryDownload, dismissEnd],
+    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, userLeftShow, exitShow, enterShow, retryDownload, dismissEnd],
   )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>

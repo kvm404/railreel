@@ -31,13 +31,13 @@ export function LobbyScreen() {
 
   // A guest enters the show once the host has started it AND its own download covers the live
   // playhead (+lead) — for a late joiner mid-movie, it waits here until buffered past that point.
-  const { playback, hostNowMs, progress, movie } = s
+  const { playback, hostNowMs, progress, movie, userLeftShow } = s
   const durationSec = movie?.durationSec ?? 0
   useEffect(() => {
-    if (isHost || !playback) return
+    if (isHost || !playback || userLeftShow) return
     const livePos = targetPositionSec(playback, hostNowMs())
     if (canJoinShow(progress, durationSec, livePos)) nav.navigate('Player')
-  }, [isHost, playback, hostNowMs, progress, durationSec, nav])
+  }, [isHost, playback, hostNowMs, progress, durationSec, nav, userLeftShow])
 
   // Relabel the host's own entry to "You"; show our own ring from local progress (smoother echo).
   const people: Participant[] = s.participants.map((p) => {
@@ -169,6 +169,16 @@ export function LobbyScreen() {
           />
         ) : downloadFailed ? (
           <Button title="The reel snagged — try again" intent="amber" height={68} onPress={s.retryDownload} />
+        ) : !isHost && userLeftShow && playback && canJoinShow(progress, durationSec, targetPositionSec(playback, hostNowMs())) ? (
+          <Button
+            title="Rejoin the show"
+            intent="amber"
+            height={68}
+            onPress={() => {
+              s.enterShow()
+              nav.navigate('Player')
+            }}
+          />
         ) : (
           <View style={[styles.status, { borderColor: t.palette.hairline }]}>
             <Text variant="cardTitle" tone="cyan">

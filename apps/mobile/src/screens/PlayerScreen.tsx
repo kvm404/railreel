@@ -191,12 +191,17 @@ export function PlayerScreen() {
     // mount-only: the host owns playback from here via the controls.
   }, [])
 
-  // Host: if it leaves the show (back), pause everyone rather than letting followers run on alone.
+  // If host leaves the show (back), pause everyone rather than letting followers run on alone.
+  // If follower leaves the show (back), notify session so inShow resets and lobby does not trap.
   const exitRef = useRef<() => void>(() => {})
   exitRef.current = () => {
     // Use the mirrored position, never the player — by unmount expo-video may have released it
     // (touching a released player throws "shared object already released").
-    if (isHost) setHostPlayback(posRef.current, false)
+    if (isHost) {
+      setHostPlayback(posRef.current, false)
+    } else {
+      s.exitShow()
+    }
   }
   useEffect(() => () => exitRef.current(), [])
 
