@@ -74,7 +74,7 @@ See [`docs/architecture.md`](../architecture.md) for the full networking, sync, 
 **In scope**
 
 - Manual hotspot onboarding (guided — apps can't toggle hotspot on Android).
-- **Discovery:** mDNS/Bonjour for tap-to-join convenience; **robust fallback is a QR code /
+- **Discovery:** mDNS (Android NSD) for tap-to-join convenience; **robust fallback is a QR code /
   link** that encodes host IP + ports + session id + a **secret join token** (a 4-digit code
   alone can't resolve the host's IP offline, so it's only a human confirmation, not transport).
 - Event create → request-to-join → **host approves each person** → readiness lobby.

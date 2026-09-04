@@ -107,8 +107,8 @@ RailReelHost.setApprovedClients(ids: string[]): void
 - **Port handling:** bind `0` or retry on conflict; return the actual port; never assume a fixed one.
 
 ## 4. Discovery
-- mDNS via `react-native-zeroconf` or `expo-bonjour` (both likely "untested on New Arch" —
-  validate, fall back to interop). **The QR / `railreel://join` link is the guaranteed path** and
+- mDNS via Android NSD (`NsdManager` / `railreel-host`) or `react-native-zeroconf` (both
+  Android-first). **The QR / `railreel://join` link is the guaranteed path** and
   is already implemented (`lib/protocol/joinPayload`). mDNS is convenience, not a dependency.
 
 ## 5. Milestones (each ends in a verifiable on-device check)

@@ -28,7 +28,6 @@ coverage/
 # Expo / React Native
 .expo/
 *.orig.*
-apps/mobile/ios/
 apps/mobile/android/
 # Generated native build outputs for local modules
 apps/mobile/modules/*/android/build/

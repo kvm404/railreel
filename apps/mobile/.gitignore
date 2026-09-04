@@ -13,10 +13,7 @@ expo-env.d.ts
 .kotlin/
 *.orig.*
 *.jks
-*.p8
-*.p12
 *.key
-*.mobileprovision
 
 # Metro
 .metro-health-check*
@@ -37,5 +34,4 @@ yarn-error.*
 *.tsbuildinfo
 
 # generated native folders
-/ios
 /android

@@ -6,7 +6,7 @@
   "scripts": {
     "start": "expo start --dev-client",
     "android": "expo run:android",
-    "prebuild": "expo prebuild",
+    "prebuild": "expo prebuild --platform android",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run src/test"

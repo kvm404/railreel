@@ -8,17 +8,14 @@ de-risks Phase 1 before we commit to a native build. See `docs/architecture.md` 
 > The discovery + data-plane paths must be validated on **physical devices** (a host phone
 > with hotspot + 1–2 client phones). Plan device testing accordingly.
 
-## 1. Discovery (mDNS / Bonjour)
+## 1. Discovery (mDNS / Android NSD)
 
 | Option | Notes |
 | --- | --- |
-| **react-native-zeroconf** | Mature, widely used; wraps `NsdManager` (Android). Recent versions are Android 15 / 16KB-page compatible with a bundled mDNSResponder. The safe default. |
-| **expo-bonjour** | Newer, Expo-first (config-plugin friendly). Attractive for our Expo dev-client setup if it's solid. |
-| @inthepocket/react-native-service-discovery | Similar NSD/Bonjour wrapper; less active. |
+| **Android NsdManager** (`railreel-host`) | Embedded directly in the native host module via `NsdHelper.kt`. Zero additional external dependencies, handles single-flight resolution queue, and hooks directly into the host lifecycle. |
+| **react-native-zeroconf** | Alternative mature library; wraps `NsdManager` on Android. Bundles mDNSResponder. |
 
-**Decision:** start with **react-native-zeroconf** (proven, Android-15 ready). Evaluate
-`expo-bonjour` as a cleaner Expo integration during the spike; switch only if it's clearly
-better. Either way mDNS is **best-effort** — the **QR/link join payload** (already built in
+**Decision:** use native **Android NSD (`NsdManager`)** inside `railreel-host` (or **react-native-zeroconf** as fallback). Either way mDNS is **best-effort** — the **QR/link join payload** (already built in
 `src/lib/protocol/joinPayload.ts`) is the guaranteed path.
 
 **Platform gotchas already handled in `app.json`:** Android `CHANGE_WIFI_MULTICAST_STATE`
@@ -75,7 +72,7 @@ spike both for rate-change + cached-source support before committing. Tracked, n
 
 ## 6. Spike plan & exit criteria
 
-1. Add react-native-zeroconf (or expo-bonjour); host advertises `_railreel._tcp`, a client
+1. Android NSD (or react-native-zeroconf): host advertises `_railreel._tcp`, a client
    discovers it on **two physical phones** over the host's hotspot.
 2. Stand up the native HTTP range server; client pulls a byte range of a large file and
    measures throughput **with multiple clients downloading at once** (validates the aggregate
@@ -101,6 +98,5 @@ sample end-to-end.
 - [react-native-zeroconf (npm)](https://www.npmjs.com/package/react-native-zeroconf) ·
   [GitHub](https://github.com/balthazar/react-native-zeroconf)
 - [@inthepocket/react-native-service-discovery](https://www.npmjs.com/package/@inthepocket/react-native-service-discovery)
-- [expo-bonjour](https://github.com/likeSo/expo-bonjour)
 - [react-native-tcp-socket](https://github.com/Rapsssito/react-native-tcp-socket)
 - [React Native networking docs](https://reactnative.dev/docs/network)

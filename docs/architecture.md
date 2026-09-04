@@ -16,7 +16,7 @@ There is no server beyond the host's phone. Everything is on the LAN.
 ```
 ┌─────────────────────────── Host phone ───────────────────────────┐
 │  WiFi hotspot (enabled manually by the user)                       │
-│  mDNS/Bonjour advertiser   → service "_railreel._tcp"              │
+│  mDNS advertiser (Android NSD) → service "_railreel._tcp"          │
 │  HTTP server (range)       → serves the movie file                 │
 │  WebSocket server          → control, sync clock, chat, reactions  │
 └───────────────────────────────────────────────────────────────────┘
