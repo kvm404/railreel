@@ -138,19 +138,21 @@ export function decideCorrection(p: CorrectionParams): Correction {
   const maxNudgeFar = p.maxRateNudgeFar ?? DEFAULTS.maxRateNudgeFar
   const baseRate = p.baseRate ?? 1
   const seekLead = p.seekLeadSec ?? 0
-  const drift = p.targetSec - p.actualSec
+  const target = Number.isFinite(p.targetSec) ? Math.max(0, p.targetSec) : 0
+  const actual = Number.isFinite(p.actualSec) ? Math.max(0, p.actualSec) : 0
+  const drift = target - actual
 
   if (!p.isPlaying) {
     // Paused: hold at the host's position; only seek if we're meaningfully off. No lead — a
     // paused target doesn't move while the seek lands.
-    return { action: 'pause', seekToSec: Math.abs(drift) > deadband ? Math.max(0, p.targetSec) : undefined }
+    return { action: 'pause', seekToSec: Math.abs(drift) > deadband ? target : undefined }
   }
   if (Math.abs(drift) > seekThreshold) {
     // Too far to nudge — jump there, leading by the device's measured seek latency so the seek
     // lands ON the moving target rather than behind it. Never lead a backwards seek past the
     // target itself (an ahead-of-host device is already fast; overshooting would flip the error).
     const lead = drift > 0 ? seekLead : 0
-    return { action: 'play', rate: baseRate, seekToSec: Math.max(0, p.targetSec + lead) }
+    return { action: 'play', rate: baseRate, seekToSec: Math.max(0, target + lead) }
   }
   if (Math.abs(drift) <= deadband) {
     return { action: 'play', rate: baseRate }

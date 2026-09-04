@@ -37,6 +37,14 @@ describe('decideCorrection', () => {
     expect(cPause.seekToSec).toBe(0)
   })
 
+  it('handles NaN or non-finite positions without throwing or producing NaN rate', () => {
+    const c = decideCorrection({ targetSec: NaN, actualSec: NaN, isPlaying: true })
+    expect(c.action).toBe('play')
+    if (c.action === 'play') {
+      expect(Number.isFinite(c.rate)).toBe(true)
+    }
+  })
+
   it('pauses and holds position when off while paused', () => {
     expect(decideCorrection({ targetSec: 100, actualSec: 105, isPlaying: false })).toEqual({
       action: 'pause',

@@ -103,8 +103,9 @@ export function PlayerScreen() {
   // Lightweight position readout for the overlay (also mirrored to a ref for the exit handler).
   useEffect(() => {
     const id = setInterval(() => {
-      posRef.current = player.currentTime
-      setPos(player.currentTime)
+      const cur = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
+      posRef.current = cur
+      setPos(cur)
     }, 250)
     return () => clearInterval(id)
   }, [player])
@@ -151,7 +152,8 @@ export function PlayerScreen() {
     (delta: number) => {
       revealControls()
       setEnded(false)
-      const to = Math.max(0, player.currentTime + delta)
+      const cur = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
+      const to = Math.max(0, cur + delta)
       player.currentTime = to
       setHostPlayback(to, playing)
     },
@@ -183,7 +185,11 @@ export function PlayerScreen() {
     if (!isHost) return
     const pb = playbackRef.current
     if (!pb) return
-    if (pb.positionSec > 0) player.currentTime = pb.positionSec
+    if (pb.positionSec > 0) {
+      player.currentTime = pb.positionSec
+      posRef.current = pb.positionSec
+      setPos(pb.positionSec)
+    }
     if (pb.isPlaying) {
       player.play()
       setPlaying(true)
@@ -238,7 +244,7 @@ export function PlayerScreen() {
     const pb = playbackRef.current
     if (!pb) return
     const target = targetPositionSec(pb, hostNowMs())
-    const actual = player.currentTime
+    const actual = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
     const now = Date.now()
     const settling = now - lastSeekAtRef.current < SEEK_SETTLE_MS
 
