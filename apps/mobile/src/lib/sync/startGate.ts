@@ -71,8 +71,10 @@ const GATE_DEFAULTS = { minStartBufferSec: 60, finishMarginSec: 60 }
  * gate/floor (H.264 MP4s the app accepts are near-CBR at this granularity); never negative.
  */
 export function downloadBufferedAheadSec(progress: number, durationSec: number, positionSec: number): number {
-  const p = progress < 0 ? 0 : progress > 1 ? 1 : progress
-  const ahead = p * durationSec - positionSec
+  const p = !Number.isFinite(progress) || progress < 0 ? 0 : progress > 1 ? 1 : progress
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0
+  const pos = Number.isFinite(positionSec) && positionSec > 0 ? positionSec : 0
+  const ahead = p * dur - pos
   return ahead > 0 ? ahead : 0
 }
 

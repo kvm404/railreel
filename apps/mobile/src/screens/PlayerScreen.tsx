@@ -325,7 +325,8 @@ export function PlayerScreen() {
     const report = () => {
       const r = stallReport(player.status !== 'readyToPlay', notReadySinceRef.current, Date.now())
       notReadySinceRef.current = r.notReadySince
-      reportPlayback(r.stalled, player.currentTime)
+      const cur = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
+      reportPlayback(r.stalled, cur)
     }
     report()
     const id = setInterval(report, CORRECT_MS)

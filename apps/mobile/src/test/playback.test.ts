@@ -27,6 +27,14 @@ describe('targetPositionSec', () => {
   it('never returns negative even when hostNowMs is slightly behind hostMonotonicMs', () => {
     expect(targetPositionSec(state({ positionSec: 0 }), 9_950)).toBe(0)
   })
+
+  it('handles NaN or non-finite position or timestamp safely', () => {
+    expect(targetPositionSec(state({ positionSec: NaN }), 10_000)).toBe(0)
+    expect(targetPositionSec(state({ positionSec: NaN }), 12_000)).toBe(2)
+    expect(targetPositionSec(state(), NaN)).toBe(100)
+    expect(targetPositionSec(state({ hostMonotonicMs: NaN }), 12_000)).toBe(100)
+    expect(targetPositionSec(state({ isPlaying: false, positionSec: NaN }), 12_000)).toBe(0)
+  })
 })
 
 describe('decideCorrection', () => {

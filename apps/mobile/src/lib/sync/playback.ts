@@ -15,9 +15,13 @@ import type { PlaybackState } from '@/lib/protocol'
 
 /** Where the playhead should be now, given the host's last state and the current host-monotonic ms. */
 export function targetPositionSec(state: PlaybackState, hostNowMs: number): number {
-  if (!state.isPlaying) return Math.max(0, state.positionSec)
+  const pos = Number.isFinite(state.positionSec) ? Math.max(0, state.positionSec) : 0
+  if (!state.isPlaying) return pos
+  if (!Number.isFinite(hostNowMs) || !Number.isFinite(state.hostMonotonicMs)) return pos
+  const rate = Number.isFinite(state.rate) ? state.rate : 1
   const elapsedSec = (hostNowMs - state.hostMonotonicMs) / 1000
-  return Math.max(0, state.positionSec + elapsedSec * state.rate)
+  const target = pos + elapsedSec * rate
+  return Number.isFinite(target) ? Math.max(0, target) : pos
 }
 
 export type Correction =

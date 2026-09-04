@@ -34,6 +34,13 @@ describe('downloadBufferedAheadSec', () => {
     expect(downloadBufferedAheadSec(1.4, 7200, 0)).toBe(7200)
     expect(downloadBufferedAheadSec(-1, 7200, 0)).toBe(0)
   })
+
+  it('handles NaN or non-finite inputs safely', () => {
+    expect(downloadBufferedAheadSec(NaN, 7200, 0)).toBe(0)
+    expect(downloadBufferedAheadSec(0.5, NaN, 0)).toBe(0)
+    expect(downloadBufferedAheadSec(0.5, 7200, NaN)).toBe(3600)
+    expect(downloadBufferedAheadSec(NaN, NaN, NaN)).toBe(0)
+  })
 })
 
 describe('secondsToFinish', () => {
