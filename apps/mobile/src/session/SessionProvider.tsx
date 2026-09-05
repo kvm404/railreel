@@ -32,6 +32,7 @@ import {
   type ParticipantInfo,
   type PlaybackState,
 } from '@/lib/protocol'
+import { parseSrt, type SubtitleCue } from '@/lib/subtitles'
 
 /**
  * Session store: the one place that owns a live RailReel session and survives screen navigation
@@ -47,6 +48,7 @@ const HTTP_PORT = 8493
 const WS_PORT = 8492
 const KEEP_AWAKE_TAG = 'railreel-host'
 const MOVIE_CACHE = `${LegacyFS.cacheDirectory}railreel-movie.bin`
+const SUBTITLE_CACHE = `${LegacyFS.cacheDirectory}railreel-subtitles.srt`
 /** A stalled follower that hasn't sent a heartbeat in this long is treated as gone — clear its
  *  stall so it can't hang the room (followers beat every ~500ms during playback). */
 const STALE_BEAT_MS = 4000
@@ -159,6 +161,20 @@ export interface SessionStore {
   retryDownload: () => void
   /** Clear the session-end status once the user acknowledges it. */
   dismissEnd: () => void
+
+  // subtitles
+  /** Active subtitle state (parsed cues + metadata) for synchronized rendering. */
+  subtitle: SubtitleState | null
+  /** Attach an .srt subtitle file (parsed into cues, persisted, and distributed to followers). */
+  attachSubtitle: (name: string, content: string) => Promise<void>
+  /** Remove currently attached subtitles. */
+  removeSubtitle: () => void
+}
+
+export interface SubtitleState {
+  name: string
+  content: string
+  cues: SubtitleCue[]
 }
 
 /** A designed end-of-the-road moment (see components/StatusScreen). */
@@ -200,6 +216,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [playback, setPlayback] = useState<PlaybackState | null>(null)
   const [chatLog, setChatLog] = useState<ChatEntry[]>([])
   const [reactions, setReactions] = useState<ReactionEvent[]>([])
+  const [subtitle, setSubtitle] = useState<SubtitleState | null>(null)
+  const subtitleRef = useRef<SubtitleState | null>(null)
+  subtitleRef.current = subtitle
   const reactionSeqRef = useRef(0) // animation keys + lane assignment for incoming reactions
   const lastReactionSentRef = useRef(0) // client-side reaction rate limit
   const [decodeCaution, setDecodeCaution] = useState<string | null>(null)
@@ -306,6 +325,60 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const seq = ++reactionSeqRef.current
     setReactions((r) => appendCapped(r, { seq, from, emoji, at: Date.now() }, REACTION_KEEP))
   }, [])
+
+  // ── subtitle helpers ────────────────────────────────────────────────────────
+  const loadSubtitle = useCallback(async (name: string, content: string) => {
+    try {
+      const cues = parseSrt(content)
+      const sub: SubtitleState = { name, content, cues }
+      subtitleRef.current = sub
+      setSubtitle(sub)
+      await LegacyFS.writeAsStringAsync(SUBTITLE_CACHE, content, {
+        encoding: LegacyFS.EncodingType.UTF8,
+      }).catch(() => {})
+    } catch {
+      // Best-effort: invalid subtitle or failed write
+    }
+  }, [])
+
+  const clearSubtitle = useCallback(async () => {
+    subtitleRef.current = null
+    setSubtitle(null)
+    await LegacyFS.deleteAsync(SUBTITLE_CACHE, { idempotent: true }).catch(() => {})
+  }, [])
+
+  const attachSubtitle = useCallback(
+    async (name: string, content: string) => {
+      await loadSubtitle(name, content)
+      if (mediaRef.current) {
+        mediaRef.current = {
+          ...mediaRef.current,
+          subtitle: {
+            name,
+            sizeBytes: content.length,
+            content,
+          },
+        }
+      }
+      if (roleRef.current === 'host') {
+        RailReelHost.broadcast(JSON.stringify({ t: 'subtitle', name, content })).catch(() => {})
+        broadcastRoster(participantsRef.current)
+      }
+    },
+    [loadSubtitle, broadcastRoster],
+  )
+
+  const removeSubtitle = useCallback(() => {
+    clearSubtitle()
+    if (mediaRef.current?.subtitle) {
+      const { subtitle: _, ...rest } = mediaRef.current
+      mediaRef.current = rest
+    }
+    if (roleRef.current === 'host') {
+      RailReelHost.broadcast(JSON.stringify({ t: 'subtitle', name: '', content: '' })).catch(() => {})
+      broadcastRoster(participantsRef.current)
+    }
+  }, [clearSubtitle, broadcastRoster])
 
   // A later client→host frame is trusted only if it proves ownership of its `id` with the grant
   // the host stored at join time. Blocks spoofing a peer's row or the reserved "host" id.
@@ -483,6 +556,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setFloorHeld(new Set())
     setChatLog([])
     setReactions([])
+    clearSubtitle()
     try {
       const picked = await DocumentPicker.getDocumentAsync({ type: 'video/*', copyToCacheDirectory: false })
       if (picked.canceled || !picked.assets[0]) {
@@ -540,6 +614,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         fastStart,
         width: probed.width || 0,
         height: probed.height || 0,
+        ...(subtitleRef.current
+          ? {
+              subtitle: {
+                name: subtitleRef.current.name,
+                sizeBytes: subtitleRef.current.content.length,
+                content: subtitleRef.current.content,
+              },
+            }
+          : {}),
       }
       setMovie({ title, sizeBytes, durationSec, fastStart })
       setMovieUri(asset.uri) // the host plays the same source it shares
@@ -574,7 +657,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       await RailReelHost.stop().catch(() => {})
       await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
     }
-  }, [updateParticipants, resetTransfer, broadcastRoster])
+  }, [updateParticipants, resetTransfer, broadcastRoster, clearSubtitle])
 
   // Re-read the device IP and rebuild the join link — call after enabling the hotspot, when the
   // reachable address may have changed (or only just appeared).
@@ -885,6 +968,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               decodeOkRef.current = ok
               setDecodeCaution(decodeWarning(ok, h))
             }
+            if (m.media?.subtitle?.content && typeof m.media.subtitle.name === 'string') {
+              if (!subtitleRef.current || subtitleRef.current.name !== m.media.subtitle.name) {
+                loadSubtitle(m.media.subtitle.name, m.media.subtitle.content)
+              }
+            } else if (m.media && !m.media.subtitle && subtitleRef.current) {
+              clearSubtitle()
+            }
             const list: Participant[] = m.participants
               .filter(isParticipantInfo)
               .map((q) => ({
@@ -915,6 +1005,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               const displayName = (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
               ingestReaction(displayName, m.emoji)
             }
+          } else if (m.t === 'subtitle') {
+            if (typeof m.name === 'string' && typeof m.content === 'string' && m.name && m.content) {
+              loadSubtitle(m.name, m.content)
+            } else {
+              clearSubtitle()
+            }
           } else if (m.t === 'ended') {
             // The host wrapped the show / left. leave() clears everything (incl. sessionEnd), so
             // set the designed end-state right after — Home surfaces it.
@@ -935,7 +1031,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (initial) session.send({ t: 'join', id: myId, name, token: payload.token, grant })
       return session
     },
-    [startDownload, ingestChat, ingestReaction],
+    [startDownload, ingestChat, ingestReaction, loadSubtitle, clearSubtitle],
   )
 
   // Reconnect loop: re-handshake with exponential backoff, then resume the same session identity.
@@ -1094,6 +1190,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setPlayback(null)
     setChatLog([])
     setReactions([])
+    clearSubtitle()
     setDecodeCaution(null)
     decodeOkRef.current = true
     setHostWarning(null)
@@ -1101,7 +1198,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setError(null)
     setRole('none')
     roleRef.current = 'none'
-  }, [resetTransfer])
+  }, [resetTransfer, clearSubtitle])
 
   // Client: retry a download that failed (bad HTTP, integrity mismatch). The grant + approval
   // still stand, so we just kick the transfer again.
@@ -1173,8 +1270,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       enterShow,
       retryDownload,
       dismissEnd,
+      subtitle,
+      attachSubtitle,
+      removeSubtitle,
     }),
-    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, userLeftShow, exitShow, enterShow, retryDownload, dismissEnd],
+    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, userLeftShow, exitShow, enterShow, retryDownload, dismissEnd, subtitle, attachSubtitle, removeSubtitle],
   )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>

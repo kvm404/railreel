@@ -124,4 +124,43 @@ describe('message parsing', () => {
     // 'welcome' is a server message; it must not validate as a client message.
     expect(parseClientMsg('{"t":"welcome"}').ok).toBe(false)
   })
+
+  it('accepts a valid server subtitle message', () => {
+    const msg: ServerMsg = {
+      t: 'subtitle',
+      name: 'movie.en.srt',
+      content: '1\n00:00:01,000 --> 00:00:03,000\nHello\n',
+    }
+    const r = parseServerMsg(encodeMsg(msg))
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.msg).toEqual(msg)
+  })
+
+  it('serializes and parses MediaInfo with optional subtitle metadata', () => {
+    const welcomeMsg: ServerMsg = {
+      t: 'welcome',
+      sessionId: 's1',
+      you: 'c1',
+      media: {
+        title: 'Film',
+        sizeBytes: 1000,
+        durationSec: 120,
+        bitrateMbps: 5,
+        hash: 'abc',
+        format: 'mp4',
+        subtitle: {
+          name: 'subs.srt',
+          sizeBytes: 50,
+          content: '1\n00:00:01,000 --> 00:00:02,000\nHi\n',
+        },
+      },
+    }
+    const r = parseServerMsg(encodeMsg(welcomeMsg))
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      const welcome = r.msg as Extract<ServerMsg, { t: 'welcome' }>
+      expect(welcome.media.subtitle?.name).toBe('subs.srt')
+      expect(welcome.media.subtitle?.content).toBe('1\n00:00:01,000 --> 00:00:02,000\nHi\n')
+    }
+  })
 })

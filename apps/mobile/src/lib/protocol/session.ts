@@ -37,6 +37,12 @@ export interface MediaInfo {
   /** Video frame size (0 = unknown) — for the client decode-capability check (a 4K file is a slideshow on a 1080p-max decoder). */
   width?: number
   height?: number
+  /** Sidecar subtitle metadata attached by the host. */
+  subtitle?: {
+    name: string
+    sizeBytes: number
+    content?: string
+  }
 }
 
 /** Everything a client needs to connect to a host, encoded into the QR/link. */
