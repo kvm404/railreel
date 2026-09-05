@@ -54,3 +54,40 @@ export function parseServerMsg(raw: string): ParseResult<ServerMsg> {
 export function encodeMsg(msg: ClientMsg | ServerMsg): string {
   return JSON.stringify(msg)
 }
+
+/** Check whether a parsed client message is a well-formed playbackRequest. */
+export function isPlaybackRequest(
+  msg: unknown,
+): msg is Extract<ClientMsg, { t: 'playbackRequest' }> {
+  if (typeof msg !== 'object' || msg === null) return false
+  const m = msg as Record<string, unknown>
+  return (
+    m.t === 'playbackRequest' &&
+    typeof m.id === 'string' &&
+    m.id.length > 0 &&
+    typeof m.grant === 'string' &&
+    m.grant.length > 0 &&
+    typeof m.requestId === 'string' &&
+    m.requestId.length > 0 &&
+    (m.action === 'pause' || m.action === 'rewind') &&
+    (m.seconds === undefined || (typeof m.seconds === 'number' && Number.isFinite(m.seconds) && m.seconds >= 0))
+  )
+}
+
+/** Check whether a parsed server message is a well-formed playbackRequestDecision. */
+export function isPlaybackRequestDecision(
+  msg: unknown,
+): msg is Extract<ServerMsg, { t: 'playbackRequestDecision' }> {
+  if (typeof msg !== 'object' || msg === null) return false
+  const m = msg as Record<string, unknown>
+  return (
+    m.t === 'playbackRequestDecision' &&
+    typeof m.requestId === 'string' &&
+    m.requestId.length > 0 &&
+    typeof m.requesterId === 'string' &&
+    m.requesterId.length > 0 &&
+    typeof m.approved === 'boolean' &&
+    (m.action === 'pause' || m.action === 'rewind') &&
+    (m.seconds === undefined || (typeof m.seconds === 'number' && Number.isFinite(m.seconds) && m.seconds >= 0))
+  )
+}

@@ -154,15 +154,20 @@ describe('Subtitle Synchronization (findActiveCues)', () => {
     })
   })
 
-  describe('Seconds vs Milliseconds Parameter Tolerance', () => {
-    it('accepts playhead position in seconds directly', () => {
-      const active = findActiveCues(sampleCues, 1.5) // 1.5 seconds = 1500 ms
-      expect(active).toHaveLength(1)
-      expect(active[0]!.id).toBe(1)
+  describe('Strict Milliseconds Parameter Enforcement', () => {
+    it('strictly interprets playhead position in milliseconds (rejects seconds interpretation)', () => {
+      // 1.5ms is before Cue 1 (starts at 1000ms)
+      const subMs = findActiveCues(sampleCues, 1.5)
+      expect(subMs).toEqual([])
+
+      // Explicit milliseconds position (1500ms) matches Cue 1
+      const at1500ms = findActiveCues(sampleCues, 1500)
+      expect(at1500ms).toHaveLength(1)
+      expect(at1500ms[0]!.id).toBe(1)
     })
 
-    it('returns empty array when seconds position lands in a gap', () => {
-      const active = findActiveCues(sampleCues, 4.0) // 4.0 seconds = 4000 ms (gap)
+    it('returns empty array when milliseconds position lands in a gap', () => {
+      const active = findActiveCues(sampleCues, 4000) // 4000 ms (gap between 3000ms and 5000ms)
       expect(active).toEqual([])
     })
   })

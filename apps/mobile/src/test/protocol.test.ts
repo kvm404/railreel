@@ -163,4 +163,30 @@ describe('message parsing', () => {
       expect(welcome.media.subtitle?.content).toBe('1\n00:00:01,000 --> 00:00:02,000\nHi\n')
     }
   })
+
+  it('accepts a valid client playbackRequest message', () => {
+    const msg: ClientMsg = {
+      t: 'playbackRequest',
+      id: 'c1',
+      grant: 'g1',
+      requestId: 'req_1',
+      action: 'pause',
+    }
+    const r = parseClientMsg(encodeMsg(msg))
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.msg).toEqual(msg)
+  })
+
+  it('accepts a valid server playbackRequestDecision message', () => {
+    const msg: ServerMsg = {
+      t: 'playbackRequestDecision',
+      requestId: 'req_1',
+      requesterId: 'c1',
+      approved: true,
+      action: 'pause',
+    }
+    const r = parseServerMsg(encodeMsg(msg))
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.msg).toEqual(msg)
+  })
 })

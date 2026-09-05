@@ -11,9 +11,12 @@ import { CaptionOverlay } from '@/components/CaptionOverlay'
 import { ChatSheet } from '@/components/ChatSheet'
 import { ChatTicker } from '@/components/ChatTicker'
 import { FloatingReactions } from '@/components/FloatingReactions'
+import { ModerationBanner } from '@/components/ModerationBanner'
 import { ReactionRail } from '@/components/ReactionRail'
+import { RequestFeedbackToast } from '@/components/RequestFeedbackToast'
 import { decideCorrection, nextSeekLead, roomGate, stallReport, targetPositionSec } from '@/lib/sync/playback'
 import type { PlaybackState } from '@/lib/protocol'
+import { radii } from '@/theme/tokens'
 
 /**
  * The show. Immersive full-bleed video; the host drives play/pause/seek and broadcasts state,
@@ -199,6 +202,32 @@ export function PlayerScreen() {
     // mount-only: the host owns playback from here via the controls.
   }, [])
 
+  // Register host transport with session store so approved moderation requests can actuate playback
+  useEffect(() => {
+    if (!isHost) return
+    s.registerHostTransport({
+      pause: () => {
+        autoPausedRef.current = false
+        overrideRef.current = false
+        player.pause()
+        setPlaying(false)
+      },
+      seekTo: (positionSec: number) => {
+        setEnded(false)
+        player.currentTime = positionSec
+        posRef.current = positionSec
+        setPos(positionSec)
+      },
+      getCurrentPosition: () => {
+        return Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
+      },
+      isPlaying: () => playing,
+    })
+    return () => {
+      s.registerHostTransport(null)
+    }
+  }, [isHost, player, playing, s.registerHostTransport])
+
   // If host leaves the show (back), pause everyone rather than letting followers run on alone.
   // If follower leaves the show (back), notify session so inShow resets and lobby does not trap.
   const exitRef = useRef<() => void>(() => {})
@@ -359,6 +388,27 @@ export function PlayerScreen() {
         bottomOffset={showControls || ended ? insets.bottom + 80 : insets.bottom + 44}
       />
 
+      {/* host moderation banner */}
+      {isHost && s.pendingPlaybackRequests.length > 0 ? (
+        <View style={[styles.bannerContainer, { top: insets.top + 60 }]} pointerEvents="box-none">
+          <ModerationBanner
+            request={s.pendingPlaybackRequests[0] ?? null}
+            onApprove={(id) => s.handlePlaybackRequest(id, true)}
+            onDismiss={(id) => s.handlePlaybackRequest(id, false)}
+          />
+        </View>
+      ) : null}
+
+      {/* follower request feedback toast */}
+      {!isHost && s.playbackRequestStatus !== 'idle' ? (
+        <View style={[styles.toastContainer, { top: insets.top + 60 }]} pointerEvents="none">
+          <RequestFeedbackToast
+            status={s.playbackRequestStatus}
+            onDismiss={s.clearPlaybackRequestStatus}
+          />
+        </View>
+      ) : null}
+
       {showControls || ended ? (
         <View style={[styles.overlay, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 24 }]} pointerEvents="box-none">
           {/* top bar */}
@@ -453,13 +503,65 @@ export function PlayerScreen() {
                 />
               </View>
             ) : (
-              <Text variant="data" tone="secondary">
-                {ended
-                  ? 'The End'
-                  : isHost && waiting.length > 0
-                    ? `Holding for ${waiting.join(', ')} to catch up…`
-                    : `${fmt(pos)}${player.duration ? ` / ${fmt(player.duration)}` : ''}`}
-              </Text>
+              <View style={styles.timeAndActionsCol} pointerEvents="box-none">
+                <Text variant="data" tone="secondary">
+                  {ended
+                    ? 'The End'
+                    : isHost && waiting.length > 0
+                      ? `Holding for ${waiting.join(', ')} to catch up…`
+                      : `${fmt(pos)}${player.duration ? ` / ${fmt(player.duration)}` : ''}`}
+                </Text>
+                {!isHost && !ended ? (
+                  <View style={styles.followerControlsRow} pointerEvents="box-none">
+                    <Pressable
+                      onPress={() => {
+                        revealControls()
+                        s.sendPlaybackRequest('pause')
+                      }}
+                      disabled={s.playbackRequestStatus === 'pending'}
+                      hitSlop={8}
+                      accessibilityRole="button"
+                      accessibilityLabel="Request pause"
+                      style={[
+                        styles.reqBtn,
+                        {
+                          borderColor: t.palette.hairline,
+                          backgroundColor: t.palette.raised,
+                          opacity: s.playbackRequestStatus === 'pending' ? 0.5 : 1,
+                        },
+                      ]}
+                    >
+                      <Pause size={14} color={t.palette.amber} strokeWidth={2} />
+                      <Text variant="caption" tone="primary" style={styles.reqBtnText}>
+                        [Req Pause]
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => {
+                        revealControls()
+                        s.sendPlaybackRequest('rewind', 15)
+                      }}
+                      disabled={s.playbackRequestStatus === 'pending'}
+                      hitSlop={8}
+                      accessibilityRole="button"
+                      accessibilityLabel="Request rewind 15 seconds"
+                      style={[
+                        styles.reqBtn,
+                        {
+                          borderColor: t.palette.hairline,
+                          backgroundColor: t.palette.raised,
+                          opacity: s.playbackRequestStatus === 'pending' ? 0.5 : 1,
+                        },
+                      ]}
+                    >
+                      <RotateCcw size={14} color={t.palette.amber} strokeWidth={2} />
+                      <Text variant="caption" tone="primary" style={styles.reqBtnText}>
+                        [Req -15s]
+                      </Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+              </View>
             )}
           </View>
         </View>
@@ -497,4 +599,39 @@ const styles = StyleSheet.create({
   bottomBar: { alignItems: 'center' },
   // Sits above the reaction rail (which floats at ~bottom+64 while controls are up).
   holdRow: { alignItems: 'center', gap: 10, marginBottom: 96 },
+  bannerContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    zIndex: 30,
+  },
+  toastContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 30,
+  },
+  timeAndActionsCol: {
+    alignItems: 'center',
+    gap: 8,
+  },
+  followerControlsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 4,
+  },
+  reqBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+  },
+  reqBtnText: {
+    fontFamily: 'SpaceGrotesk_500Medium',
+  },
 })
