@@ -67,9 +67,10 @@ function lookupActiveCues(cues: SubtitleCue[], posMs: number): SubtitleCue[] {
 /**
  * Find all active subtitle cues at a given playhead position.
  * Uses binary search (O(log N)) to achieve sub-millisecond lookup efficiency.
+ * Strictly operates in milliseconds; ambiguous seconds fallback is deprecated.
  *
  * @param cues Sorted list of subtitle cues
- * @param positionMs Current playhead time (in milliseconds or seconds)
+ * @param positionMs Current playhead time strictly in milliseconds
  * @returns Array of currently active SubtitleCue objects, or empty array if none
  */
 export function findActiveCues(cues: SubtitleCue[], positionMs: number): SubtitleCue[] {
@@ -77,16 +78,5 @@ export function findActiveCues(cues: SubtitleCue[], positionMs: number): Subtitl
     return []
   }
 
-  const result = lookupActiveCues(cues, positionMs)
-  if (result.length > 0) return result
-
-  // Fallback: If caller passed seconds (e.g. 1.5s instead of 1500ms)
-  const lastCue = cues[cues.length - 1]
-  if (lastCue && positionMs <= lastCue.endSec) {
-    const asMs = Math.round(positionMs * 1000)
-    const secResult = lookupActiveCues(cues, asMs)
-    if (secResult.length > 0) return secResult
-  }
-
-  return []
+  return lookupActiveCues(cues, positionMs)
 }

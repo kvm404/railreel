@@ -169,6 +169,32 @@ export interface SessionStore {
   attachSubtitle: (name: string, content: string) => Promise<void>
   /** Remove currently attached subtitles. */
   removeSubtitle: () => void
+
+  // playback moderation
+  pendingPlaybackRequests: PendingPlaybackRequest[]
+  handlePlaybackRequest: (requestId: string, approved: boolean) => void
+  playbackRequestStatus: PlaybackRequestStatus
+  sendPlaybackRequest: (action: 'pause' | 'rewind', seconds?: number) => void
+  clearPlaybackRequestStatus: () => void
+  registerHostTransport: (handler: HostTransportHandler | null) => void
+}
+
+export type PlaybackRequestStatus = 'idle' | 'pending' | 'approved' | 'dismissed'
+
+export interface PendingPlaybackRequest {
+  requestId: string
+  requesterId: string
+  requesterName: string
+  action: 'pause' | 'rewind'
+  seconds?: number
+  receivedAt: number
+}
+
+export interface HostTransportHandler {
+  pause: () => void
+  seekTo: (positionSec: number) => void
+  getCurrentPosition: () => number
+  isPlaying: () => boolean
 }
 
 export interface SubtitleState {
@@ -214,6 +240,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [hostName] = useState<string | null>(null)
   const [movieUri, setMovieUri] = useState<string | null>(null)
   const [playback, setPlayback] = useState<PlaybackState | null>(null)
+  const playbackRef = useRef<PlaybackState | null>(null)
+  playbackRef.current = playback
+
+  // Playback moderation state (host & follower)
+  const [pendingPlaybackRequests, setPendingPlaybackRequests] = useState<PendingPlaybackRequest[]>([])
+  const pendingPlaybackRequestsRef = useRef<PendingPlaybackRequest[]>([])
+  const autoDismissTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const hostTransportRef = useRef<HostTransportHandler | null>(null)
+
+  const [playbackRequestStatus, setPlaybackRequestStatus] = useState<PlaybackRequestStatus>('idle')
+  const activeRequestIdRef = useRef<string | null>(null)
+  const dismissToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const [chatLog, setChatLog] = useState<ChatEntry[]>([])
   const [reactions, setReactions] = useState<ReactionEvent[]>([])
   const [subtitle, setSubtitle] = useState<SubtitleState | null>(null)
@@ -262,6 +301,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (stopTimerRef.current) {
         clearTimeout(stopTimerRef.current)
         stopTimerRef.current = null
+      }
+      autoDismissTimersRef.current.forEach((t) => clearTimeout(t))
+      autoDismissTimersRef.current.clear()
+      if (dismissToastTimerRef.current) {
+        clearTimeout(dismissToastTimerRef.current)
+        dismissToastTimerRef.current = null
       }
     }
   }, [])
@@ -456,9 +501,44 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         updateParticipants((prev) =>
           prev.map((p) => (p.id === msg.id && p.status !== 'requested' ? { ...p, status: 'ready', progress: 1 } : p)),
         )
+      } else if (msg.t === 'playbackRequest') {
+        if (!ownsId(msg.id, msg.grant)) return
+        const sender = participantsRef.current.find((p) => p.id === msg.id)
+        if (!sender || sender.status === 'requested' || sender.status === 'left') return
+        if (msg.action !== 'pause' && msg.action !== 'rewind') return
+        if (typeof msg.requestId !== 'string' || msg.requestId.length === 0) return
+        if (pendingPlaybackRequestsRef.current.some((r) => r.requestId === msg.requestId)) return
+
+        const req: PendingPlaybackRequest = {
+          requestId: msg.requestId,
+          requesterId: msg.id,
+          requesterName: sender.name || 'Guest',
+          action: msg.action,
+          seconds: typeof msg.seconds === 'number' && msg.seconds > 0 ? msg.seconds : (msg.action === 'rewind' ? 15 : undefined),
+          receivedAt: Date.now(),
+        }
+
+        pendingPlaybackRequestsRef.current = [...pendingPlaybackRequestsRef.current, req]
+        setPendingPlaybackRequests(pendingPlaybackRequestsRef.current)
+
+        const timer = setTimeout(() => {
+          handlePlaybackRequestRef.current(req.requestId, false)
+        }, 10_000)
+        autoDismissTimersRef.current.set(req.requestId, timer)
       } else if (msg.t === 'leave') {
         if (!ownsId(msg.id, msg.grant)) return
         grantsRef.current.delete(msg.id)
+        const leftId = msg.id
+        const userReqs = pendingPlaybackRequestsRef.current.filter((r) => r.requesterId === leftId)
+        userReqs.forEach((r) => {
+          const t = autoDismissTimersRef.current.get(r.requestId)
+          if (t) {
+            clearTimeout(t)
+            autoDismissTimersRef.current.delete(r.requestId)
+          }
+        })
+        pendingPlaybackRequestsRef.current = pendingPlaybackRequestsRef.current.filter((r) => r.requesterId !== leftId)
+        setPendingPlaybackRequests(pendingPlaybackRequestsRef.current)
         updateParticipants((prev) =>
           prev.map((p) => (p.id === msg.id ? { ...p, status: 'left', stalled: false, inShow: false } : p)),
           true,
@@ -486,6 +566,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const onClose = RailReelHost.addListener('onWsClose', (event?: { id?: string }) => {
       if (roleRef.current !== 'host') return
       if (event?.id && event.id !== 'host') {
+        const leftId = event.id
+        const userReqs = pendingPlaybackRequestsRef.current.filter((r) => r.requesterId === leftId)
+        userReqs.forEach((r) => {
+          const t = autoDismissTimersRef.current.get(r.requestId)
+          if (t) {
+            clearTimeout(t)
+            autoDismissTimersRef.current.delete(r.requestId)
+          }
+        })
+        pendingPlaybackRequestsRef.current = pendingPlaybackRequestsRef.current.filter((r) => r.requesterId !== leftId)
+        setPendingPlaybackRequests(pendingPlaybackRequestsRef.current)
         updateParticipants((prev) =>
           prev.map((p) => (p.id === event.id ? { ...p, status: 'left', stalled: false, inShow: false } : p)),
           true,
@@ -720,6 +811,105 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     },
     [updateParticipants],
   )
+
+  const handlePlaybackRequest = useCallback(
+    (requestId: string, approved: boolean) => {
+      const timer = autoDismissTimersRef.current.get(requestId)
+      if (timer) {
+        clearTimeout(timer)
+        autoDismissTimersRef.current.delete(requestId)
+      }
+
+      const req = pendingPlaybackRequestsRef.current.find((r) => r.requestId === requestId)
+      if (!req) return
+
+      pendingPlaybackRequestsRef.current = pendingPlaybackRequestsRef.current.filter((r) => r.requestId !== requestId)
+      setPendingPlaybackRequests(pendingPlaybackRequestsRef.current)
+
+      if (approved) {
+        if (req.action === 'pause') {
+          if (hostTransportRef.current) {
+            hostTransportRef.current.pause()
+            const cur = hostTransportRef.current.getCurrentPosition()
+            setHostPlayback(cur, false)
+          } else {
+            const cur = playbackRef.current?.positionSec ?? 0
+            setHostPlayback(cur, false)
+          }
+        } else if (req.action === 'rewind') {
+          const delta = typeof req.seconds === 'number' && req.seconds > 0 ? req.seconds : 15
+          if (hostTransportRef.current) {
+            const cur = hostTransportRef.current.getCurrentPosition()
+            const target = Math.max(0, cur - delta)
+            hostTransportRef.current.seekTo(target)
+            setHostPlayback(target, hostTransportRef.current.isPlaying())
+          } else {
+            const cur = playbackRef.current?.positionSec ?? 0
+            const target = Math.max(0, cur - delta)
+            setHostPlayback(target, playbackRef.current?.isPlaying ?? false)
+          }
+        }
+
+        RailReelHost.broadcast(
+          JSON.stringify({
+            t: 'playbackRequestDecision',
+            requestId: req.requestId,
+            requesterId: req.requesterId,
+            approved: true,
+            action: req.action,
+            seconds: req.seconds,
+          }),
+        ).catch(() => {})
+      } else {
+        RailReelHost.broadcast(
+          JSON.stringify({
+            t: 'playbackRequestDecision',
+            requestId: req.requestId,
+            requesterId: req.requesterId,
+            approved: false,
+            action: req.action,
+            seconds: req.seconds,
+          }),
+        ).catch(() => {})
+      }
+    },
+    [setHostPlayback],
+  )
+
+  const handlePlaybackRequestRef = useRef(handlePlaybackRequest)
+  handlePlaybackRequestRef.current = handlePlaybackRequest
+
+  const registerHostTransport = useCallback((handler: HostTransportHandler | null) => {
+    hostTransportRef.current = handler
+  }, [])
+
+  const sendPlaybackRequest = useCallback(
+    (action: 'pause' | 'rewind', seconds?: number) => {
+      const c = clientRef.current
+      if (!c) return
+      const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+      activeRequestIdRef.current = requestId
+      setPlaybackRequestStatus('pending')
+      c.session.send({
+        t: 'playbackRequest',
+        id: c.myId,
+        grant: c.grant,
+        requestId,
+        action,
+        seconds: typeof seconds === 'number' && seconds > 0 ? seconds : (action === 'rewind' ? 15 : undefined),
+      })
+    },
+    [],
+  )
+
+  const clearPlaybackRequestStatus = useCallback(() => {
+    if (dismissToastTimerRef.current) {
+      clearTimeout(dismissToastTimerRef.current)
+      dismissToastTimerRef.current = null
+    }
+    setPlaybackRequestStatus('idle')
+    activeRequestIdRef.current = null
+  }, [])
 
   // ── client actions ──────────────────────────────────────────────────────────
   // One heartbeat builder for both phases (downloading + playback), reading the telemetry refs so
@@ -1011,6 +1201,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             } else {
               clearSubtitle()
             }
+          } else if (m.t === 'playbackRequestDecision') {
+            if (m.requesterId === myId || m.requestId === activeRequestIdRef.current) {
+              if (m.approved) {
+                setPlaybackRequestStatus('approved')
+              } else {
+                setPlaybackRequestStatus('dismissed')
+              }
+              if (dismissToastTimerRef.current) {
+                clearTimeout(dismissToastTimerRef.current)
+              }
+              dismissToastTimerRef.current = setTimeout(() => {
+                setPlaybackRequestStatus('idle')
+                activeRequestIdRef.current = null
+              }, 3000)
+            }
           } else if (m.t === 'ended') {
             // The host wrapped the show / left. leave() clears everything (incl. sessionEnd), so
             // set the designed end-state right after — Home surfaces it.
@@ -1198,6 +1403,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setError(null)
     setRole('none')
     roleRef.current = 'none'
+    pendingPlaybackRequestsRef.current = []
+    setPendingPlaybackRequests([])
+    autoDismissTimersRef.current.forEach((t) => clearTimeout(t))
+    autoDismissTimersRef.current.clear()
+    if (dismissToastTimerRef.current) {
+      clearTimeout(dismissToastTimerRef.current)
+      dismissToastTimerRef.current = null
+    }
+    setPlaybackRequestStatus('idle')
+    activeRequestIdRef.current = null
+    hostTransportRef.current = null
   }, [resetTransfer, clearSubtitle])
 
   // Client: retry a download that failed (bad HTTP, integrity mismatch). The grant + approval
@@ -1273,8 +1489,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       subtitle,
       attachSubtitle,
       removeSubtitle,
+      pendingPlaybackRequests,
+      handlePlaybackRequest,
+      playbackRequestStatus,
+      sendPlaybackRequest,
+      clearPlaybackRequestStatus,
+      registerHostTransport,
     }),
-    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, userLeftShow, exitShow, enterShow, retryDownload, dismissEnd, subtitle, attachSubtitle, removeSubtitle],
+    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, userLeftShow, exitShow, enterShow, retryDownload, dismissEnd, subtitle, attachSubtitle, removeSubtitle, pendingPlaybackRequests, handlePlaybackRequest, playbackRequestStatus, sendPlaybackRequest, clearPlaybackRequestStatus, registerHostTransport],
   )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>

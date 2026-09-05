@@ -30,6 +30,12 @@ export type PauseReason = 'host' | 'waiting'
 /** Actions a client may request; the host decides. */
 export type RequestAction = 'pause' | 'resume' | 'seek'
 
+/** Dedicated actions a follower can request from the host. */
+export type PlaybackRequestAction = 'pause' | 'rewind'
+
+export type PlaybackRequestMsg = Extract<ClientMsg, { t: 'playbackRequest' }>
+export type PlaybackRequestDecisionMsg = Extract<ServerMsg, { t: 'playbackRequestDecision' }>
+
 // ── Host → clients ──────────────────────────────────────────────────────────
 export type ServerMsg =
   | { t: 'welcome'; sessionId: string; media: MediaInfo; you: string }
@@ -45,6 +51,14 @@ export type ServerMsg =
   | { t: 'syncPong'; t1: number; t2: number; t3: number }
   | { t: 'ended'; reason: 'host-left' | 'host-ended' }
   | { t: 'subtitle'; name: string; content: string }
+  | {
+      t: 'playbackRequestDecision'
+      requestId: string
+      requesterId: string
+      approved: boolean
+      action: 'pause' | 'rewind'
+      seconds?: number
+    }
 
 // ── Client → host ───────────────────────────────────────────────────────────
 export type ClientMsg =
@@ -75,9 +89,17 @@ export type ClientMsg =
   // ACK after a seek / when buffered to start. `grant` proves the sender owns `id`.
   | { t: 'ready'; id: string; grant: string; positionSec: number }
   | { t: 'request'; id: string; action: RequestAction; arg?: number }
+  | {
+      t: 'playbackRequest'
+      id: string
+      grant: string
+      requestId: string
+      action: 'pause' | 'rewind'
+      seconds?: number
+    }
   | { t: 'leave'; id: string; grant: string }
   // Chat + reactions are attributed and grant-proved like every client→host message: the host
-  // validates ownership, stamps the sender's NAME and its own clock, and broadcasts the ServerMsg
+  // validates ownership, stamps the sender's NAME and its own clock, broadcasts the ServerMsg
   // form to everyone (including the sender — the host's echo is the single source of ordering).
   | { t: 'chat'; id: string; grant: string; text: string }
   | { t: 'reaction'; id: string; grant: string; emoji: string }
@@ -98,6 +120,7 @@ export const SERVER_MSG_TYPES = [
   'syncPong',
   'ended',
   'subtitle',
+  'playbackRequestDecision',
 ] as const
 
 export const CLIENT_MSG_TYPES = [
@@ -105,6 +128,7 @@ export const CLIENT_MSG_TYPES = [
   'heartbeat',
   'ready',
   'request',
+  'playbackRequest',
   'leave',
   'chat',
   'reaction',
