@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useVideoPlayer, VideoView } from 'expo-video'
-import { ChevronLeft, Pause, Play, RotateCcw, RotateCw, Subtitles } from 'lucide-react-native'
+import { ChevronLeft, Pause, Play, RotateCcw, RotateCw, Subtitles, Trash2 } from 'lucide-react-native'
 import { Button, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { useNavigation } from '@/navigation/context'
@@ -10,11 +10,13 @@ import { useSession } from '@/session/SessionProvider'
 import { CaptionOverlay } from '@/components/CaptionOverlay'
 import { ChatSheet } from '@/components/ChatSheet'
 import { ChatTicker } from '@/components/ChatTicker'
+import { CleanupSheet } from '@/components/CleanupSheet'
 import { FloatingReactions } from '@/components/FloatingReactions'
 import { ModerationBanner } from '@/components/ModerationBanner'
 import { ReactionRail } from '@/components/ReactionRail'
 import { RequestFeedbackToast } from '@/components/RequestFeedbackToast'
 import { decideCorrection, nextSeekLead, roomGate, stallReport, targetPositionSec } from '@/lib/sync/playback'
+import { formatBytes } from '@/lib/storage'
 import type { PlaybackState } from '@/lib/protocol'
 import { radii } from '@/theme/tokens'
 
@@ -69,6 +71,45 @@ export function PlayerScreen() {
   const [inSync, setInSync] = useState(true)
   const [ended, setEnded] = useState(false)
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(true)
+  const [showCleanupSheet, setShowCleanupSheet] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
+
+  // Query cache status when playback concludes
+  useEffect(() => {
+    if (ended) {
+      s.getCacheInfo().catch(() => {})
+    }
+  }, [ended, s])
+
+  const handleBackPress = async () => {
+    if (ended) {
+      const info = await s.getCacheInfo()
+      if (info.totalBytes > 0) {
+        setShowCleanupSheet(true)
+        return
+      }
+    }
+    nav.goBack()
+  }
+
+  const handleDeleteAndLeave = async () => {
+    setIsDeleting(true)
+    try {
+      await s.purgeCache()
+    } finally {
+      setIsDeleting(false)
+      setShowCleanupSheet(false)
+      s.leave()
+      nav.navigate('Home')
+    }
+  }
+
+  const handleKeepAndLeave = () => {
+    setShowCleanupSheet(false)
+    s.leave()
+    nav.navigate('Home')
+  }
+
   const lastSeekAtRef = useRef(0) // client: when we last issued a corrective seek (settle window)
   const pendingSeekAtRef = useRef<number | null>(null) // client: seek issued, landing not yet measured
   const seekLeadRef = useRef(0) // client: EMA of this device's seek-landing latency (s)
@@ -414,7 +455,7 @@ export function PlayerScreen() {
           {/* top bar */}
           <View style={styles.topBar} pointerEvents="box-none">
             <Pressable
-              onPress={nav.goBack}
+              onPress={handleBackPress}
               hitSlop={12}
               style={[styles.iconBtn, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}
             >
@@ -511,6 +552,32 @@ export function PlayerScreen() {
                       ? `Holding for ${waiting.join(', ')} to catch up…`
                       : `${fmt(pos)}${player.duration ? ` / ${fmt(player.duration)}` : ''}`}
                 </Text>
+                {ended && (s.cacheStatus?.totalBytes ?? 0) > 0 ? (
+                  <Pressable
+                    onPress={() => {
+                      revealControls()
+                      setShowCleanupSheet(true)
+                    }}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Free up storage space"
+                    style={[
+                      styles.reqBtn,
+                      {
+                        borderColor: t.palette.amber,
+                        backgroundColor: 'rgba(255,178,92,0.14)',
+                        paddingHorizontal: 16,
+                        paddingVertical: 8,
+                        marginTop: 10,
+                      },
+                    ]}
+                  >
+                    <Trash2 size={15} color={t.palette.amber} strokeWidth={2} />
+                    <Text variant="caption" tone="primary" style={[styles.reqBtnText, { color: t.palette.amber }]}>
+                      {`Free up ${formatBytes(s.cacheStatus?.totalBytes ?? 0)}`}
+                    </Text>
+                  </Pressable>
+                ) : null}
                 {!isHost && !ended ? (
                   <View style={styles.followerControlsRow} pointerEvents="box-none">
                     <Pressable
@@ -582,6 +649,17 @@ export function PlayerScreen() {
       ) : null}
 
       <ChatSheet visible={chatOpen} log={s.chatLog} onSend={s.sendChat} onClose={() => setChatOpen(false)} />
+
+      <CleanupSheet
+        visible={showCleanupSheet}
+        totalBytes={s.cacheStatus?.totalBytes ?? 0}
+        movieBytes={s.cacheStatus?.movieBytes}
+        subtitleBytes={s.cacheStatus?.subtitleBytes}
+        onDeleteAndLeave={handleDeleteAndLeave}
+        onKeepAndLeave={handleKeepAndLeave}
+        onCancel={() => setShowCleanupSheet(false)}
+        isDeleting={isDeleting}
+      />
     </View>
   )
 }

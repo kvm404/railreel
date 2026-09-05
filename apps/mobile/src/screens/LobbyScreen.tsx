@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { StyleSheet, View } from 'react-native'
 import Animated, { FadeIn, useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from 'react-native-reanimated'
 import * as Haptics from 'expo-haptics'
@@ -6,6 +6,7 @@ import { Check, X, DoorClosed } from 'lucide-react-native'
 import { Screen } from '@/components/Screen'
 import { FilamentBar } from '@/components/FilamentBar'
 import { StatusScreen } from '@/components/StatusScreen'
+import { CleanupSheet } from '@/components/CleanupSheet'
 import { Button, FlapText, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { useNavigation } from '@/navigation/context'
@@ -74,10 +75,38 @@ export function LobbyScreen() {
     nav.navigate('Player')
   }
 
+  const [showCleanupSheet, setShowCleanupSheet] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
+
   // Backing out / leaving is a clean teardown so no zombie session poisons the next one.
   const exitSession = () => {
     s.leave()
     nav.navigate('Home')
+  }
+
+  const handleExitRequest = async () => {
+    const info = await s.getCacheInfo()
+    if (info.totalBytes > 0) {
+      setShowCleanupSheet(true)
+    } else {
+      exitSession()
+    }
+  }
+
+  const handleDeleteAndLeave = async () => {
+    setIsDeleting(true)
+    try {
+      await s.purgeCache()
+    } finally {
+      setIsDeleting(false)
+      setShowCleanupSheet(false)
+      exitSession()
+    }
+  }
+
+  const handleKeepAndLeave = () => {
+    setShowCleanupSheet(false)
+    exitSession()
   }
 
   // The host said no — a designed dead-end, not a stuck lobby.
@@ -100,7 +129,7 @@ export function LobbyScreen() {
   const preflight = isHost ? s.hostWarning : (s.decodeCaution ?? s.error)
 
   return (
-    <Screen title="LOBBY" scroll onBack={exitSession}>
+    <Screen title="LOBBY" scroll onBack={handleExitRequest}>
       <View style={styles.body}>
         {/* ── the board ─────────────────────────────────────────────────────── */}
         <View style={[styles.board, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}>
@@ -206,8 +235,19 @@ export function LobbyScreen() {
           </View>
         )}
 
-        <Button title="Leave the platform" intent="cyan" height={48} onPress={exitSession} style={{ marginTop: 4 }} />
+        <Button title="Leave the platform" intent="cyan" height={48} onPress={handleExitRequest} style={{ marginTop: 4 }} />
       </View>
+
+      <CleanupSheet
+        visible={showCleanupSheet}
+        totalBytes={s.cacheStatus?.totalBytes ?? 0}
+        movieBytes={s.cacheStatus?.movieBytes}
+        subtitleBytes={s.cacheStatus?.subtitleBytes}
+        onDeleteAndLeave={handleDeleteAndLeave}
+        onKeepAndLeave={handleKeepAndLeave}
+        onCancel={() => setShowCleanupSheet(false)}
+        isDeleting={isDeleting}
+      />
     </Screen>
   )
 }
