@@ -3,6 +3,16 @@ import { PermissionsAndroid, Platform } from 'react-native'
 import * as DocumentPicker from 'expo-document-picker'
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
 import * as LegacyFS from 'expo-file-system/legacy'
+import {
+  clearSessionCache,
+  configureCacheStorage,
+  createExpoFileSystemAdapter,
+  getCacheStatus,
+  getMovieCachePath,
+  getSubtitleCachePath,
+  sweepOrphanCache,
+  type CacheStatus,
+} from '@/lib/storage'
 
 import RailReelHost from '../../modules/railreel-host'
 import { openSyncSession, type SyncSession } from '@/net/syncClient'
@@ -47,8 +57,11 @@ import { parseSrt, type SubtitleCue } from '@/lib/subtitles'
 const HTTP_PORT = 8493
 const WS_PORT = 8492
 const KEEP_AWAKE_TAG = 'railreel-host'
-const MOVIE_CACHE = `${LegacyFS.cacheDirectory}railreel-movie.bin`
-const SUBTITLE_CACHE = `${LegacyFS.cacheDirectory}railreel-subtitles.srt`
+const CACHE_DIR = LegacyFS.cacheDirectory ?? ''
+const fsAdapter = createExpoFileSystemAdapter(LegacyFS)
+configureCacheStorage(CACHE_DIR, fsAdapter)
+const MOVIE_CACHE = getMovieCachePath(CACHE_DIR)
+const SUBTITLE_CACHE = getSubtitleCachePath(CACHE_DIR)
 /** A stalled follower that hasn't sent a heartbeat in this long is treated as gone — clear its
  *  stall so it can't hang the room (followers beat every ~500ms during playback). */
 const STALE_BEAT_MS = 4000
@@ -177,6 +190,11 @@ export interface SessionStore {
   sendPlaybackRequest: (action: 'pause' | 'rewind', seconds?: number) => void
   clearPlaybackRequestStatus: () => void
   registerHostTransport: (handler: HostTransportHandler | null) => void
+
+  // cache management
+  cacheStatus: CacheStatus | null
+  getCacheInfo: () => Promise<CacheStatus>
+  purgeCache: (options?: { movie?: boolean; subtitles?: boolean }) => Promise<void>
 }
 
 export type PlaybackRequestStatus = 'idle' | 'pending' | 'approved' | 'dismissed'
@@ -264,6 +282,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [hostWarning, setHostWarning] = useState<string | null>(null)
   const [userLeftShow, setUserLeftShow] = useState(false)
   const [sessionEnd, setSessionEnd] = useState<SessionEnd | null>(null)
+  const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null)
   const decodeOkRef = useRef(true) // rides every heartbeat so the host's lobby can flag us
   const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const downloadingRef = useRef(false) // synchronous re-entrancy guard for startDownload
@@ -628,6 +647,53 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setProgress(0)
     setMovieUri(null)
   }, [])
+
+  // ── cache management ────────────────────────────────────────────────────────
+  const getCacheInfo = useCallback(async (): Promise<CacheStatus> => {
+    const status = await getCacheStatus(CACHE_DIR, fsAdapter)
+    setCacheStatus(status)
+    return status
+  }, [])
+
+  const purgeCache = useCallback(
+    async (options?: { movie?: boolean; subtitles?: boolean }): Promise<void> => {
+      await clearSessionCache({
+        movie: options?.movie,
+        subtitles: options?.subtitles,
+        cacheDir: CACHE_DIR,
+        fs: fsAdapter,
+        hooks: {
+          detachMedia: async () => {
+            setMovieUri(null)
+            await RailReelHost.stopProxy().catch(() => {})
+          },
+          cancelDownloads: async () => {
+            resetTransfer()
+          },
+        },
+      })
+      if (options?.subtitles !== false) {
+        await clearSubtitle()
+      }
+      await getCacheInfo()
+    },
+    [clearSubtitle, getCacheInfo, resetTransfer],
+  )
+
+  useEffect(() => {
+    // Startup orphan sweep: remove any abandoned cache files from previous crashed sessions
+    sweepOrphanCache(CACHE_DIR, fsAdapter)
+      .catch(() => ({ sweptFiles: [], reclaimedBytes: 0 }))
+      .then((result) => {
+        if (result.sweptFiles.length > 0) {
+          console.log(
+            `[RailReel] Startup orphan sweep reclaimed ${result.reclaimedBytes} bytes across ${result.sweptFiles.length} files`,
+          )
+        }
+        return getCacheInfo()
+      })
+      .catch(() => {})
+  }, [getCacheInfo])
 
   // ── host actions ────────────────────────────────────────────────────────────
   const startHost = useCallback(async () => {
@@ -1100,6 +1166,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // pre-cache path — open the finished file directly.
       if (proxyStateRef.current === 'idle' || proxyStateRef.current === 'failed') setMovieUri(MOVIE_CACHE)
       setClientPhase('ready')
+      getCacheInfo().catch(() => {})
       sendBeat()
       ;(clientRef.current ?? c).session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: positionRef.current })
     } catch (e) {
@@ -1414,7 +1481,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setPlaybackRequestStatus('idle')
     activeRequestIdRef.current = null
     hostTransportRef.current = null
-  }, [resetTransfer, clearSubtitle])
+    getCacheInfo().catch(() => {})
+  }, [resetTransfer, clearSubtitle, getCacheInfo])
 
   // Client: retry a download that failed (bad HTTP, integrity mismatch). The grant + approval
   // still stand, so we just kick the transfer again.
@@ -1495,8 +1563,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       sendPlaybackRequest,
       clearPlaybackRequestStatus,
       registerHostTransport,
+      cacheStatus,
+      getCacheInfo,
+      purgeCache,
     }),
-    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, userLeftShow, exitShow, enterShow, retryDownload, dismissEnd, subtitle, attachSubtitle, removeSubtitle, pendingPlaybackRequests, handlePlaybackRequest, playbackRequestStatus, sendPlaybackRequest, clearPlaybackRequestStatus, registerHostTransport],
+    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, userLeftShow, exitShow, enterShow, retryDownload, dismissEnd, subtitle, attachSubtitle, removeSubtitle, pendingPlaybackRequests, handlePlaybackRequest, playbackRequestStatus, sendPlaybackRequest, clearPlaybackRequestStatus, registerHostTransport, cacheStatus, getCacheInfo, purgeCache],
   )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>

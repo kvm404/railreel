@@ -18,6 +18,7 @@ import { useNavigation } from '@/navigation/context'
 import { useSession } from '@/session/SessionProvider'
 import { useTheme } from '@/theme/ThemeProvider'
 import { motion } from '@/theme/tokens'
+import { formatBytes } from '@/lib/storage'
 
 const H_PADDING = 24
 
@@ -123,6 +124,18 @@ export function HomeScreen() {
           headline={s.sessionEnd.headline}
           body={s.sessionEnd.body}
           primary={{ label: 'Back to the platform', onPress: s.dismissEnd }}
+          secondary={
+            s.cacheStatus && s.cacheStatus.totalBytes > 0
+              ? {
+                  label: `Delete Cache (${formatBytes(s.cacheStatus.totalBytes)})`,
+                  intent: 'amber',
+                  onPress: async () => {
+                    await s.purgeCache()
+                    s.dismissEnd()
+                  },
+                }
+              : undefined
+          }
         />
       ) : null}
     </View>
