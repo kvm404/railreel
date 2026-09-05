@@ -2,11 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useVideoPlayer, VideoView } from 'expo-video'
-import { ChevronLeft, Pause, Play, RotateCcw, RotateCw } from 'lucide-react-native'
+import { ChevronLeft, Pause, Play, RotateCcw, RotateCw, Subtitles } from 'lucide-react-native'
 import { Button, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { useNavigation } from '@/navigation/context'
 import { useSession } from '@/session/SessionProvider'
+import { CaptionOverlay } from '@/components/CaptionOverlay'
 import { ChatSheet } from '@/components/ChatSheet'
 import { ChatTicker } from '@/components/ChatTicker'
 import { FloatingReactions } from '@/components/FloatingReactions'
@@ -64,6 +65,7 @@ export function PlayerScreen() {
   const [pos, setPos] = useState(0)
   const [inSync, setInSync] = useState(true)
   const [ended, setEnded] = useState(false)
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(true)
   const lastSeekAtRef = useRef(0) // client: when we last issued a corrective seek (settle window)
   const pendingSeekAtRef = useRef<number | null>(null) // client: seek issued, landing not yet measured
   const seekLeadRef = useRef(0) // client: EMA of this device's seek-landing latency (s)
@@ -100,13 +102,13 @@ export function PlayerScreen() {
     }
   }, [showIsPlaying, showControls])
 
-  // Lightweight position readout for the overlay (also mirrored to a ref for the exit handler).
+  // Lightweight position readout for captions and overlay (also mirrored to a ref for the exit handler).
   useEffect(() => {
     const id = setInterval(() => {
       const cur = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
       posRef.current = cur
       setPos(cur)
-    }, 250)
+    }, 100)
     return () => clearInterval(id)
   }, [player])
 
@@ -349,6 +351,14 @@ export function PlayerScreen() {
       <FloatingReactions reactions={s.reactions} />
       {!chatOpen && <ChatTicker log={s.chatLog} />}
 
+      {/* captions: synchronized subtitles overlay */}
+      <CaptionOverlay
+        cues={s.subtitle?.cues ?? []}
+        currentTimeSec={pos}
+        visible={subtitlesEnabled}
+        bottomOffset={showControls || ended ? insets.bottom + 80 : insets.bottom + 44}
+      />
+
       {showControls || ended ? (
         <View style={[styles.overlay, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 24 }]} pointerEvents="box-none">
           {/* top bar */}
@@ -360,24 +370,45 @@ export function PlayerScreen() {
             >
               <ChevronLeft size={20} color={t.palette.textSecondary} strokeWidth={2.25} />
             </Pressable>
-            <View style={styles.syncTag}>
-              <View
-                style={[
-                  styles.dot,
-                  { backgroundColor: s.reconnecting ? t.palette.danger : inSync ? t.palette.cyan : t.palette.amber },
-                ]}
-              />
-              <Text variant="eyebrow" tone="secondary">
-                {ended
-                  ? 'THE END'
-                  : s.reconnecting
-                    ? 'RECONNECTING…'
-                    : isHost
-                      ? 'HOSTING'
-                      : inSync
-                        ? 'IN SYNC'
-                        : 'CATCHING UP'}
-              </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              {s.subtitle ? (
+                <Pressable
+                  onPress={() => setSubtitlesEnabled((v) => !v)}
+                  hitSlop={12}
+                  style={[
+                    styles.iconBtn,
+                    {
+                      borderColor: subtitlesEnabled ? t.palette.cyan : t.palette.hairline,
+                      backgroundColor: subtitlesEnabled ? 'rgba(87,210,230,0.15)' : t.palette.raised,
+                    },
+                  ]}
+                >
+                  <Subtitles
+                    size={18}
+                    color={subtitlesEnabled ? t.palette.cyan : t.palette.textTertiary}
+                    strokeWidth={2}
+                  />
+                </Pressable>
+              ) : null}
+              <View style={styles.syncTag}>
+                <View
+                  style={[
+                    styles.dot,
+                    { backgroundColor: s.reconnecting ? t.palette.danger : inSync ? t.palette.cyan : t.palette.amber },
+                  ]}
+                />
+                <Text variant="eyebrow" tone="secondary">
+                  {ended
+                    ? 'THE END'
+                    : s.reconnecting
+                      ? 'RECONNECTING…'
+                      : isHost
+                        ? 'HOSTING'
+                        : inSync
+                          ? 'IN SYNC'
+                          : 'CATCHING UP'}
+                </Text>
+              </View>
             </View>
           </View>
 

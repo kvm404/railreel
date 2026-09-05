@@ -44,6 +44,7 @@ export type ServerMsg =
   | { t: 'reaction'; from: string; fromId?: string; emoji: string; at: number }
   | { t: 'syncPong'; t1: number; t2: number; t3: number }
   | { t: 'ended'; reason: 'host-left' | 'host-ended' }
+  | { t: 'subtitle'; name: string; content: string }
 
 // ── Client → host ───────────────────────────────────────────────────────────
 export type ClientMsg =
@@ -96,6 +97,7 @@ export const SERVER_MSG_TYPES = [
   'reaction',
   'syncPong',
   'ended',
+  'subtitle',
 ] as const
 
 export const CLIENT_MSG_TYPES = [

@@ -1,6 +1,9 @@
-import { StyleSheet, View } from 'react-native'
+import { useState } from 'react'
+import { Pressable, StyleSheet, View } from 'react-native'
+import * as DocumentPicker from 'expo-document-picker'
+import * as LegacyFS from 'expo-file-system/legacy'
 import QRCode from 'react-native-qrcode-svg'
-import { Film, Wifi } from 'lucide-react-native'
+import { Film, Subtitles, Wifi } from 'lucide-react-native'
 import { Screen } from '@/components/Screen'
 import { SyncDots } from '@/components/SyncDots'
 import { Button, FlapText, Text } from '@/ui'
@@ -24,6 +27,29 @@ export function CreateSessionScreen() {
   const t = useTheme()
   const nav = useNavigation()
   const s = useSession()
+  const [subError, setSubError] = useState<string | null>(null)
+
+  const pickSubtitle = async () => {
+    setSubError(null)
+    try {
+      const res = await DocumentPicker.getDocumentAsync({
+        type: ['*/*'],
+        copyToCacheDirectory: true,
+      })
+      if (res.canceled || !res.assets[0]) return
+      const asset = res.assets[0]
+      if (!asset.name.toLowerCase().endsWith('.srt')) {
+        setSubError('Please select a valid .srt file')
+        return
+      }
+      const content = await LegacyFS.readAsStringAsync(asset.uri, {
+        encoding: LegacyFS.EncodingType.UTF8,
+      })
+      await s.attachSubtitle(asset.name, content)
+    } catch {
+      setSubError('Failed to read subtitle file')
+    }
+  }
 
   const guests = s.participants.filter((p) => p.id !== 'host').length
 
@@ -84,6 +110,61 @@ export function CreateSessionScreen() {
           <Text variant="data" tone="tertiary">
             {fmtSize(s.movie?.sizeBytes ?? 0)}
           </Text>
+        </View>
+
+        {/* subtitles */}
+        <View style={[styles.movie, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}>
+          <Subtitles size={18} color={s.subtitle ? t.palette.cyan : t.palette.textTertiary} strokeWidth={2.25} />
+          <View style={{ flex: 1 }}>
+            <Text variant="eyebrow" tone="tertiary">
+              SUBTITLES (OPTIONAL)
+            </Text>
+            <Text variant="cardTitle" numberOfLines={1}>
+              {s.subtitle ? s.subtitle.name : 'None attached'}
+            </Text>
+            {s.subtitle ? (
+              <Text variant="caption" tone="cyan">
+                {`${s.subtitle.cues.length} cues`}
+              </Text>
+            ) : null}
+            {subError ? (
+              <Text variant="caption" style={{ color: t.palette.danger }}>
+                {subError}
+              </Text>
+            ) : null}
+          </View>
+          {s.subtitle ? (
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <Pressable
+                onPress={pickSubtitle}
+                hitSlop={8}
+                style={[styles.smallBtn, { borderColor: t.palette.hairline }]}
+              >
+                <Text variant="caption" tone="secondary">
+                  Replace
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={s.removeSubtitle}
+                hitSlop={8}
+                style={[styles.smallBtn, { borderColor: t.palette.danger }]}
+              >
+                <Text variant="caption" style={{ color: t.palette.danger }}>
+                  Remove
+                </Text>
+              </Pressable>
+            </View>
+          ) : (
+            <Pressable
+              onPress={pickSubtitle}
+              hitSlop={8}
+              style={[styles.smallBtn, { borderColor: t.palette.cyan, backgroundColor: 'rgba(87,210,230,0.08)' }]}
+            >
+              <Text variant="caption" tone="cyan">
+                Attach .srt
+              </Text>
+            </Pressable>
+          )}
         </View>
 
         {/* invite panel — film/ticket frame around the QR (only once we have a reachable address) */}
@@ -171,4 +252,12 @@ const styles = StyleSheet.create({
     borderRadius: 16,
   },
   waiting: { flexDirection: 'row', alignItems: 'center', gap: 10, justifyContent: 'center' },
+  smallBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 })
