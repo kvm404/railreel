@@ -21,9 +21,17 @@ coverage/
 *.sw?
 
 # Env / secrets
-.env
-.env.local
-.env.*.local
+.env*
+
+# Android local config and keystores
+local.properties
+**/local.properties
+*.keystore
+*.jks
+*.key
+*.pem
+*.p12
+google-services.json
 
 # Expo / React Native
 .expo/
@@ -40,3 +48,6 @@ apps/mobile/modules/*/android/.cxx/
 .continue/
 .aider*
 .codex/
+.agents/
+.gemini/
+
