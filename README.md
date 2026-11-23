@@ -71,7 +71,7 @@ Start Show opens the player on every phone, **paused**. The host then presses **
 - **Playback Requests**: Want a snack break? Ask to pause or rewind 15 seconds. The host gets a prompt to allow it with one tap.
 
 ### 7. Clean Up When Done
-When you leave, you choose: **delete** the downloaded movie and reclaim the storage, or **keep** it. A kept copy is reused automatically if you later join a session for the same movie (RailReel checks a fingerprint of the file), so there is no second download.
+When you leave, you choose: **delete** the downloaded movie and reclaim the storage, or **keep** it. A **fully downloaded** kept copy is reused automatically if you later join a session for the same movie (RailReel checks a fingerprint of the file), so there is no second download. A partial download is not kept for reuse — it starts over next time.
 
 ---
 

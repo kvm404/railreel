@@ -272,8 +272,10 @@ battery or thermal shutdown. Instead:
 - **Warnings:** the host sees a battery warning while hosting, and guests check free storage
   before downloading; nothing blocks startup, so the UX is honest rather than gated.
 - **Keep-awake** on while hosting; encourage the host to stay plugged in.
-- **Honest UX:** "Your session ends if you leave the app or turn off the hotspot." No
-  background-hosting reliability promise.
+- **Honest UX:** if the host switches away from the app during the show, the room **pauses for
+  everyone** (the session stays up via the foreground service) and resumes only when the host
+  returns and presses Play. If the host kills the app, the phone shuts down, or the hotspot drops,
+  the session ends. No background-hosting reliability promise.
 - Clients handle host disappearance gracefully (clear "host left — session ended" state).
 
 ## 10. Security model (v1)

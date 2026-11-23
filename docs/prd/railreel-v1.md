@@ -139,8 +139,9 @@ Not a flat preload. Two mechanisms:
 - **Android focus.** Both host and client roles work on Android.
 - **Host is the session's lifeline (explicit v1 constraint).** While hosting, the host phone
   must stay **foreground, awake (keep-awake on), powered enough, and on the hotspot**. The app
-  shows battery warnings while hosting (and guests check free storage before downloading), and states clearly: *if the host leaves/locks/kills
-  the app or the hotspot drops, the session ends.* No background-hosting reliability promise.
+  shows battery warnings while hosting (and guests check free storage before downloading), and states clearly: *if the host leaves the app
+  mid-show the room pauses for everyone until they return and press Play; if the host kills the app or the
+  hotspot drops, the session ends.* No background-hosting reliability promise.
 - **Security.** Each session has a high-entropy token that is published on the hotspot (mDNS
   and QR) so tap-to-join works: anyone on the hotspot can *request* to join. The host approves
   each person, and file bytes and room traffic go only to approved, connection-bound guests.
