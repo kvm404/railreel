@@ -158,6 +158,50 @@ describe('mediaVerdict — audio codec', () => {
   })
 })
 
+// The native probe fills gaps the platform extractor leaves (avc3 fragmented MP4s, a leading
+// free/uuid box before ftyp) from the moov sample entries / a bounded box walk. Those paths feed
+// the SAME facts into the verdict, so these pin how the verdict treats what they produce.
+describe('mediaVerdict — facts from the native fallbacks', () => {
+  it('accepts a fragmented MP4 whose avc3 entry the moov fallback mapped to video/avc', () => {
+    expect(mediaVerdict({ container: 'mp4', videoMime: 'video/avc', audioMime: 'audio/mp4a-latm', trackCount: 2 })).toEqual({ ok: true })
+  })
+
+  it('accepts a moov-fallback result with video only (avc3 + no audio track)', () => {
+    expect(mediaVerdict({ container: 'mp4', videoMime: 'video/avc', audioMime: '', trackCount: 1 })).toEqual({ ok: true })
+  })
+
+  it('accepts an MP4 recognised through a leading free/uuid box (container resolved to mp4)', () => {
+    expect(mediaVerdict(probe({ container: 'mp4' }))).toEqual({ ok: true })
+  })
+
+  it('accepts a legacy QuickTime file made only of atoms (no ftyp)', () => {
+    expect(mediaVerdict(probe({ container: 'quicktime' }))).toEqual({ ok: true })
+  })
+
+  it('still rejects hvc1/hev1 entries the fallback mapped to HEVC', () => {
+    expect(mediaVerdict(probe({ videoMime: 'video/hevc' }))).toMatchObject({ ok: false, reason: 'video-codec' })
+  })
+
+  it.each([
+    ['audio/ac3', 'Dolby Digital (AC-3)'],
+    ['audio/eac3', 'Dolby Digital Plus (E-AC-3)'],
+    ['audio/opus', 'Opus'],
+    ['audio/alac', 'Apple Lossless (ALAC)'],
+  ])('still rejects %s audio found by the fallback', (mime, name) => {
+    const v = mediaVerdict(probe({ audioMime: mime }))
+    expect(v).toMatchObject({ ok: false, reason: 'audio-codec' })
+    if (!v.ok) expect(v.message).toContain(`sound is ${name}.`)
+  })
+
+  it('an ISO container where neither route found a track is "no video", not a pass', () => {
+    expect(mediaVerdict({ container: 'mp4', videoMime: '', audioMime: '', trackCount: 0 })).toMatchObject({ ok: false, reason: 'no-video' })
+  })
+
+  it('a container nothing recognised (leading junk) with no tracks is unreadable', () => {
+    expect(mediaVerdict({ container: 'unknown', videoMime: '', audioMime: '', trackCount: 0 })).toMatchObject({ ok: false, reason: 'unreadable' })
+  })
+})
+
 describe('codec names', () => {
   it('maps known mimes, falls back to the subtype, then to a generic phrase', () => {
     expect(videoCodecName('video/hevc')).toBe('HEVC (H.265)')

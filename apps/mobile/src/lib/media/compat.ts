@@ -47,6 +47,7 @@ const AUDIO_NAMES: Record<string, string> = {
   'audio/opus': 'Opus',
   'audio/vorbis': 'Vorbis',
   'audio/flac': 'FLAC',
+  'audio/alac': 'Apple Lossless (ALAC)',
   'audio/mpeg': 'MP3',
   'audio/mpeg-l2': 'MP2',
   'audio/raw': 'uncompressed PCM',
