@@ -11,44 +11,34 @@ import Animated, {
 import { Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { reactionLane, type ReactionEvent } from '@/lib/social/feed'
+import { LANE_STEP_X, LANE_STEP_Y, MAX_LANES, SPARK_RISE, SPARK_W, type ReactionLanes } from '@/lib/player/layout'
 
 /**
  * Floating reactions: warm sparks drifting up the RIGHT edge of the film — visible, never over
  * the actors' faces. Each is small (emoji + sender in tiny mono), rises and fades in ~2.5s, and
  * at most a handful ride at once (lanes are assigned deterministically by sequence).
  *
- * Lanes stack vertically when there's height for it; on a short (landscape) viewport they spread
- * sideways instead so the column never runs off the top. Under reduce-motion a spark simply
- * appears in its lane and stays put, fully visible, for its lifetime. See docs/design-language.md.
+ * The lane plan (vertical column, or spread sideways on a short viewport, and how many) comes from
+ * the Player's layout (lib/player/layout reactionLanes) so the chat ticker keeps a readable width.
+ * Under reduce-motion a spark simply appears in its lane and stays put, fully visible, for its
+ * lifetime. See docs/design-language.md.
  */
 
 const LIFE_MS = 2500
-const RISE_PX = 170
-const MAX_CONCURRENT = 4
-const LANE_STEP_PX = 54
-const LANE_STEP_X = 52
-const SPARK_MAX_W = 92
-/** Below this much vertical room, lanes go side by side. */
-const TALL_ENOUGH_PX = RISE_PX + LANE_STEP_PX * (MAX_CONCURRENT - 1) + 48
-
-/** Horizontal span the reaction lanes occupy from the right edge (so the chat ticker stays clear). */
-export function reactionLaneSpan(room: number): number {
-  return room < TALL_ENOUGH_PX ? LANE_STEP_X * (MAX_CONCURRENT - 1) + SPARK_MAX_W : SPARK_MAX_W
-}
+const DEFAULT_LANES: ReactionLanes = { axis: 'vertical', count: MAX_LANES, rise: SPARK_RISE, span: SPARK_W }
 
 export const FloatingReactions = memo(function FloatingReactions({
   reactions,
   bottom = 140,
   right = 14,
-  room = Infinity,
+  lanes = DEFAULT_LANES,
   lift,
 }: {
   reactions: ReactionEvent[]
   /** Where the lowest lane starts (px from the bottom). */
   bottom?: number
   right?: number
-  /** Vertical room available above `bottom` (px). */
-  room?: number
+  lanes?: ReactionLanes
   /** Extra upward offset (px), animated with the chrome curtain. */
   lift?: SharedValue<number>
 }) {
@@ -60,23 +50,21 @@ export const FloatingReactions = memo(function FloatingReactions({
     const fresh = reactions.filter((r) => r.seq > lastSeqRef.current)
     if (fresh.length === 0) return
     lastSeqRef.current = reactions[reactions.length - 1]?.seq ?? lastSeqRef.current
-    setVisible((v) => [...v, ...fresh].slice(-MAX_CONCURRENT))
+    setVisible((v) => [...v, ...fresh].slice(-MAX_LANES))
   }, [reactions])
 
   const retire = useCallback((seq: number) => setVisible((v) => v.filter((r) => r.seq !== seq)), [])
   const liftStyle = useAnimatedStyle(() => ({ transform: [{ translateY: lift ? -lift.value : 0 }] }))
 
-  const sideways = room < TALL_ENOUGH_PX
-  const rise = sideways ? Math.max(60, Math.min(RISE_PX, room - 48)) : RISE_PX
-
   return (
     <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, liftStyle]}>
       {visible.map((r) => {
-        const lane = reactionLane(r.seq, MAX_CONCURRENT)
-        const place = sideways
-          ? { bottom, right: right + lane * LANE_STEP_X }
-          : { bottom: bottom + lane * LANE_STEP_PX, right }
-        return <Spark key={r.seq} event={r} rise={rise} place={place} onDone={retire} />
+        const lane = reactionLane(r.seq, lanes.count)
+        const place =
+          lanes.axis === 'sideways'
+            ? { bottom, right: right + lane * LANE_STEP_X }
+            : { bottom: bottom + lane * LANE_STEP_Y, right }
+        return <Spark key={r.seq} event={r} rise={lanes.rise} place={place} onDone={retire} />
       })}
     </Animated.View>
   )
@@ -128,7 +116,7 @@ function Spark({
 }
 
 const styles = StyleSheet.create({
-  spark: { position: 'absolute', alignItems: 'center', maxWidth: SPARK_MAX_W },
+  spark: { position: 'absolute', alignItems: 'center', maxWidth: SPARK_W },
   emoji: { fontSize: 30, lineHeight: 36 },
   name: { fontSize: 10, marginTop: -2, textShadowRadius: 4 },
 })

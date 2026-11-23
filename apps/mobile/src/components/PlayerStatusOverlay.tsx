@@ -1,5 +1,5 @@
-import { memo, useEffect } from 'react'
-import { StyleSheet, View } from 'react-native'
+import { memo, useEffect, useRef } from 'react'
+import { AccessibilityInfo, StyleSheet, View } from 'react-native'
 import Animated, {
   cancelAnimation,
   Easing,
@@ -43,50 +43,75 @@ export const PlayerStatusOverlay = memo(function PlayerStatusOverlay({
   onRetry: () => void
   onLeave: () => void
 }) {
-  const t = useTheme()
-  if (state === 'error') {
-    return (
-      <Animated.View
-        entering={FadeIn.duration(220)}
-        style={[styles.fill, styles.center, { backgroundColor: withAlpha(t.palette.void, 0.92) }]}
-        accessibilityViewIsModal
-      >
-        <View style={styles.errorCard} accessibilityRole="alert">
-          <Text variant="eyebrow" style={{ color: t.palette.danger }}>
-            PROJECTOR FAULT
-          </Text>
-          <Text variant="title" tone="primary" style={styles.centerText}>
-            The reel snagged
-          </Text>
-          <Text variant="body" tone="secondary" style={styles.centerText}>
-            {isHost
-              ? "This phone couldn't keep playing the film. The room is paused — nobody runs ahead."
-              : "Your copy of the film won't play right now. The others keep watching; you can step back to the lobby or try again."}
-          </Text>
-          {detail ? (
-            <Text variant="data" tone="secondary" style={[styles.centerText, styles.detail]} numberOfLines={2}>
-              {detail}
-            </Text>
-          ) : null}
-          <View style={styles.actions}>
-            <Button title="Back to the lobby" height={52} onPress={onLeave} />
-            <IconButton
-              variant="ghost"
-              size={44}
-              radius={radii.pill}
-              label="Try again"
-              icon={(c) => <RotateCcw size={15} color={c} strokeWidth={2} />}
-              accessibilityLabel="Try loading the film again"
-              onPress={onRetry}
-            />
-          </View>
-        </View>
-      </Animated.View>
-    )
-  }
+  if (state === 'error') return <SnagCard isHost={isHost} detail={detail} onRetry={onRetry} onLeave={onLeave} />
   if (state === 'loading') return <Threading firstLoad={firstLoad} />
   return null
 })
+
+/**
+ * The playback-error card. TalkBack can't reach the film controls behind it (the Player hides its
+ * underlay while it is up — accessibilityViewIsModal alone is iOS-only), and focus lands on its title.
+ */
+function SnagCard({
+  isHost,
+  detail,
+  onRetry,
+  onLeave,
+}: {
+  isHost: boolean
+  detail?: string | null
+  onRetry: () => void
+  onLeave: () => void
+}) {
+  const t = useTheme()
+  const titleRef = useRef<View>(null)
+  useEffect(() => {
+    const id = setTimeout(() => {
+      if (titleRef.current) AccessibilityInfo.sendAccessibilityEvent(titleRef.current, 'focus')
+    }, 250)
+    return () => clearTimeout(id)
+  }, [])
+  return (
+    <Animated.View
+      entering={FadeIn.duration(220)}
+      style={[styles.fill, styles.center, { backgroundColor: withAlpha(t.palette.void, 0.92) }]}
+      accessibilityViewIsModal
+    >
+      <View style={styles.errorCard}>
+        <Text variant="eyebrow" style={{ color: t.palette.danger }} importantForAccessibility="no">
+          PROJECTOR FAULT
+        </Text>
+        <View ref={titleRef} accessible accessibilityRole="header" accessibilityLabel="The reel snagged">
+          <Text variant="title" tone="primary" style={styles.centerText}>
+            The reel snagged
+          </Text>
+        </View>
+        <Text variant="body" tone="secondary" style={styles.centerText}>
+          {isHost
+            ? "This phone couldn't keep playing the film. The room is paused — nobody runs ahead."
+            : "Your copy of the film won't play right now. The others keep watching; you can step back to the lobby or try again."}
+        </Text>
+        {detail ? (
+          <Text variant="data" tone="secondary" style={[styles.centerText, styles.detail]} numberOfLines={2}>
+            {detail}
+          </Text>
+        ) : null}
+        <View style={styles.actions}>
+          <Button title="Back to the lobby" height={52} onPress={onLeave} />
+          <IconButton
+            variant="ghost"
+            size={44}
+            radius={radii.pill}
+            label="Try again"
+            icon={(c) => <RotateCcw size={15} color={c} strokeWidth={2} />}
+            accessibilityLabel="Try loading the film again"
+            onPress={onRetry}
+          />
+        </View>
+      </View>
+    </Animated.View>
+  )
+}
 
 function Threading({ firstLoad }: { firstLoad: boolean }) {
   const t = useTheme()

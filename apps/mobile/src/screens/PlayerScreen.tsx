@@ -18,7 +18,7 @@ import { CaptionOverlay } from '@/components/CaptionOverlay'
 import { ChatSheet } from '@/components/ChatSheet'
 import { ChatTicker } from '@/components/ChatTicker'
 import { CleanupSheet } from '@/components/CleanupSheet'
-import { FloatingReactions, reactionLaneSpan } from '@/components/FloatingReactions'
+import { FloatingReactions } from '@/components/FloatingReactions'
 import { ModerationBanner } from '@/components/ModerationBanner'
 import { Curtain, SyncTag, type SyncTone } from '@/components/PlayerChrome'
 import { PlayerStatusOverlay } from '@/components/PlayerStatusOverlay'
@@ -35,7 +35,7 @@ import {
 } from '@/lib/sync/playback'
 import { playerLayout } from '@/lib/player/layout'
 import { lastChatId, unreadCount } from '@/lib/social/feed'
-import { formatBytes } from '@/lib/storage'
+import { cleanupFailureMessage, formatBytes, type ClearCacheResult } from '@/lib/storage'
 import type { PlaybackState } from '@/lib/protocol'
 import type { SubtitleCue } from '@/lib/subtitles'
 
@@ -117,6 +117,7 @@ export function PlayerScreen() {
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(true)
   const [showCleanupSheet, setShowCleanupSheet] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [nativeStatus, setNativeStatus] = useState<VideoPlayerStatus>(() => player.status)
   const [playerError, setPlayerError] = useState<string | null>(null)
   const [everReady, setEverReady] = useState(false)
@@ -150,6 +151,7 @@ export function PlayerScreen() {
       const info = await s.getCacheInfo()
       if (!mounted.current) return
       if (info.totalBytes > 0) {
+        setDeleteError(null)
         setShowCleanupSheet(true)
         return
       }
@@ -163,17 +165,28 @@ export function PlayerScreen() {
     return true
   })
 
+  // Leave only once the files are PROVABLY gone (see lib/storage cleanupFailureMessage): a failed
+  // purge keeps the sheet open, locked, with the reason, a retry and "Leave anyway".
   const handleDeleteAndLeave = async () => {
     setIsDeleting(true)
+    // (deleteError stays up during a retry so the sheet doesn't flicker back to its unlocked form)
+    let result: ClearCacheResult | null = null
     try {
-      await s.purgeCache()
-    } finally {
-      setIsDeleting(false)
-      setShowCleanupSheet(false)
-      const step = resumeExit({ mounted: mounted.current, sessionActive: sessionRef.current.role !== 'none' })
-      if (step === 'leave') s.leave()
-      if (step !== 'skip') nav.reset('Home')
+      result = await s.purgeCache()
+    } catch {
+      result = null
     }
+    if (!mounted.current) return
+    setIsDeleting(false)
+    const failure = cleanupFailureMessage(result)
+    if (failure) {
+      setDeleteError(failure)
+      return
+    }
+    setShowCleanupSheet(false)
+    const step = resumeExit({ mounted: mounted.current, sessionActive: sessionRef.current.role !== 'none' })
+    if (step === 'leave') s.leave()
+    if (step !== 'skip') nav.reset('Home')
   }
 
   const handleKeepAndLeave = () => {
@@ -193,6 +206,7 @@ export function PlayerScreen() {
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // follower: correct only while on screen ('unknown' at launch counts as on screen)
   const appActiveRef = useRef(AppState.currentState !== 'background')
+  const [appActive, setAppActive] = useState(appActiveRef.current) // host: the room gate never resumes while away
 
   // TalkBack users navigate the chrome element by element — never pull it out from under them.
   useEffect(() => {
@@ -426,10 +440,15 @@ export function PlayerScreen() {
     const sub = AppState.addEventListener('change', (state) => {
       const active = state === 'active'
       appActiveRef.current = active
+      setAppActive(active)
       if (isHost) {
-        if (!active && playingRef.current) {
+        if (!active) {
+          // Drop any room hold / override on EVERY trip away — even when already held (not
+          // playing) — or a straggler recovering while we're away would let the gate auto-resume.
           autoPausedRef.current = false
           overrideRef.current = false
+        }
+        if (!active && playingRef.current) {
           let cur = playhead.get()
           try {
             cur = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : cur
@@ -444,7 +463,9 @@ export function PlayerScreen() {
       }
       if (!active) {
         try {
-          if (player.playing) player.pause()
+          // Unconditionally: mid-buffer expo-video reports playing=false while ExoPlayer still has
+          // playback requested, which would start audio behind the lock screen once it lands.
+          player.pause()
         } catch {
           // released
         }
@@ -501,6 +522,7 @@ export function PlayerScreen() {
   const waiting = s.waitingFor
   useEffect(() => {
     if (!isHost || ended) return // the show's over — don't hold/resume on an end-of-stream blip
+    if (!appActive) return // host is away: the room stays paused until a deliberate Play
     const blocked = waiting.length > 0
     if (!blocked) overrideRef.current = false // straggler caught up — drop the override
     const action = roomGate({ autoPaused: autoPausedRef.current, playing }, blocked)
@@ -516,7 +538,7 @@ export function PlayerScreen() {
       setPlaying(true)
       setHostPlayback(player.currentTime, true)
     }
-  }, [isHost, ended, waiting, playing, player, setHostPlayback, revealControls])
+  }, [isHost, ended, appActive, waiting, playing, player, setHostPlayback, revealControls])
 
   // ── client: drift-correct to the host's state ───────────────────────────────
   // The guiding rule is SMOOTHNESS: play at the host's rate and touch the player only when something
@@ -735,6 +757,7 @@ export function PlayerScreen() {
             accessibilityLabel={`Free up ${formatBytes(cacheBytes)} of storage`}
             onPress={() => {
               revealControls()
+              setDeleteError(null)
               setShowCleanupSheet(true)
             }}
           />
@@ -821,8 +844,8 @@ export function PlayerScreen() {
 
   return (
     <View style={styles.fill}>
-      {/* Everything under the chat sheet; hidden from TalkBack while the sheet (a modal layer) is open. */}
-      <View style={StyleSheet.absoluteFill} importantForAccessibility={chatOpen ? 'no-hide-descendants' : 'auto'}>
+      {/* Everything under the chat sheet / error card; hidden from TalkBack while either modal layer is up. */}
+      <View style={StyleSheet.absoluteFill} importantForAccessibility={chatOpen || failed ? 'no-hide-descendants' : 'auto'}>
         <Pressable
           style={StyleSheet.absoluteFill}
           onPress={onFilmPress}
@@ -856,7 +879,7 @@ export function PlayerScreen() {
             log={chatLog}
             bottom={layout.socialBottom}
             left={layout.sideLeft}
-            right={layout.sideRight + reactionLaneSpan(layout.reactionRoom) + 8}
+            right={layout.tickerRight}
             lift={lift}
           />
         )}
@@ -864,7 +887,7 @@ export function PlayerScreen() {
           reactions={s.reactions}
           bottom={layout.socialBottom}
           right={layout.sideRight}
-          room={layout.reactionRoom}
+          lanes={layout.reactions}
           lift={lift}
         />
 
@@ -959,6 +982,7 @@ export function PlayerScreen() {
         onKeepAndLeave={handleKeepAndLeave}
         onCancel={() => setShowCleanupSheet(false)}
         isDeleting={isDeleting}
+        error={deleteError}
       />
     </View>
   )

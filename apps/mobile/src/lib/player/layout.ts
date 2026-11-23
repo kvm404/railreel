@@ -49,6 +49,10 @@ export interface PlayerLayout {
   reactionRoom: number
   /** Where the moderation banner / request toast hang (below the top curtain). */
   bannerTop: number
+  /** Floating-reaction lane plan (see reactionLanes). */
+  reactions: ReactionLanes
+  /** Chat ticker's right inset: clear of the reaction lanes, never below TICKER_MIN_W wide. */
+  tickerRight: number
 }
 
 export const SIDE_MIN = 16
@@ -88,6 +92,52 @@ export function playerLayout(i: PlayerLayoutInput): PlayerLayout {
   const socialBottom = captionBottom + (i.captionsOn ? CAPTION_RESERVE : 0)
   const bannerTop = i.insets.top + TOP_CURTAIN
   const reactionRoom = Math.max(0, i.height - bannerTop - socialBottom - lift)
+  const reactions = reactionLanes(reactionRoom, usable)
+  const tickerRight = sideRight + reactions.span + TICKER_GAP
 
-  return { wide, sideLeft, sideRight, railKey, captionBottom, lift, socialBottom, reactionRoom, bannerTop }
+  return { wide, sideLeft, sideRight, railKey, captionBottom, lift, socialBottom, reactionRoom, bannerTop, reactions, tickerRight }
+}
+
+// ── floating-reaction lanes ────────────────────────────────────────────────────
+export const SPARK_W = 92
+export const SPARK_RISE = 170
+export const LANE_STEP_Y = 54
+export const LANE_STEP_X = 52
+export const MAX_LANES = 4
+const SPARK_H = 48
+const MIN_RISE = 60
+/** The chat ticker must keep at least this much width for sender + message. */
+export const TICKER_MIN_W = 160
+const TICKER_GAP = 8
+
+export interface ReactionLanes {
+  /** Lanes stack up the right edge, or spread leftwards along it on a short viewport. */
+  axis: 'vertical' | 'sideways'
+  count: number
+  /** How far each spark travels up (px). */
+  rise: number
+  /** Horizontal span reserved from the right safe edge (the ticker stays clear of it). */
+  span: number
+}
+
+/**
+ * Pick the reaction lanes for the room available. Vertical lanes are preferred (one narrow
+ * column, so the chat ticker keeps nearly the full width) with the rise shortened to fit; only a
+ * genuinely short viewport (landscape) spreads them sideways — and then only as many lanes as
+ * leave the ticker its minimum readable width. Fewer lanes than concurrent sparks just means two
+ * may share a lane briefly.
+ */
+export function reactionLanes(room: number, usableWidth: number): ReactionLanes {
+  const stack = LANE_STEP_Y * (MAX_LANES - 1) + SPARK_H
+  if (room >= stack + MIN_RISE) {
+    return { axis: 'vertical', count: MAX_LANES, rise: Math.min(SPARK_RISE, room - stack), span: SPARK_W }
+  }
+  const widthForLanes = usableWidth - TICKER_MIN_W - TICKER_GAP - SPARK_W
+  const count = clamp(Math.floor(widthForLanes / LANE_STEP_X) + 1, 1, MAX_LANES)
+  return {
+    axis: 'sideways',
+    count,
+    rise: Math.max(MIN_RISE, Math.min(SPARK_RISE, room - SPARK_H)),
+    span: (count - 1) * LANE_STEP_X + SPARK_W,
+  }
 }
