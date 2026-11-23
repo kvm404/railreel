@@ -2,11 +2,11 @@ import { useEffect } from 'react'
 import { StyleSheet, View } from 'react-native'
 import Animated, {
   useAnimatedStyle,
-  useReducedMotion,
   useSharedValue,
   withTiming,
 } from 'react-native-reanimated'
 import { LinearGradient } from 'expo-linear-gradient'
+import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { useTheme } from '@/theme/ThemeProvider'
 import { motion } from '@/theme/tokens'
 
@@ -17,7 +17,7 @@ import { motion } from '@/theme/tokens'
  */
 export function FilamentBar({ progress, height = 8 }: { progress: number; height?: number }) {
   const t = useTheme()
-  const reduced = useReducedMotion()
+  const reduced = useReduceMotion()
   const p = useSharedValue(clamp01(progress))
 
   useEffect(() => {

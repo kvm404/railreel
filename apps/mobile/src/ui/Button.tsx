@@ -3,7 +3,6 @@ import { Pressable, StyleSheet, View, type ViewStyle } from 'react-native'
 import Animated, {
   cancelAnimation,
   useAnimatedStyle,
-  useReducedMotion,
   useSharedValue,
   withSpring,
   withTiming,
@@ -11,6 +10,7 @@ import Animated, {
 import { LinearGradient } from 'expo-linear-gradient'
 import * as Haptics from 'expo-haptics'
 import { Text } from './Text'
+import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { useTheme } from '@/theme/ThemeProvider'
 import { motion } from '@/theme/tokens'
 
@@ -45,7 +45,7 @@ export function Button({
   style,
 }: ButtonProps) {
   const t = useTheme()
-  const reduced = useReducedMotion()
+  const reduced = useReduceMotion()
   const pressed = useSharedValue(0)
   const isAmber = intent === 'amber'
 

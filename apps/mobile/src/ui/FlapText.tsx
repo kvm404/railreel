@@ -6,14 +6,14 @@ import Animated, {
   interpolate,
   runOnJS,
   useAnimatedStyle,
-  useReducedMotion,
   useSharedValue,
   withDelay,
   withTiming,
 } from 'react-native-reanimated'
 import * as Haptics from 'expo-haptics'
+import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { useTheme } from '@/theme/ThemeProvider'
-import { fonts } from '@/theme/tokens'
+import { fonts, veils } from '@/theme/tokens'
 
 /**
  * The split-flap departure board — RailReel's signature element.
@@ -87,7 +87,7 @@ function FlapCell({
   haptic: boolean
 }) {
   const t = useTheme()
-  const reduced = useReducedMotion()
+  const reduced = useReduceMotion()
   const progress = useSharedValue(1) // 1 = settled
   const [prev, setPrev] = useState(' ')
   const [curr, setCurr] = useState(char)
@@ -169,17 +169,17 @@ function FlapCell({
         styles.cell,
         cell,
         {
-          backgroundColor: '#0C111B', // top-half base (cooler/lighter)
+          backgroundColor: t.palette.flapCell, // top-half base (cooler/lighter)
           borderColor: t.palette.hairline,
-          borderTopColor: 'rgba(255,255,255,0.07)', // top bevel highlight
-          borderBottomColor: 'rgba(0,0,0,0.55)', // bottom bevel shadow
+          borderTopColor: veils.flapBevelTop, // top bevel highlight
+          borderBottomColor: veils.flapBevelBottom, // bottom bevel shadow
         },
       ]}
       importantForAccessibility="no-hide-descendants"
       accessibilityElementsHidden
     >
       {/* Bottom half sits in darker material — gives each tile physical depth. */}
-      <View style={[styles.bottomShade, { backgroundColor: 'rgba(0,0,0,0.35)' }]} />
+      <View style={[styles.bottomShade, { backgroundColor: veils.flapShade }]} />
 
       {/* Resting state: the upper shows the target, the lower shows old until the flap falls. */}
       <Half which="top" char={curr} size={size} cellW={cellW} cellH={cellH} color={color} />
@@ -197,8 +197,8 @@ function FlapCell({
       ) : null}
 
       {/* The split-flap hinge: a dark seam with a thin highlight beneath. */}
-      <View style={[styles.hinge, { backgroundColor: 'rgba(0,0,0,0.7)' }]} />
-      <View style={[styles.hingeHighlight, { backgroundColor: 'rgba(255,255,255,0.05)' }]} />
+      <View style={[styles.hinge, { backgroundColor: veils.flapHinge }]} />
+      <View style={[styles.hingeHighlight, { backgroundColor: veils.flapHingeLight }]} />
     </View>
   )
 }
