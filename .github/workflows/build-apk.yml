@@ -1,109 +1,270 @@
-name: Build and Release Android APK
+name: Build Android APK
+
+# Builds the universal (arm64-v8a + armeabi-v7a) release APK for an EXISTING tag and attaches
+# it to that tag's GitHub release.
+#
+# Triggers
+#   - workflow_call: used by release-please.yml right after it creates a release. This must be a
+#     direct call: releases created with GITHUB_TOKEN do NOT fire `release: published` events.
+#   - workflow_dispatch: manual (re)build of a tag. The tag is required; there is no default.
+#
+# Rules
+#   - The TAG's commit is what gets built (not the dispatch ref); the tag must already exist.
+#   - app.json expo.version and both package.json versions must equal the tag (minus the "v").
+#   - lint + typecheck + test run before the build.
+#   - Assets on a published release are never overwritten. Replacing is only allowed on a draft.
+#
+# Android versionCode
+#   Derived from the semver tag so it always increases with the release:
+#     versionCode = major * 10000 + minor * 100 + patch      (v0.1.0 -> 100, v1.2.3 -> 10203)
+#   minor and patch must stay below 100. The value is injected into app.json (CI workspace only,
+#   not committed) before `expo prebuild`, and verified against the built APK with aapt2.
+#
+# Signing
+#   If ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD
+#   repo secrets are all set, the APK is re-signed with that keystore via apksigner and verified.
+#   If none are set, the APK stays debug-signed and a ::warning:: is emitted (not a failure).
+#   A partial set is treated as a misconfiguration and fails the build.
 
 on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Existing release tag to build, e.g. v0.1.0'
+        required: true
+        type: string
+      publish:
+        description: 'Publish the release (undraft) after the APK is attached'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
+        required: false
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to attach APK to'
+        description: 'Existing release tag to build, e.g. v0.1.0'
+        required: true
+        type: string
+      publish:
+        description: 'Publish the release (undraft) after the APK is attached'
         required: false
-        default: 'v0.1.0'
-  release:
-    types: [published]
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
+concurrency:
+  group: build-apk-${{ inputs.tag }}
+  cancel-in-progress: false
+
 jobs:
   build-apk:
-    name: Build Android Release APK (arm64-v8a)
+    name: Build universal release APK (${{ inputs.tag }})
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Monorepo hoisting: let Gradle/Expo autolinking resolve root-level node_modules.
+      NODE_PATH: ${{ github.workspace }}/node_modules:${{ github.workspace }}/apps/mobile/node_modules
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Validate tag exists
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '$TAG' must look like v1.2.3"
+            exit 1
+          fi
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --silent 2>/dev/null; then
+            echo "::error::Tag '$TAG' does not exist in $GITHUB_REPOSITORY. Create it (or merge the release PR) first."
+            exit 1
+          fi
 
-      - name: Setup Node 20 LTS
-        uses: actions/setup-node@v4
+      # Build exactly what the tag points at, regardless of which ref dispatched the workflow.
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Confirm checkout matches tag and assert versions
+        run: |
+          WANT="${TAG#v}"
+          HEAD_SHA=$(git rev-parse HEAD)
+          TAG_SHA=$(git rev-parse "refs/tags/$TAG^{commit}")
+          if [ "$HEAD_SHA" != "$TAG_SHA" ]; then
+            echo "::error::Checked-out commit $HEAD_SHA is not the commit of tag $TAG ($TAG_SHA)"
+            exit 1
+          fi
+          echo "Building $TAG at $HEAD_SHA"
+          fail=0
+          for spec in "package.json:.version" "apps/mobile/package.json:.version" "apps/mobile/app.json:.expo.version"; do
+            file="${spec%%:*}"; query="${spec#*:}"
+            got=$(jq -r "$query" "$file")
+            if [ "$got" != "$WANT" ]; then
+              echo "::error file=$file::$file $query is '$got' but tag $TAG requires '$WANT'"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Compute Android versionCode and inject into app.json
+        id: version
+        run: |
+          IFS=. read -r MAJOR MINOR PATCH <<< "${TAG#v}"
+          if [ "$MINOR" -ge 100 ] || [ "$PATCH" -ge 100 ]; then
+            echo "::error::minor/patch must be < 100 for the versionCode scheme"
+            exit 1
+          fi
+          CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+          echo "versionCode=$CODE" >> "$GITHUB_OUTPUT"
+          echo "versionName=${TAG#v}" >> "$GITHUB_OUTPUT"
+          jq --argjson code "$CODE" '.expo.android.versionCode = $code' apps/mobile/app.json > "$RUNNER_TEMP/app.json"
+          mv "$RUNNER_TEMP/app.json" apps/mobile/app.json
+          echo "versionCode = $CODE"
+
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: package.json
 
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
+      - name: Cache Bun downloads
+        uses: actions/cache@v4
         with:
-          distribution: 'temurin'
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v3
 
       - name: Install dependencies
-        run: |
-          bun install --frozen-lockfile
-          echo "NODE_PATH=${{ github.workspace }}/node_modules:${{ github.workspace }}/apps/mobile/node_modules" >> $GITHUB_ENV
+        run: bun install --frozen-lockfile
 
-      - name: Prebuild Android project and configure ARM64
-        env:
-          NODE_PATH: ${{ github.workspace }}/node_modules:${{ github.workspace }}/apps/mobile/node_modules
-        run: |
-          bun run --cwd apps/mobile prebuild --platform android
-          if grep -q "reactNativeArchitectures" apps/mobile/android/gradle.properties; then
-            sed -i 's/.*reactNativeArchitectures=.*/reactNativeArchitectures=arm64-v8a/' apps/mobile/android/gradle.properties
-          else
-            echo "reactNativeArchitectures=arm64-v8a" >> apps/mobile/android/gradle.properties
-          fi
-          if grep -q "org.gradle.jvmargs" apps/mobile/android/gradle.properties; then
-            sed -i 's/.*org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m/' apps/mobile/android/gradle.properties
-          else
-            echo "org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m" >> apps/mobile/android/gradle.properties
-          fi
-          echo "=== Configured gradle.properties ==="
-          grep -E "reactNativeArchitectures|org.gradle.jvmargs" apps/mobile/android/gradle.properties
+      - name: Lint
+        run: bun run lint
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - name: Typecheck
+        run: bun run typecheck
 
-      - name: Build Android Release APK
-        env:
-          NODE_PATH: ${{ github.workspace }}/node_modules:${{ github.workspace }}/apps/mobile/node_modules
+      - name: Test
+        run: bun run test
+
+      - name: Expo prebuild (android)
+        run: bun run --cwd apps/mobile prebuild --platform android
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build release APK (arm64-v8a + armeabi-v7a)
+        working-directory: apps/mobile/android
         run: |
-          cd apps/mobile/android
           chmod +x gradlew
-          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon --max-workers=2 --stacktrace --console=plain
+          ./gradlew assembleRelease \
+            -PreactNativeArchitectures=armeabi-v7a,arm64-v8a \
+            -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m" \
+            --no-daemon --max-workers=2 --stacktrace --console=plain
 
-      - name: Locate and Prepare APK
+      - name: Sign, verify and name the APK
         id: apk
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EXPECT_CODE: ${{ steps.version.outputs.versionCode }}
+          EXPECT_NAME: ${{ steps.version.outputs.versionName }}
         run: |
-          APK_PATH=$(find apps/mobile/android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
-          if [ -z "$APK_PATH" ]; then
-            echo "Error: Release APK not found"
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          BT=$(ls -d "$SDK"/build-tools/* | sort -V | tail -n 1)
+          IN=$(find apps/mobile/android/app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          [ -n "$IN" ] || { echo "::error::Release APK not found"; exit 1; }
+          OUT="RailReel-${TAG}.apk"
+
+          set_count=0
+          for v in "$KS_B64" "$KS_PASS" "$KEY_ALIAS" "$KEY_PASS"; do
+            if [ -n "$v" ]; then set_count=$((set_count + 1)); fi
+          done
+
+          if [ "$set_count" -eq 4 ]; then
+            KS_FILE="$RUNNER_TEMP/release.keystore"
+            echo "$KS_B64" | base64 -d > "$KS_FILE"
+            "$BT/apksigner" sign --ks "$KS_FILE" --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass env:KS_PASS --key-pass env:KEY_PASS --out "$OUT" "$IN"
+            rm -f "$KS_FILE"
+            SIGNED=release
+          elif [ "$set_count" -eq 0 ]; then
+            echo "::warning::ANDROID_KEYSTORE_* secrets are not set: this APK is signed with the DEBUG key. Do not distribute it as an official release; add the keystore secrets."
+            cp "$IN" "$OUT"
+            SIGNED=debug
+          else
+            echo "::error::Only some of ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD are set; set all four or none."
             exit 1
           fi
-          TAG="${{ github.event.inputs.tag || github.event.release.tag_name || 'v0.1.0' }}"
-          OUTPUT_NAME="RailReel-${TAG}.apk"
-          cp "$APK_PATH" "$OUTPUT_NAME"
-          echo "apk_path=$OUTPUT_NAME" >> $GITHUB_OUTPUT
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          ls -lh "$OUTPUT_NAME"
 
-      - name: Upload APK to Workflow Artifacts
+          echo "--- apksigner verify ---"
+          "$BT/apksigner" verify --verbose --print-certs "$OUT" | tee "$RUNNER_TEMP/certs.txt"
+          if [ "$SIGNED" = release ] && grep -qi 'CN=Android Debug' "$RUNNER_TEMP/certs.txt"; then
+            echo "::error::APK still carries the debug certificate"
+            exit 1
+          fi
+
+          echo "--- ABIs ---"
+          LIBS=$(unzip -l "$OUT" | awk '{print $4}' | grep -E '^lib/[^/]+/' | cut -d/ -f2 | sort -u)
+          echo "$LIBS"
+          for abi in arm64-v8a armeabi-v7a; do
+            echo "$LIBS" | grep -qx "$abi" || { echo "::error::APK is missing $abi native libs"; exit 1; }
+          done
+
+          echo "--- manifest version ---"
+          BADGING=$("$BT/aapt2" dump badging "$OUT" | head -n 1)
+          echo "$BADGING"
+          echo "$BADGING" | grep -q "versionCode='$EXPECT_CODE'" || { echo "::error::APK versionCode != $EXPECT_CODE"; exit 1; }
+          echo "$BADGING" | grep -q "versionName='$EXPECT_NAME'" || { echo "::error::APK versionName != $EXPECT_NAME"; exit 1; }
+
+          echo "apk_path=$OUT" >> "$GITHUB_OUTPUT"
+          ls -lh "$OUT"
+
+      - name: Upload APK to workflow artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.apk.outputs.apk_path }}
           path: ${{ steps.apk.outputs.apk_path }}
           if-no-files-found: error
 
-      - name: Attach APK to GitHub Release
+      # Release stays a draft until the APK is attached; assets on a published release are immutable here.
+      - name: Attach APK to GitHub release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.apk.outputs.tag }}
           APK_FILE: ${{ steps.apk.outputs.apk_path }}
         run: |
-          echo "Checking release $TAG..."
-          gh release view "$TAG" || gh release create "$TAG" --title "$TAG" --notes "Release $TAG"
-          echo "Attaching $APK_FILE to release $TAG..."
-          gh release upload "$TAG" "$APK_FILE" --clobber
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "No release for $TAG yet: creating a DRAFT"
+            gh release create "$TAG" --verify-tag --draft --title "$TAG" --notes "Release $TAG"
+          fi
+          IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+          if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fxq "$APK_FILE"; then
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "::error::$APK_FILE already exists on the published release $TAG. Refusing to overwrite; delete the asset manually if this is intended."
+              exit 1
+            fi
+            gh release upload "$TAG" "$APK_FILE" --clobber
+          else
+            gh release upload "$TAG" "$APK_FILE"
+          fi
 
+      - name: Publish release
+        if: ${{ inputs.publish }}
+        run: gh release edit "$TAG" --draft=false
