@@ -14,7 +14,7 @@ import { RadioTower, Radar, MoonStar, WifiOff } from 'lucide-react-native'
 import { Button, FlapText, Text } from '@/ui'
 import { SyncDots } from '@/components/SyncDots'
 import { StatusScreen } from '@/components/StatusScreen'
-import { useNavigation } from '@/navigation/context'
+import { useBackHandler, useNavigation } from '@/navigation/context'
 import { useSession } from '@/session/SessionProvider'
 import { useTheme } from '@/theme/ThemeProvider'
 import { motion } from '@/theme/tokens'
@@ -33,6 +33,15 @@ export function HomeScreen() {
   const { width } = useWindowDimensions()
   const nav = useNavigation()
   const s = useSession()
+  // Back on the end-of-session card dismisses it (same as its primary action) instead of
+  // backgrounding the app with the card still up.
+  useBackHandler(
+    () => {
+      s.dismissEnd()
+      return true
+    },
+    { enabled: s.sessionEnd != null, layer: 'overlay' },
+  )
 
   // Fit "RAILREEL" (8 cells) to the available width; cap at the design size.
   const logoSize = Math.max(22, Math.min(40, Math.floor((width - H_PADDING * 2) / 8.4)))

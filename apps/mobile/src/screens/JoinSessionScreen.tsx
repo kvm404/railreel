@@ -71,11 +71,12 @@ export function JoinSessionScreen() {
     s.connect(data, name.trim())
   }
 
-  // Backing out mid-connect abandons the attempt cleanly (closes the socket, stops any transfer)
-  // so a half-joined session can't linger into the next one.
+  // Backing out (header or hardware Back) mid-connect abandons the attempt cleanly (closes the
+  // socket, stops any transfer) so a half-joined session can't linger into the next one.
   const exitJoin = () => {
-    if (s.role === 'client' || s.clientPhase !== 'idle') s.leave()
-    nav.goBack()
+    if (s.role !== 'client' && s.clientPhase === 'idle') return nav.goBack()
+    s.leave()
+    nav.reset('Home')
   }
 
   const inputStyle = [
