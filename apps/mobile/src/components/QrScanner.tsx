@@ -6,7 +6,7 @@ import { X } from 'lucide-react-native'
 import { Button, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { radii, sizes } from '@/theme/tokens'
-import { decodeJoinUrl } from '@/lib/protocol'
+import { decodeJoinUrl, isVersionMismatch, VERSION_MISMATCH_MESSAGE } from '@/lib/protocol'
 import { useBackHandler } from '@/navigation/context'
 
 /**
@@ -21,6 +21,8 @@ export function QrScanner({ onScan, onClose }: { onScan: (data: string) => void;
   const reticleSize = Math.max(140, Math.min(240, Math.floor(Math.min(width, height) * 0.55)))
   const [permission, requestPermission] = useCameraPermissions()
   const [hint, setHint] = useState(false)
+  // A real RailReel code from another app version: say so (and how to fix it), don't call it junk.
+  const [versionMismatch, setVersionMismatch] = useState(false)
   const handled = useRef(false)
   // Android Back closes the camera, not the Join screen behind it.
   useBackHandler(
@@ -32,12 +34,13 @@ export function QrScanner({ onScan, onClose }: { onScan: (data: string) => void;
   )
 
   const onBarcode = ({ data }: { data: string }) => {
-    if (handled.current) return
+    if (handled.current || versionMismatch) return
     // Validate exactly like the paste/deep-link path so a malformed code is rejected here, not later.
     try {
       decodeJoinUrl(data.trim())
-    } catch {
-      setHint(true) // a QR, but not a valid RailReel join code
+    } catch (e) {
+      if (isVersionMismatch(e)) setVersionMismatch(true) // paused until the guest taps Scan again
+      else setHint(true) // a QR, but not a valid RailReel join code
       return
     }
     handled.current = true
@@ -63,13 +66,26 @@ export function QrScanner({ onScan, onClose }: { onScan: (data: string) => void;
         {granted ? <View style={[styles.reticle, { width: reticleSize, height: reticleSize, borderColor: t.palette.amber }]} /> : null}
         <Text variant="data" tone="primary" style={[styles.caption, { backgroundColor: t.veils.scrim }]}>
           {granted
-            ? hint
-              ? 'That’s not a RailReel code — point at the host’s QR'
-              : 'Point at the host’s QR code'
+            ? versionMismatch
+              ? VERSION_MISMATCH_MESSAGE
+              : hint
+                ? 'That’s not a RailReel code — point at the host’s QR'
+                : 'Point at the host’s QR code'
             : blocked
               ? 'Camera access is off. Enable it in Settings to scan.'
               : 'Camera access is needed to scan the host’s code'}
         </Text>
+        {granted && versionMismatch ? (
+          <Button
+            title="Scan again"
+            intent="amber"
+            height={56}
+            onPress={() => {
+              setVersionMismatch(false)
+              setHint(false)
+            }}
+          />
+        ) : null}
         {!granted ? (
           blocked ? (
             <Button title="Open settings" intent="amber" height={56} onPress={() => Linking.openSettings()} />
