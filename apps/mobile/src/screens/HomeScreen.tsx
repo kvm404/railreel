@@ -19,7 +19,7 @@ import { useBackHandler, useNavigation } from '@/navigation/context'
 import { useSession } from '@/session/SessionProvider'
 import { useTheme } from '@/theme/ThemeProvider'
 import { motion, sizes } from '@/theme/tokens'
-import { describeCleanupFailure, formatBytes } from '@/lib/storage'
+import { cleanupFailureMessage, formatBytes, type ClearCacheResult } from '@/lib/storage'
 
 const H_PADDING = sizes.gutter
 
@@ -60,20 +60,14 @@ export function HomeScreen() {
     if (purging) return
     setPurging(true)
     setPurgeError(null)
-    let threw = false
-    let remaining = 0
+    let result: ClearCacheResult | null = null
     try {
-      await s.purgeCache()
+      result = await s.purgeCache()
     } catch {
-      threw = true
-    }
-    try {
-      remaining = (await s.getCacheInfo()).totalBytes
-    } catch {
-      threw = true
+      result = null
     }
     setPurging(false)
-    const failure = describeCleanupFailure(remaining, threw)
+    const failure = cleanupFailureMessage(result)
     if (failure) setPurgeError(failure)
     else s.dismissEnd()
   }

@@ -284,6 +284,15 @@ export function describeCleanupFailure(remainingBytes: number, failed = remainin
 }
 
 /**
+ * The message for a purge outcome: null when everything targeted is gone. `null` input means the
+ * purge call itself threw — treat that as an unverified (failed) deletion.
+ */
+export function cleanupFailureMessage(result: ClearCacheResult | null): string | null {
+  if (result === null) return describeCleanupFailure(0, true)
+  return result.ok ? null : describeCleanupFailure(result.remainingBytes, true)
+}
+
+/**
  * Checks whether a filename matches RailReel session cache patterns (movie, subtitles, chunks, temp files).
  */
 export function isRailreelCacheFile(filename: string): boolean {

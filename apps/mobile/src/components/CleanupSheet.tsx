@@ -30,7 +30,11 @@ export interface CleanupSheetProps {
   onKeepAndLeave: () => void | Promise<void>
   onCancel: () => void
   isDeleting?: boolean
-  /** Why the last delete failed (shown inline; the primary action turns into a retry). */
+  /**
+   * Why the last delete failed (shown inline; the primary action turns into a retry). A failed
+   * delete has already torn the session's media down, so the sheet LOCKS: only Retry and Leave
+   * remain — no Cancel / backdrop / Back into a half-torn-down lobby.
+   */
   error?: string | null
 }
 
@@ -51,6 +55,7 @@ export function CleanupSheet({
   const insets = useSafeAreaInsets()
   const { height } = useWindowDimensions()
   const compact = height < sizes.compactHeight
+  const locked = error != null
 
   if (!visible) return null
 
@@ -61,7 +66,7 @@ export function CleanupSheet({
   return (
     // Android Back lands on onRequestClose; mid-delete it's swallowed (like the backdrop tap) so
     // the sheet can't vanish while the purge is still running.
-    <Modal visible={visible} transparent animationType="none" onRequestClose={isDeleting ? ignoreBack : onCancel}>
+    <Modal visible={visible} transparent animationType="none" onRequestClose={isDeleting || locked ? ignoreBack : onCancel}>
       <View style={StyleSheet.absoluteFill}>
         {/* Dimmed backdrop */}
         <Animated.View
@@ -71,7 +76,7 @@ export function CleanupSheet({
         >
           <Pressable
             style={StyleSheet.absoluteFill}
-            onPress={isDeleting ? undefined : onCancel}
+            onPress={isDeleting || locked ? undefined : onCancel}
             accessibilityRole="button"
             accessibilityLabel="Dismiss cleanup dialog"
           />
@@ -207,8 +212,8 @@ export function CleanupSheet({
               />
 
               <Button
-                title="Keep & Leave"
-                subtitle="Retain cache for quick rejoin"
+                title={locked ? 'Leave anyway' : 'Keep & Leave'}
+                subtitle={locked ? 'The files stay on this phone' : 'Retain cache for quick rejoin'}
                 intent="neutral"
                 height={52}
                 onPress={onKeepAndLeave}
@@ -216,6 +221,7 @@ export function CleanupSheet({
                 style={{ marginTop: 2 }}
               />
 
+              {locked ? null : (
               <Pressable
                 onPress={onCancel}
                 disabled={isDeleting}
@@ -232,6 +238,7 @@ export function CleanupSheet({
                   Cancel and Stay in Session
                 </Text>
               </Pressable>
+              )}
             </View>
           </Animated.View>
         </View>

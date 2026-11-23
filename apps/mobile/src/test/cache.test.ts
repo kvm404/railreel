@@ -9,6 +9,7 @@ import {
   clearSessionCache,
   executePureDeletionSequencing,
   describeCleanupFailure,
+  cleanupFailureMessage,
   sweepOrphanCache,
   configureCacheStorage,
   resetCacheStorageConfiguration,
@@ -571,6 +572,17 @@ describe('Storage & Cache Lifecycle Management', () => {
     })
     it('still explains a failure with no byte count', () => {
       expect(describeCleanupFailure(0, true)).toMatch(/Couldn't delete/)
+    })
+  })
+
+  describe('cleanupFailureMessage', () => {
+    it('is null for a clean result and a message for any failure', () => {
+      expect(cleanupFailureMessage({ cleared: ['a'], failed: [], remainingBytes: 0, ok: true })).toBeNull()
+      expect(cleanupFailureMessage({ cleared: [], failed: [{ path: 'a', error: 'x' }], remainingBytes: 5 * 1024 * 1024, ok: false })).toContain('5 MB')
+    })
+    it('treats a purge that threw as a failure, and an unlocatable failure (0 bytes) still reports', () => {
+      expect(cleanupFailureMessage(null)).toMatch(/Couldn't delete/)
+      expect(cleanupFailureMessage({ cleared: [], failed: [{ path: 'a', error: 'x' }], remainingBytes: 0, ok: false })).toMatch(/Couldn't delete/)
     })
   })
 })

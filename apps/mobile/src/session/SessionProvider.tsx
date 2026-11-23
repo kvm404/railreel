@@ -12,6 +12,7 @@ import {
   getSubtitleCachePath,
   sweepOrphanCache,
   type CacheStatus,
+  type ClearCacheResult,
 } from '@/lib/storage'
 
 import RailReelHost from '../../modules/railreel-host'
@@ -194,7 +195,8 @@ export interface SessionStore {
   // cache management
   cacheStatus: CacheStatus | null
   getCacheInfo: () => Promise<CacheStatus>
-  purgeCache: (options?: { movie?: boolean; subtitles?: boolean }) => Promise<void>
+  /** Resolves with what was actually deleted — `ok: false` / `remainingBytes` when something survived. */
+  purgeCache: (options?: { movie?: boolean; subtitles?: boolean }) => Promise<ClearCacheResult>
 }
 
 export type PlaybackRequestStatus = 'idle' | 'pending' | 'approved' | 'dismissed'
@@ -659,8 +661,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const purgeCache = useCallback(
-    async (options?: { movie?: boolean; subtitles?: boolean }): Promise<void> => {
-      await clearSessionCache({
+    async (options?: { movie?: boolean; subtitles?: boolean }): Promise<ClearCacheResult> => {
+      const result = await clearSessionCache({
         movie: options?.movie,
         subtitles: options?.subtitles,
         cacheDir: CACHE_DIR,
@@ -679,6 +681,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         await clearSubtitle()
       }
       await getCacheInfo()
+      return result
     },
     [clearSubtitle, getCacheInfo, resetTransfer],
   )
