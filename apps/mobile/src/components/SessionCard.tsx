@@ -88,7 +88,7 @@ export function SessionCard({
           <Text variant="cardTitle" numberOfLines={1}>
             {host}
           </Text>
-          <Text variant="data" tone="tertiary" numberOfLines={1}>
+          <Text variant="data" tone="muted" numberOfLines={1}>
             {title} · {meta}
           </Text>
         </View>
