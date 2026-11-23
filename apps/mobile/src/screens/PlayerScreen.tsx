@@ -829,7 +829,7 @@ export function PlayerScreen() {
         <Text variant="data" tone="secondary" style={styles.noticeText} numberOfLines={2}>
           {`Holding for ${waiting.join(', ')} to catch up…`}
         </Text>
-        <Button title={`Play without ${waiting.length > 1 ? 'them' : waiting[0]}`} intent="cyan" height={44} onPress={playWithout} />
+        <Button title={`Play without ${waiting.length > 1 ? 'them' : waiting[0]}`} intent="neutral" height={44} onPress={playWithout} />
       </View>
     )
   } else if (!isHost && playback && !playback.isPlaying) {
