@@ -38,6 +38,7 @@ export const ReactionRail = memo(function ReactionRail({
   unread,
   keySize = RAIL_KEY_MIN,
   chatButtonRef,
+  chatOnly = false,
 }: {
   /** Returns whether the reaction was accepted (sent). */
   onReact: (emoji: string) => boolean
@@ -46,6 +47,11 @@ export const ReactionRail = memo(function ReactionRail({
   keySize?: number
   /** Focus target when the chat sheet closes. */
   chatButtonRef?: Ref<View>
+  /**
+   * Collapsed to its chat key (the Player's 'controls' compaction, when a caption needs the room):
+   * the reactions step aside, the conversation stays one tap away.
+   */
+  chatOnly?: boolean
 }) {
   const t = useTheme()
   const opacity = useSharedValue(1)
@@ -71,7 +77,7 @@ export const ReactionRail = memo(function ReactionRail({
 
   return (
     <View style={[styles.rail, { borderColor: t.palette.hairline, backgroundColor: withAlpha(t.palette.raised, RAIL_BACKING_ALPHA) }]}>
-      {RAIL_EMOJI.map((e) => (
+      {chatOnly ? null : RAIL_EMOJI.map((e) => (
         <IconButton
           key={e}
           variant="plain"
@@ -90,7 +96,7 @@ export const ReactionRail = memo(function ReactionRail({
           }}
         />
       ))}
-      <Animated.View style={[styles.divider, { backgroundColor: t.palette.hairline }, glyph]} />
+      {chatOnly ? null : <Animated.View style={[styles.divider, { backgroundColor: t.palette.hairline }, glyph]} />}
       <IconButton
         ref={chatButtonRef}
         variant="plain"

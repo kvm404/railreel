@@ -12,7 +12,7 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as Haptics from 'expo-haptics'
 import * as LegacyFS from 'expo-file-system/legacy'
-import { Check, X, DoorClosed } from 'lucide-react-native'
+import { Check, X, DoorClosed, UserPlus } from 'lucide-react-native'
 import { Screen } from '@/components/Screen'
 import { FilamentBar } from '@/components/FilamentBar'
 import { FilamentBloom } from '@/components/FilamentBloom'
@@ -28,6 +28,7 @@ import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { resumeExit } from '@/lib/nav/exitGuard'
 import { cleanupFailureMessage, hasReusableMovieCopy, movieIdentity, type ClearCacheResult } from '@/lib/storage'
 import { activeGuestCount, endSessionBody, needsEndConfirmation } from '@/lib/host/endSession'
+import { startWithoutCopy, startWithoutSheetVisible, startWithoutVerdict } from '@/lib/host/admission'
 import { canJoinShow, decideStartGate, departureClock, type StartGateDecision } from '@/lib/sync/startGate'
 import { targetPositionSec } from '@/lib/sync/playback'
 import {
@@ -129,12 +130,32 @@ export function LobbyScreen() {
   const resumePos = Number.isFinite(s.playback?.positionSec) && !s.playback?.ended ? Math.max(0, s.playback!.positionSec) : 0
   const isResuming = resumePos > 0
 
-  const startShow = () => {
+  const openShow = () => {
     if (!isHost) return
     // Open the player for everyone PAUSED at the resume position (or 0 if starting fresh);
     // the host then presses Play to roll in sync.
     s.setHostPlayback(resumePos, false, 1)
     nav.navigate('Player')
+  }
+  // The start gate ignores requests (they are not aboard), so starting with someone still at the
+  // door would silently leave them outside: the host decides that explicitly, by name.
+  const [confirmStart, setConfirmStart] = useState(false)
+  const pendingNames = useMemo(() => buckets.wantsIn.map((p) => p.name), [buckets.wantsIn])
+  const startShow = () => {
+    if (!isHost) return
+    if (pendingNames.length > 0) setConfirmStart(true)
+    else openShow()
+  }
+  const startWithout = startWithoutCopy(pendingNames)
+  // The room can change while the question is open (a stall closes the gate; the last request is
+  // decided): withdraw the sheet, and re-check the live gate on confirm.
+  const startSheetUp = startWithoutSheetVisible({ asked: confirmStart, gateOpen: readyToDepart, pending: pendingNames.length })
+  useEffect(() => {
+    if (!startSheetUp) setConfirmStart(false)
+  }, [startSheetUp])
+  const confirmStartWithout = () => {
+    setConfirmStart(false)
+    if (startWithoutVerdict({ gateOpen: readyToDepart, pending: pendingNames.length }) === 'start') openShow()
   }
 
   const [showCleanupSheet, setShowCleanupSheet] = useState(false)
@@ -442,6 +463,17 @@ export function LobbyScreen() {
           void proceedExit()
         }}
         onCancel={() => setConfirmEnd(false)}
+      />
+      <ConfirmSheet
+        visible={startSheetUp}
+        icon={<UserPlus size={32} color={t.palette.amber} strokeWidth={1.75} />}
+        title={startWithout.title}
+        body={startWithout.body}
+        confirmLabel={isResuming ? 'Resume without them' : 'Start without them'}
+        confirmIntent="amber"
+        cancelLabel="Review requests"
+        onConfirm={confirmStartWithout}
+        onCancel={() => setConfirmStart(false)}
       />
     </Screen>
   )

@@ -1,8 +1,8 @@
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import Animated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
 import { findActiveCues, type SubtitleCue } from '@/lib/subtitles'
-import { sameActiveCues } from '@/lib/player/captions'
+import { captionLineBudget, sameActiveCues } from '@/lib/player/captions'
 import type { PlayheadStore } from '@/lib/player/playhead'
 import { withAlpha } from '@/ui/alpha'
 import { fonts, palette, radii } from '@/theme/tokens'
@@ -24,6 +24,13 @@ export interface CaptionOverlayProps {
   lift?: SharedValue<number>
   /** Measured height of the rendered caption block (0 while nothing is shown) — the Player's budget. */
   onHeight?: (h: number) => void
+  /**
+   * Last resort when the block can't clear the top controls (lib/player/layout): draw at most this
+   * many lines, ellipsizing the rest (lib/player/captions captionLineBudget). Unset = in full.
+   */
+  maxLines?: number
+  /** The active cue set's identity ('' when none shown), whenever it changes. */
+  onCuesChange?: (key: string) => void
 }
 
 /**
@@ -66,11 +73,22 @@ export const CaptionOverlay = memo(function CaptionOverlay({
   right = 20,
   lift,
   onHeight,
+  maxLines,
+  onCuesChange,
 }: CaptionOverlayProps) {
   const fallbackMs = positionMs ?? (currentTimeSec !== undefined ? currentTimeSec * 1000 : 0)
   const activeCues = useActiveCues(visible ? cues : EMPTY, playhead, fallbackMs)
   const liftStyle = useAnimatedStyle(() => ({ transform: [{ translateY: lift ? -lift.value : 0 }] }))
   const shown = visible && activeCues.length > 0
+  const budget = useMemo(
+    () => captionLineBudget(activeCues.map((c) => (c.lines && c.lines.length > 0 ? c.lines.length : 1)), maxLines),
+    [activeCues, maxLines],
+  )
+
+  const cueKey = shown ? activeCues.map((c) => String(c.id)).join(',') : ''
+  useEffect(() => {
+    onCuesChange?.(cueKey)
+  }, [cueKey, onCuesChange])
 
   // Nothing on screen → nothing to reserve beyond the Player's default floor.
   useEffect(() => {
@@ -85,31 +103,40 @@ export const CaptionOverlay = memo(function CaptionOverlay({
       onLayout={onHeight ? (e) => onHeight(e.nativeEvent.layout.height) : undefined}
       style={[styles.container, { left, right }, bottomOffset !== undefined && { bottom: bottomOffset }, liftStyle]}
     >
-      {activeCues.map((cue, cueIdx) => (
-        <View key={`${cue.id}-${cueIdx}`} style={styles.cueBox}>
-          {cue.lines && cue.lines.length > 0 ? (
-            cue.lines.map((line, lineIdx) => (
-              <Text key={lineIdx} style={styles.textLine}>
-                {line.spans.map((span, spanIdx) => (
-                  <Text
-                    key={spanIdx}
-                    style={[
-                      styles.spanText,
-                      span.italic && styles.italic,
-                      span.bold && styles.bold,
-                      span.underline && styles.underline,
-                    ]}
-                  >
-                    {span.text}
+      {activeCues.map((cue, cueIdx) => {
+        // Under the last-resort cap a cue (or a line) may get no rows at all: skip it entirely.
+        const rows = budget?.[cueIdx]
+        if (rows && rows.every((n) => n === 0)) return null
+        return (
+          <View key={`${cue.id}-${cueIdx}`} style={styles.cueBox}>
+            {cue.lines && cue.lines.length > 0 ? (
+              cue.lines.map((line, lineIdx) =>
+                rows?.[lineIdx] === 0 ? null : (
+                  <Text key={lineIdx} style={styles.textLine} numberOfLines={rows?.[lineIdx]}>
+                    {line.spans.map((span, spanIdx) => (
+                      <Text
+                        key={spanIdx}
+                        style={[
+                          styles.spanText,
+                          span.italic && styles.italic,
+                          span.bold && styles.bold,
+                          span.underline && styles.underline,
+                        ]}
+                      >
+                        {span.text}
+                      </Text>
+                    ))}
                   </Text>
-                ))}
+                ),
+              )
+            ) : (
+              <Text style={[styles.textLine, styles.spanText]} numberOfLines={rows?.[0]}>
+                {cue.text}
               </Text>
-            ))
-          ) : (
-            <Text style={[styles.textLine, styles.spanText]}>{cue.text}</Text>
-          )}
-        </View>
-      ))}
+            )}
+          </View>
+        )
+      })}
     </Animated.View>
   )
 })
