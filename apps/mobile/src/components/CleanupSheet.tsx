@@ -1,10 +1,11 @@
-import { Modal, Pressable, StyleSheet, View } from 'react-native'
+import { Modal, Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import Animated, { FadeIn, FadeOut, SlideInDown, SlideOutDown } from 'react-native-reanimated'
-import { HardDrive, Trash2, Database } from 'lucide-react-native'
+import { AlertTriangle, HardDrive, Trash2, Database } from 'lucide-react-native'
 import { Button, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { formatBytes } from '@/lib/storage'
+import { radii, sizes } from '@/theme/tokens'
 
 /**
  * Night Train styled cache cleanup confirmation sheet.
@@ -12,8 +13,12 @@ import { formatBytes } from '@/lib/storage'
  *
  * Prompts the user with the exact amount of disk space to be reclaimed, offering:
  * 1. "Delete & Leave" (Amber primary CTA) - purges local cached video/subtitles and exits
- * 2. "Keep & Leave" (Cyan secondary CTA) - retains cache for quick rejoin and exits
+ * 2. "Keep & Leave" (neutral steel secondary CTA) - retains cache and exits
  * 3. "Cancel" - stays in the session
+ *
+ * The sheet is bounded to the visible window (landscape / large text) with a scrolling body and
+ * pinned actions. If a delete did not actually free the space the caller passes `error`; the sheet
+ * stays open with the reason inline and the primary action becomes a retry.
  */
 
 export interface CleanupSheetProps {
@@ -25,6 +30,8 @@ export interface CleanupSheetProps {
   onKeepAndLeave: () => void | Promise<void>
   onCancel: () => void
   isDeleting?: boolean
+  /** Why the last delete failed (shown inline; the primary action turns into a retry). */
+  error?: string | null
 }
 
 const ignoreBack = () => {}
@@ -38,9 +45,12 @@ export function CleanupSheet({
   onKeepAndLeave,
   onCancel,
   isDeleting = false,
+  error = null,
 }: CleanupSheetProps) {
   const t = useTheme()
   const insets = useSafeAreaInsets()
+  const { height } = useWindowDimensions()
+  const compact = height < sizes.compactHeight
 
   if (!visible) return null
 
@@ -57,7 +67,7 @@ export function CleanupSheet({
         <Animated.View
           entering={FadeIn.duration(180)}
           exiting={FadeOut.duration(160)}
-          style={[styles.backdrop, { backgroundColor: 'rgba(5, 7, 12, 0.78)' }]}
+          style={[styles.backdrop, { backgroundColor: t.veils.scrim }]}
         >
           <Pressable
             style={StyleSheet.absoluteFill}
@@ -78,27 +88,38 @@ export function CleanupSheet({
                 backgroundColor: t.palette.overlay,
                 borderColor: t.palette.hairline,
                 paddingBottom: insets.bottom + 16,
+                paddingLeft: 20 + insets.left,
+                paddingRight: 20 + insets.right,
+                // Never taller than the visible window: the body scrolls, the actions stay pinned.
+                maxHeight: height - insets.top - 12,
               },
             ]}
           >
             {/* Handle bar */}
             <View style={[styles.handle, { backgroundColor: t.palette.hairline }]} />
 
+            <ScrollView
+              style={styles.scroll}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+            >
             {/* Header info */}
             <View style={styles.header}>
-              <View
-                style={[
-                  styles.halo,
-                  {
-                    borderColor: t.palette.amber,
-                    backgroundColor: `${t.palette.amber}15`,
-                  },
-                ]}
-              >
-                <HardDrive size={24} color={t.palette.amber} strokeWidth={2} />
-              </View>
+              {compact ? null : (
+                <View
+                  style={[
+                    styles.halo,
+                    {
+                      borderColor: t.palette.amber,
+                      backgroundColor: t.veils.amberTint,
+                    },
+                  ]}
+                >
+                  <HardDrive size={24} color={t.palette.amber} strokeWidth={2} />
+                </View>
+              )}
 
-              <Text variant="eyebrow" style={{ color: t.palette.amber, marginTop: 14 }}>
+              <Text variant="eyebrow" tone="amber" style={{ marginTop: compact ? 0 : 14 }}>
                 STORAGE RECLAMATION
               </Text>
 
@@ -159,11 +180,25 @@ export function CleanupSheet({
               </View>
             ) : null}
 
+            {error ? (
+              <View
+                accessibilityRole="alert"
+                accessibilityLiveRegion="polite"
+                style={[styles.errorCard, { borderColor: t.veils.dangerBorder, backgroundColor: t.veils.dangerTint }]}
+              >
+                <AlertTriangle size={16} color={t.palette.danger} strokeWidth={2.25} style={{ marginTop: 2 }} />
+                <Text variant="caption" tone="danger" style={{ flex: 1 }}>
+                  {error}
+                </Text>
+              </View>
+            ) : null}
+            </ScrollView>
+
             {/* Actions */}
             <View style={styles.actions}>
               <Button
-                title={isDeleting ? 'Deleting Cache…' : 'Delete & Leave'}
-                subtitle={`Purge cache and reclaim ${formattedTotal}`}
+                title={isDeleting ? 'Deleting Cache…' : error ? 'Try again' : 'Delete & Leave'}
+                subtitle={error ? `Retry reclaiming ${formattedTotal}` : `Purge cache and reclaim ${formattedTotal}`}
                 intent="amber"
                 icon={<Trash2 size={18} color={t.palette.onAmber} strokeWidth={2.2} />}
                 height={60}
@@ -174,7 +209,7 @@ export function CleanupSheet({
               <Button
                 title="Keep & Leave"
                 subtitle="Retain cache for quick rejoin"
-                intent="cyan"
+                intent="neutral"
                 height={52}
                 onPress={onKeepAndLeave}
                 disabled={isDeleting}
@@ -190,6 +225,7 @@ export function CleanupSheet({
                   pressed && { opacity: 0.7 },
                 ]}
                 accessibilityRole="button"
+                accessibilityState={{ disabled: isDeleting }}
                 accessibilityLabel="Cancel and stay in session"
               >
                 <Text variant="caption" tone="secondary" style={styles.cancelText}>
@@ -213,12 +249,21 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   sheet: {
-    borderTopLeftRadius: 26,
-    borderTopRightRadius: 26,
+    borderTopLeftRadius: radii.xl,
+    borderTopRightRadius: radii.xl,
     borderWidth: 1,
     borderBottomWidth: 0,
     paddingTop: 12,
-    paddingHorizontal: 20,
+  },
+  scroll: { flexGrow: 0, flexShrink: 1 },
+  errorCard: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    padding: 12,
+    marginBottom: 14,
   },
   handle: {
     width: 40,
@@ -250,7 +295,7 @@ const styles = StyleSheet.create({
   },
   breakdownCard: {
     borderWidth: 1,
-    borderRadius: 14,
+    borderRadius: radii.md,
     paddingHorizontal: 16,
     paddingVertical: 12,
     marginBottom: 18,
