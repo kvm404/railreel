@@ -56,6 +56,7 @@ import {
   decideJoin,
   forget,
   isApproved,
+  openConnection,
   releaseConnection,
   resetHostIdentity,
   ticketValid,
@@ -688,7 +689,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     // Anything still unbound after UNBOUND_SOCKET_MS is closed so idlers can't hold slots.
     const unboundTimers = new Map<string, ReturnType<typeof setTimeout>>()
     const onOpen = RailReelHost.addListener('onWsOpen', ({ conn }) => {
-      if (roleRef.current !== 'host') return
+      // Recorded whatever the role: the servers come up inside startHost() before role flips to
+      // 'host', and a socket opened in that window must still be able to join. Only live
+      // connections may act (lib/host/identity); native orders open strictly before close.
+      openConnection(hostIds(), conn)
       unboundTimers.set(
         conn,
         setTimeout(() => {
@@ -705,9 +709,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         clearTimeout(t)
         unboundTimers.delete(conn)
       }
-      if (roleRef.current !== 'host') return
-      const id = releaseConnection(hostIds(), conn)
-      if (id) markLeft(id)
+      const id = releaseConnection(hostIds(), conn) // always: keeps the live set exact
+      if (id && roleRef.current === 'host') markLeft(id)
     })
     return () => {
       onMessage.remove()

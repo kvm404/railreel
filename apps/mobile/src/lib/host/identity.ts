@@ -14,10 +14,14 @@
  * (a reconnect must not promote it). Approval is keyed to the grant it was given for, so a stale
  * entry (grants cleared at a session boundary) can never authorize anything.
  *
- * A connection that was superseded by a reconnect, closed, or belonged to a guest who left / was
- * denied is RETIRED: it can never bind again (a late frame from a dead or replaced socket must not
- * take the identity back). The host's approve() is async (native grant first), so it holds an
- * approval TICKET that deny / leave / reset invalidate — a stale continuation can't re-approve.
+ * Only LIVE connections may act: opened, and not since closed, superseded by a reconnect, or tied
+ * to a guest who left / was denied. Leaving the live set is permanent — native emits a
+ * connection's "open" strictly before its "close" and never reuses an id — so a late frame from a
+ * dead or replaced socket can't take the identity back, and memory is bounded by the sockets
+ * actually open rather than every connection ever seen.
+ *
+ * The host's approve() is async (native grant first), so it holds an approval TICKET that deny /
+ * leave / reset invalidate — a stale continuation can't re-approve.
  */
 
 export type HostIdentity = {
@@ -29,8 +33,8 @@ export type HostIdentity = {
   connOf: Map<string, string>
   /** connection id → the participant it speaks for. */
   idOf: Map<string, string>
-  /** Connections that may never bind again (superseded, closed, or of a forgotten guest). */
-  retired: Set<string>
+  /** Connections that are open and still allowed to act (see the module doc). */
+  live: Set<string>
   /** participant id → bumped whenever the id is forgotten (leave/deny), voiding its tickets. */
   epochs: Map<string, number>
   /** Bumped on every reset (session boundary), voiding every ticket. */
@@ -46,7 +50,7 @@ export function createHostIdentity(grants: Map<string, string> = new Map()): Hos
     approved: new Map(),
     connOf: new Map(),
     idOf: new Map(),
-    retired: new Set(),
+    live: new Set(),
     epochs: new Map(),
     session: 0,
     seq: 0,
@@ -58,7 +62,7 @@ export function resetHostIdentity(s: HostIdentity): void {
   s.approved.clear()
   s.connOf.clear()
   s.idOf.clear()
-  s.retired.clear()
+  s.live.clear()
   s.epochs.clear()
   s.session++
 }
@@ -78,7 +82,7 @@ function grantMatches(s: HostIdentity, id: unknown, grant: unknown): id is strin
   )
 }
 
-export type Rejection = 'bad-id' | 'grant-mismatch' | 'conn-is-someone-else' | 'not-approved' | 'retired'
+export type Rejection = 'bad-id' | 'grant-mismatch' | 'conn-is-someone-else' | 'not-approved' | 'not-live'
 
 export type JoinDecision =
   | { kind: 'reject'; reason: Rejection }
@@ -93,7 +97,7 @@ export type JoinDecision =
  */
 export function decideJoin(s: HostIdentity, conn: string, id: string, grant: string): JoinDecision {
   if (id.length === 0 || id === HOST_ID) return { kind: 'reject', reason: 'bad-id' }
-  if (s.retired.has(conn)) return { kind: 'reject', reason: 'retired' }
+  if (!s.live.has(conn)) return { kind: 'reject', reason: 'not-live' }
   const bound = s.idOf.get(conn)
   if (bound !== undefined && bound !== id) return { kind: 'reject', reason: 'conn-is-someone-else' }
   const stored = s.grants.get(id)
@@ -112,9 +116,9 @@ export type FrameDecision = { kind: 'reject'; reason: Rejection } | { kind: 'acc
  * everything a guest can only do once admitted (heartbeat, ready, chat, reaction, playback
  * requests); false for `leave` (a pending requester may withdraw).
  *
- * An unbound, never-retired connection may take over an APPROVED id by proving its grant: that is
- * the silent reconnect path (the old socket may still be half-open until its read timeout; it is
- * retired by the takeover). A pending id can only be (re)bound by a `join`.
+ * An unbound live connection may take over an APPROVED id by proving its grant: that is the
+ * silent reconnect path (the old socket may still be half-open until its read timeout; the
+ * takeover removes it from the live set). A pending id can only be (re)bound by a `join`.
  */
 export function decideFrame(
   s: HostIdentity,
@@ -123,7 +127,7 @@ export function decideFrame(
   grant: unknown,
   needsApproval: boolean,
 ): FrameDecision {
-  if (s.retired.has(conn)) return { kind: 'reject', reason: 'retired' }
+  if (!s.live.has(conn)) return { kind: 'reject', reason: 'not-live' }
   if (!grantMatches(s, id, grant)) return { kind: 'reject', reason: 'grant-mismatch' }
   const bound = s.idOf.get(conn)
   if (bound !== undefined) {
@@ -171,24 +175,29 @@ export function markApproved(s: HostIdentity, id: string): boolean {
   return t !== null && approveWithTicket(s, t)
 }
 
-/** Bind `id` to `conn`, retiring any connection previously bound to it. */
+/** Bind `id` to `conn`; a connection previously bound to it stops being live. */
 export function bind(s: HostIdentity, conn: string, id: string): void {
   const prev = s.connOf.get(id)
   if (prev !== undefined && prev !== conn) {
     s.idOf.delete(prev)
-    s.retired.add(prev)
+    s.live.delete(prev)
   }
   s.connOf.set(id, conn)
   s.idOf.set(conn, id)
 }
 
+/** A connection opened (native "open" event): it may now join / resume. */
+export function openConnection(s: HostIdentity, conn: string): void {
+  s.live.add(conn)
+}
+
 /**
- * A connection closed: retire + unbind it and return the participant it spoke for (to mark
+ * A connection closed: drop it from the live set, unbind it and return the participant it spoke for (to mark
  * `left`), or null when it spoke for no one (never joined, or superseded by a reconnect). Grant +
  * approval are kept so the guest can resume on a NEW connection.
  */
 export function releaseConnection(s: HostIdentity, conn: string): string | null {
-  s.retired.add(conn) // a frame delivered after the close must not bind a dead socket
+  s.live.delete(conn) // a frame delivered after the close must not bind a dead socket
   const id = s.idOf.get(conn)
   if (id === undefined) return null
   s.idOf.delete(conn)
@@ -201,7 +210,7 @@ export function forget(s: HostIdentity, id: string): string | undefined {
   const conn = s.connOf.get(id)
   if (conn !== undefined) {
     s.idOf.delete(conn)
-    s.retired.add(conn)
+    s.live.delete(conn)
   }
   s.connOf.delete(id)
   s.approved.delete(id)

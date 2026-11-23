@@ -10,6 +10,7 @@ import {
   forget,
   isApproved,
   markApproved,
+  openConnection,
   releaseConnection,
   resetHostIdentity,
   ticketValid,
@@ -21,6 +22,13 @@ const ALICE_GRANT = 'alice-grant-0123456789ab'
 const MALLORY = 'mallory-id'
 const MALLORY_GRANT = 'mallory-grant-0123456789'
 
+/** A fresh identity with the connections these tests use already opened (native "open"). */
+function opened(): HostIdentity {
+  const s = createHostIdentity()
+  for (const c of ['c1', 'c2', 'c3', 'c5', 'c7', 'c9']) openConnection(s, c)
+  return s
+}
+
 function join(s: HostIdentity, conn: string, id: string, grant: string) {
   const d = decideJoin(s, conn, id, grant)
   applyJoin(s, conn, id, grant, d)
@@ -30,7 +38,7 @@ function join(s: HostIdentity, conn: string, id: string, grant: string) {
 describe('host identity — join', () => {
   let s: HostIdentity
   beforeEach(() => {
-    s = createHostIdentity()
+    s = opened()
   })
 
   it('a first join is a request and binds the connection', () => {
@@ -80,7 +88,7 @@ describe('host identity — join', () => {
 describe('host identity — frames', () => {
   let s: HostIdentity
   beforeEach(() => {
-    s = createHostIdentity()
+    s = opened()
     join(s, 'c1', ALICE, ALICE_GRANT)
   })
 
@@ -131,10 +139,10 @@ describe('host identity — frames', () => {
     const d = decideFrame(s, 'c2', ALICE, ALICE_GRANT, true)
     expect(d).toEqual({ kind: 'accept', bind: true, supersedes: 'c1' })
     bind(s, 'c2', ALICE)
-    // The superseded socket is retired: a delayed frame from it can't take Alice back (which
+    // The superseded socket is no longer live: a delayed frame from it can't take Alice back (which
     // would also drop her live replacement), and its eventual close speaks for no one.
-    expect(decideFrame(s, 'c1', ALICE, ALICE_GRANT, true)).toEqual({ kind: 'reject', reason: 'retired' })
-    expect(decideJoin(s, 'c1', ALICE, ALICE_GRANT)).toEqual({ kind: 'reject', reason: 'retired' })
+    expect(decideFrame(s, 'c1', ALICE, ALICE_GRANT, true)).toEqual({ kind: 'reject', reason: 'not-live' })
+    expect(decideJoin(s, 'c1', ALICE, ALICE_GRANT)).toEqual({ kind: 'reject', reason: 'not-live' })
     expect(releaseConnection(s, 'c1')).toBeNull()
     expect(s.connOf.get(ALICE)).toBe('c2')
   })
@@ -142,15 +150,31 @@ describe('host identity — frames', () => {
   it('a frame delivered after its connection closed cannot bind the dead socket', () => {
     markApproved(s, ALICE)
     releaseConnection(s, 'c1')
-    expect(decideFrame(s, 'c1', ALICE, ALICE_GRANT, true)).toEqual({ kind: 'reject', reason: 'retired' })
-    // An unknown socket that closed before ever joining is retired too.
+    expect(decideFrame(s, 'c1', ALICE, ALICE_GRANT, true)).toEqual({ kind: 'reject', reason: 'not-live' })
+    // A socket that closed before ever joining is gone too.
     releaseConnection(s, 'c7')
-    expect(decideJoin(s, 'c7', MALLORY, MALLORY_GRANT)).toEqual({ kind: 'reject', reason: 'retired' })
+    expect(decideJoin(s, 'c7', MALLORY, MALLORY_GRANT)).toEqual({ kind: 'reject', reason: 'not-live' })
   })
 
-  it("a left/denied guest's socket is retired", () => {
+  it('a connection that was never opened cannot join or act', () => {
+    expect(decideJoin(s, 'c-never', MALLORY, MALLORY_GRANT)).toEqual({ kind: 'reject', reason: 'not-live' })
+    markApproved(s, ALICE)
+    expect(decideFrame(s, 'c-never', ALICE, ALICE_GRANT, true)).toEqual({ kind: 'reject', reason: 'not-live' })
+  })
+
+  it('connection churn does not accumulate state (memory bounded by open sockets)', () => {
+    for (let i = 0; i < 1000; i++) {
+      const c = `churn-${i}`
+      openConnection(s, c)
+      releaseConnection(s, c)
+    }
+    expect(s.live.size).toBe(6) // just the opened() fixtures
+    expect(s.idOf.size).toBe(1) // only Alice on c1
+  })
+
+  it("a left/denied guest's socket stops being live", () => {
     forget(s, ALICE)
-    expect(decideJoin(s, 'c1', ALICE, ALICE_GRANT)).toEqual({ kind: 'reject', reason: 'retired' })
+    expect(decideJoin(s, 'c1', ALICE, ALICE_GRANT)).toEqual({ kind: 'reject', reason: 'not-live' })
   })
 
   it('approval is tied to the grant it was given for (stale approvals authorize nothing)', () => {
@@ -165,7 +189,7 @@ describe('host identity — frames', () => {
 describe('host identity — close attribution', () => {
   let s: HostIdentity
   beforeEach(() => {
-    s = createHostIdentity()
+    s = opened()
     join(s, 'c1', ALICE, ALICE_GRANT)
     markApproved(s, ALICE)
   })
@@ -206,7 +230,7 @@ describe('host identity — close attribution', () => {
 describe('host identity — async approval tickets', () => {
   let s: HostIdentity
   beforeEach(() => {
-    s = createHostIdentity()
+    s = opened()
     join(s, 'c1', ALICE, ALICE_GRANT)
   })
 
@@ -231,7 +255,8 @@ describe('host identity — async approval tickets', () => {
     const t1 = approvalTicket(s, ALICE)!
     resetHostIdentity(s)
     expect(approveWithTicket(s, t1)).toBe(false)
-    join(s, 'c3', ALICE, ALICE_GRANT)
+    openConnection(s, 'c3')
+    expect(join(s, 'c3', ALICE, ALICE_GRANT).kind).toBe('request')
     const t2 = approvalTicket(s, ALICE)!
     forget(s, ALICE)
     expect(approveWithTicket(s, t2)).toBe(false)

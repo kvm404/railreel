@@ -10,11 +10,13 @@ import java.io.InputStream
 import java.net.Socket
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -167,6 +169,11 @@ class CtrlServer(
   /** A clock-handshake reply; t3 is stamped by the writer at the moment it is written. */
   private class SyncPong(val t1: Any, val t2: Double)
 
+  /** NanoWSD's reply to a peer-initiated Close; the reader thread waits on [done] (see sendFrame). */
+  private class CloseReply(val frame: NanoWSD.WebSocketFrame) {
+    val done = CountDownLatch(1)
+  }
+
   private inner class CtrlSocket(
     private val handshake: IHTTPSession,
     /** The raw TCP socket (null only if the handler thread wasn't tagged — then streams are closed). */
@@ -185,7 +192,14 @@ class CtrlServer(
     // we reject an unauthorized upgrade).
     @Volatile private var accepted = false
     private val closedEmitted = AtomicBoolean(false)
+    // JS keeps a live-connection set, so it must see "open" strictly before "close", and "close"
+    // only for a connection it saw open. Both are emitted under this lock (onEvent only schedules).
+    private val emitLock = Any()
+    @Volatile private var openEmitted = false
     private val outbox = LinkedBlockingQueue<Any>(OUTBOX_CAPACITY)
+    // Items queued or being written, counted from the enqueue until the write COMPLETES (a frame
+    // the writer has taken but not yet started is still pending) — what stop()'s drain waits on.
+    private val pending = AtomicInteger(0)
     private val messageBudget = TokenBucket(MESSAGE_BURST, MESSAGE_PER_SEC)
     @Volatile private var writer: Thread? = null
     /** elapsedRealtime when the writer began the frame it is on now; 0 while idle. */
@@ -195,13 +209,15 @@ class CtrlServer(
 
     fun enqueue(item: Any): Boolean {
       if (!accepted || closedEmitted.get()) return false
+      pending.incrementAndGet()
       if (outbox.offer(item)) return true
+      pending.decrementAndGet()
       // A peer that let OUTBOX_CAPACITY frames pile up isn't reading — cut it loose.
       forceClose()
       return false
     }
 
-    fun hasBacklog(): Boolean = !closedEmitted.get() && (outbox.isNotEmpty() || writeStartedAt != 0L)
+    fun hasBacklog(): Boolean = !closedEmitted.get() && pending.get() > 0
 
     fun checkStuck(now: Long) {
       val w = writeStartedAt
@@ -226,14 +242,29 @@ class CtrlServer(
      * writer runs, only the writer touches the socket; any other thread just queues the frame, so
      * no thread but the watchdog-supervised writer can ever block on a peer that stopped reading.
      * Before admission (the unauthorized / busy close on a fresh socket) it writes directly.
+     *
+     * A Close reply is the exception to fire-and-forget: NanoWSD tears the streams down as soon as
+     * this returns, so the reader waits (bounded) for the writer to actually send it, then falls
+     * back to closing the TCP socket.
      */
     override fun sendFrame(frame: WebSocketFrame) {
       val w = writer
       if (w == null || Thread.currentThread() === w) {
         super.sendFrame(frame)
-      } else if (!enqueue(frame)) {
-        throw IOException("connection closed")
+        return
       }
+      if (frame.opCode == WebSocketFrame.OpCode.Close) {
+        val reply = CloseReply(frame)
+        if (!enqueue(reply)) throw IOException("connection closed")
+        val sent = try {
+          reply.done.await(CLOSE_REPLY_WAIT_MS, TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+          false
+        }
+        if (!sent) forceClose()
+        return
+      }
+      if (!enqueue(frame)) throw IOException("connection closed")
     }
 
     private fun emitCloseOnce() {
@@ -241,8 +272,14 @@ class CtrlServer(
         approved = false
         sockets.remove(connId, this)
         writer?.interrupt()
-        outbox.clear()
-        onEvent("close", connId, null)
+        // Discard the backlog, releasing anyone waiting on a Close reply that will never be sent.
+        val dropped = ArrayList<Any>()
+        outbox.drainTo(dropped)
+        pending.addAndGet(-dropped.size)
+        for (d in dropped) if (d is CloseReply) d.done.countDown()
+        synchronized(emitLock) {
+          if (openEmitted) onEvent("close", connId, null)
+        }
       }
     }
 
@@ -251,33 +288,48 @@ class CtrlServer(
         while (true) {
           val item = outbox.take()
           writeStartedAt = SystemClock.elapsedRealtime()
-          when (item) {
-            CloseSignal -> {
-              closeRequestedAt = writeStartedAt
-              close(WebSocketFrame.CloseCode.NormalClosure, "closed by host", false)
-              writeStartedAt = 0L
-              return
-            }
-            is String -> send(item)
-            is WebSocketFrame -> sendFrame(item)
-            // Stamp t3 at the real send moment: any time queued behind a broadcast lands in
-            // [t2, t3] (host processing), which the offset math already excludes.
-            is SyncPong -> send(
-              JSONObject()
-                .put("t", "syncPong")
-                .put("t1", item.t1)
-                .put("t2", item.t2)
-                .put("t3", nowMs())
-                .toString(),
-            )
+          val keepGoing = try {
+            write(item)
+          } finally {
+            writeStartedAt = 0L
+            pending.decrementAndGet()
+            if (item is CloseReply) item.done.countDown()
           }
-          writeStartedAt = 0L
+          if (!keepGoing) return
         }
       } catch (e: InterruptedException) {
         // forceClose()/close: exit quietly.
       } catch (e: Exception) {
         forceClose()
       }
+    }
+
+    /** Write one queued item. False once a Close went out — nothing may follow it on the wire. */
+    private fun write(item: Any): Boolean {
+      when (item) {
+        CloseSignal -> {
+          closeRequestedAt = SystemClock.elapsedRealtime()
+          close(WebSocketFrame.CloseCode.NormalClosure, "closed by host", false)
+          return false
+        }
+        is CloseReply -> {
+          sendFrame(item.frame)
+          return false
+        }
+        is String -> send(item)
+        is WebSocketFrame -> sendFrame(item)
+        // Stamp t3 at the real send moment: any time queued behind a broadcast lands in
+        // [t2, t3] (host processing), which the offset math already excludes.
+        is SyncPong -> send(
+          JSONObject()
+            .put("t", "syncPong")
+            .put("t1", item.t1)
+            .put("t2", item.t2)
+            .put("t3", nowMs())
+            .toString(),
+        )
+      }
+      return true
     }
 
     override fun onOpen() {
@@ -298,7 +350,13 @@ class CtrlServer(
       w.start()
       // stop() may have force-closed us before `writer` was set — don't leave it parked forever.
       if (closedEmitted.get()) w.interrupt()
-      onEvent("open", connId, null)
+      synchronized(emitLock) {
+        // Already closed (stop/evict raced us): emit neither, so JS never sees a dead socket open.
+        if (!closedEmitted.get()) {
+          openEmitted = true
+          onEvent("open", connId, null)
+        }
+      }
     }
 
     override fun onClose(code: WebSocketFrame.CloseCode?, reason: String?, initiatedByRemote: Boolean) {
@@ -307,6 +365,7 @@ class CtrlServer(
 
     override fun onMessage(message: WebSocketFrame) {
       val recvMs = nowMs() // capture receipt time immediately (monotonic)
+      if (!openEmitted || closedEmitted.get()) return
       if (message.opCode != WebSocketFrame.OpCode.Text) return
       val text = message.textPayload ?: return
       val obj = runCatching { JSONObject(text) }.getOrNull() ?: return
@@ -356,6 +415,8 @@ class CtrlServer(
     const val WATCHDOG_MS = 500L
     /** stop() waits at most this long for queued frames (the `ended` notice) to flush. */
     const val STOP_DRAIN_MS = 750L
+    /** How long NanoWSD's reader waits for its Close reply to go out before closing TCP. */
+    const val CLOSE_REPLY_WAIT_MS = 2_000L
 
     private val handlerSocket = ThreadLocal<Socket?>()
 
