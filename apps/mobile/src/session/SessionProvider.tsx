@@ -389,8 +389,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Fold an incoming, already-validated chat line / reaction into local state. Reactions get a
   // local sequence for animation keys + lane assignment; freshness is judged by local receipt
   // time so cross-device clock skew can't strand or fast-expire an animation.
+  // Chat lines get a local monotonic id: stable list keys + the unread cursor (works past the cap).
+  const chatSeqRef = useRef(0)
   const ingestChat = useCallback((from: string, text: string, at: number) => {
-    setChatLog((log) => appendCapped(log, { from, text, at }, CHAT_LOG_CAP))
+    const id = ++chatSeqRef.current
+    setChatLog((log) => appendCapped(log, { id, from, text, at }, CHAT_LOG_CAP))
   }, [])
   const ingestReaction = useCallback((from: string, emoji: string) => {
     const seq = ++reactionSeqRef.current

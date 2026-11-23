@@ -6,6 +6,11 @@
 
 /** A chat line as the UI consumes it. */
 export interface ChatEntry {
+  /**
+   * Locally-assigned, strictly increasing id (list keys + the unread cursor). Never reused, so it
+   * keeps counting after the capped log starts dropping its oldest lines.
+   */
+  id: number
   from: string
   text: string
   /** Host wall-clock ms stamp (ordering + ticker freshness). */
@@ -50,6 +55,26 @@ export function tickerWindow(log: readonly ChatEntry[], nowMs: number, windowMs 
     fresh.unshift(entry)
   }
   return fresh
+}
+
+/** Newest chat id in the log, or `fallback` when it is empty (the read cursor's "caught up" mark). */
+export function lastChatId(log: readonly ChatEntry[], fallback = 0): number {
+  return log.length > 0 ? log[log.length - 1]!.id : fallback
+}
+
+/**
+ * Unread lines for the chat badge: entries newer than the read cursor (`seenId`, the newest id
+ * the reader has seen), excluding our own. A monotonic cursor rather than a length diff — once
+ * the log hits its cap, new lines replace old ones without changing the length.
+ */
+export function unreadCount(log: readonly ChatEntry[], seenId: number): number {
+  let n = 0
+  for (let i = log.length - 1; i >= 0; i--) {
+    const entry = log[i]!
+    if (entry.id <= seenId) break // ids increase with position — everything earlier is read
+    if (entry.from !== 'You') n++
+  }
+  return n
 }
 
 /**
