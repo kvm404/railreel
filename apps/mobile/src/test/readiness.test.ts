@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { boardPhase, bucketRoster, createMilestoneLatch, ignitionSchedule } from '@/lib/sync/readiness'
+import { boardPhase, bucketRoster, createMilestoneLatch, ignitionSchedule, MAX_START_DELAY_MS } from '@/lib/sync/readiness'
 
 const p = (id: string, status: string, progress = 0) => ({ id, status, progress })
 
@@ -51,6 +51,18 @@ describe('ignitionSchedule', () => {
     expect(s.boardMs).toBeGreaterThan(s.rowDelaysMs[3]!)
     expect(s.bloomMs).toBeGreaterThan(s.boardMs)
     expect(s.startMs).toBeGreaterThan(s.bloomMs)
+  })
+
+  it('never holds the host longer than the cap, however many rows ignite', () => {
+    for (let rows = 0; rows <= 12; rows++) {
+      const s = ignitionSchedule(rows, false)
+      expect(s.startMs).toBeLessThanOrEqual(MAX_START_DELAY_MS)
+      expect(s.bloomMs).toBeGreaterThan(s.boardMs)
+      expect(s.startMs).toBeGreaterThan(s.bloomMs)
+      s.rowDelaysMs.forEach((d, i) => i > 0 && expect(d).toBeGreaterThanOrEqual(s.rowDelaysMs[i - 1]!))
+    }
+    // The six-person cabin keeps its full beat close to the original pacing.
+    expect(ignitionSchedule(6, false).startMs).toBeGreaterThan(1300)
   })
 
   it('collapses to an instant, still-ordered state under reduce-motion', () => {

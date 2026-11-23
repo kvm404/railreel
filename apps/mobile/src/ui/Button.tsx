@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode, type Ref } from 'react'
 import { Pressable, StyleSheet, View, type ViewStyle } from 'react-native'
 import Animated, {
   cancelAnimation,
@@ -39,6 +39,8 @@ export type ButtonProps = {
   onPress?: () => void
   disabled?: boolean
   style?: ViewStyle
+  /** The underlying pressable, e.g. to move screen-reader focus onto the button. */
+  ref?: Ref<View>
 }
 
 export function Button({
@@ -51,6 +53,7 @@ export function Button({
   onPress,
   disabled = false,
   style,
+  ref,
 }: ButtonProps) {
   const t = useTheme()
   const reduced = useReduceMotion()
@@ -94,6 +97,7 @@ export function Button({
 
   return (
     <Pressable
+      ref={ref}
       onPressIn={onIn}
       onPressOut={onOut}
       onPress={handlePress}

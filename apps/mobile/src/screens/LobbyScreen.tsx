@@ -11,12 +11,14 @@ import Animated, {
 } from 'react-native-reanimated'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as Haptics from 'expo-haptics'
+import * as LegacyFS from 'expo-file-system/legacy'
 import { Check, X, DoorClosed } from 'lucide-react-native'
 import { Screen } from '@/components/Screen'
 import { FilamentBar } from '@/components/FilamentBar'
 import { FilamentBloom } from '@/components/FilamentBloom'
 import { StatusScreen } from '@/components/StatusScreen'
 import { CleanupSheet } from '@/components/CleanupSheet'
+import { ConfirmSheet } from '@/components/ConfirmSheet'
 import { SyncDots } from '@/components/SyncDots'
 import { Button, FlapText, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
@@ -24,7 +26,8 @@ import { useBackHandler, useNavigation } from '@/navigation/context'
 import { useMountedRef } from '@/hooks/useMountedRef'
 import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { resumeExit } from '@/lib/nav/exitGuard'
-import { cleanupFailureMessage, type ClearCacheResult } from '@/lib/storage'
+import { cleanupFailureMessage, hasReusableMovieCopy, movieIdentity, type ClearCacheResult } from '@/lib/storage'
+import { activeGuestCount, endSessionBody, needsEndConfirmation } from '@/lib/host/endSession'
 import { canJoinShow, decideStartGate, departureClock, type StartGateDecision } from '@/lib/sync/startGate'
 import { targetPositionSec } from '@/lib/sync/playback'
 import {
@@ -137,6 +140,10 @@ export function LobbyScreen() {
   const [showCleanupSheet, setShowCleanupSheet] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  // Only promise a quick rejoin when a finished, verified copy is actually on this phone.
+  const [canRejoinQuickly, setCanRejoinQuickly] = useState(false)
+  const [confirmEnd, setConfirmEnd] = useState(false)
+  const guestCount = activeGuestCount(s.participants)
 
   // Session torn down under us (host ended it, reconnect gave up): reset to Home, where the
   // store's sessionEnd shows as the designed end card — not an empty board. A denial keeps the
@@ -164,16 +171,31 @@ export function LobbyScreen() {
     else if (step === 'reset') nav.reset('Home')
   }
 
-  const handleExitRequest = async () => {
+  const proceedExit = async () => {
     const info = await s.getCacheInfo()
+    const reusable = info.totalBytes > 0 ? await hasReusableMovieCopy(movieIdentity(movie), (uri) => LegacyFS.readAsStringAsync(uri)) : false
     if (!mounted.current) return
     if (info.totalBytes > 0) {
       setDeleteError(null)
+      setCanRejoinQuickly(reusable)
       setShowCleanupSheet(true)
     } else {
       resumeExitSession()
     }
   }
+
+  // Leaving as the host closes the cabin for everyone aboard — say so before doing it.
+  const handleExitRequest = async () => {
+    if (isHost && needsEndConfirmation(s.hostPhase, guestCount)) {
+      setConfirmEnd(true)
+      return
+    }
+    await proceedExit()
+  }
+  // If the last guest leaves while the question is open there is nothing left to confirm.
+  useEffect(() => {
+    if (guestCount === 0) setConfirmEnd(false)
+  }, [guestCount])
 
   // Leave only once the files are PROVABLY gone. purgeCache() reports what survived (it already
   // detached the player and cancelled the transfer), so a failure keeps the sheet open with the
@@ -224,8 +246,8 @@ export function LobbyScreen() {
   if (s.clientPhase === 'denied') {
     return (
       <StatusScreen
-        icon={<DoorClosed size={44} color={t.palette.cyan} strokeWidth={1.75} />}
-        tone="cyan"
+        icon={<DoorClosed size={44} color={t.palette.textSecondary} strokeWidth={1.75} />}
+        tone="neutral"
         eyebrow="NOT THIS TIME"
         headline="The host didn't let you in"
         body="Only the host can approve who boards. Ask them to try again, or find another cabin."
@@ -349,7 +371,7 @@ export function LobbyScreen() {
                     : 'Start the show'
               }
               subtitle={
-                readyToDepart
+                startLit
                   ? isResuming
                     ? `Paused at ${fmtTime(resumePos)}`
                     : phase === 'all-aboard'
@@ -359,7 +381,9 @@ export function LobbyScreen() {
               }
               intent="amber"
               height={68}
-              disabled={!readyToDepart}
+              // Enables with the last beat of the ignition sequence (never later than ~1.5s,
+              // and at once under reduce-motion), so the control lights WITH the bloom.
+              disabled={!startLit}
               onPress={startShow}
             />
           </View>
@@ -404,6 +428,20 @@ export function LobbyScreen() {
         onCancel={() => setShowCleanupSheet(false)}
         isDeleting={isDeleting}
         error={deleteError}
+        canRejoinQuickly={canRejoinQuickly}
+      />
+      <ConfirmSheet
+        visible={confirmEnd && guestCount > 0}
+        icon={<DoorClosed size={32} color={t.palette.textSecondary} strokeWidth={1.75} />}
+        title="End the session for everyone?"
+        body={endSessionBody(guestCount)}
+        confirmLabel="End session"
+        cancelLabel="Keep hosting"
+        onConfirm={() => {
+          setConfirmEnd(false)
+          void proceedExit()
+        }}
+        onCancel={() => setConfirmEnd(false)}
       />
     </Screen>
   )

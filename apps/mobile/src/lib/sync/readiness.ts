@@ -67,11 +67,20 @@ const BOARD_LEAD_MS = 160
 const BLOOM_AFTER_BOARD_MS = 520 // the 10-cell flap cascade lands first
 const START_AFTER_BLOOM_MS = 240
 
+/**
+ * The Start control waits for the sequence, so the host is never held longer than this — however
+ * many rows there are, the row stagger tightens to fit.
+ */
+export const MAX_START_DELAY_MS = 1500
+
 /** The coordinated beat: rows ignite in turn, then the board, then bloom (+haptic), then Start. */
 export function ignitionSchedule(readyRows: number, reduced: boolean): IgnitionSchedule {
   if (reduced) return { rowDelaysMs: Array.from({ length: readyRows }, () => 0), boardMs: 0, bloomMs: 0, startMs: 0 }
-  const rowDelaysMs = Array.from({ length: readyRows }, (_, i) => i * ROW_STEP_MS)
-  const boardMs = Math.max(0, (readyRows - 1) * ROW_STEP_MS) + BOARD_LEAD_MS
+  const fixedMs = BOARD_LEAD_MS + BLOOM_AFTER_BOARD_MS + START_AFTER_BLOOM_MS
+  const rowStepMs =
+    readyRows > 1 ? Math.min(ROW_STEP_MS, Math.max(0, Math.floor((MAX_START_DELAY_MS - fixedMs) / (readyRows - 1)))) : ROW_STEP_MS
+  const rowDelaysMs = Array.from({ length: readyRows }, (_, i) => i * rowStepMs)
+  const boardMs = Math.max(0, (readyRows - 1) * rowStepMs) + BOARD_LEAD_MS
   const bloomMs = boardMs + BLOOM_AFTER_BOARD_MS
   return { rowDelaysMs, boardMs, bloomMs, startMs: bloomMs + START_AFTER_BLOOM_MS }
 }
