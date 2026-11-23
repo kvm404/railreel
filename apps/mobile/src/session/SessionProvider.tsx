@@ -744,12 +744,25 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     if (role !== 'host') resetHostIdentity(hostIds())
   }, [role, hostIds])
 
-  // Targeted roster for a socket that just became approved (it missed the broadcasts so far).
+  // The host's latest authoritative playback, for ONE socket that just became approved or rebound.
+  // A guest that dropped mid-show otherwise keeps its stale `isPlaying: true` until the next
+  // periodic beat — and those beats only run while the host's Player is mounted, so a host waiting
+  // in the Lobby would leave the reconnected guest watching ahead alone. The stored state carries
+  // its host timestamp, so a playing snapshot extrapolates correctly; paused/ended apply as-is.
+  const sendPlaybackTo = useCallback((conn: string): Promise<unknown> => {
+    const state = playbackRef.current
+    if (!state) return Promise.resolve()
+    return RailReelHost.sendTo(conn, JSON.stringify({ t: 'state', state })).catch(() => false)
+  }, [])
+
+  // Targeted roster (+ current playback) for a socket that just became approved — it missed the
+  // broadcasts so far. Same socket queue, so the two frames arrive in order.
   const sendRosterTo = useCallback(
     (conn: string) => {
       RailReelHost.sendTo(conn, rosterJson(participantsRef.current)).catch(() => {})
+      void sendPlaybackTo(conn)
     },
-    [rosterJson],
+    [rosterJson, sendPlaybackTo],
   )
 
   // Host: deliver the current subtitle body to ONE guest, on the connection its identity is bound
@@ -872,6 +885,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             await RailReelHost.approveConnection(conn).catch(() => false)
             if (!live()) return
             await RailReelHost.sendTo(conn, rosterJson(participantsRef.current)).catch(() => false)
+            if (!live()) return
+            await sendPlaybackTo(conn)
             if (!live()) return
             RailReelHost.sendTo(conn, JSON.stringify({ t: 'requestDecision', id: joinId, approved: true })).catch(() => {})
           })()
@@ -1025,7 +1040,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       unboundTimers.forEach((t) => clearTimeout(t))
       unboundTimers.clear()
     }
-  }, [updateParticipants, hostIds, sendRosterTo, rosterJson, ingestChat, ingestReaction])
+  }, [updateParticipants, hostIds, sendRosterTo, sendPlaybackTo, rosterJson, ingestChat, ingestReaction])
 
   // Host: a client whose heartbeats have gone quiet (left / backgrounded / crashed) must stop
   // holding the room — clear the flags that make it count (stalled, inShow). The next live beat
@@ -1420,11 +1435,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           // preflight needs the movie size from the roster. Same socket queue → delivered in order.
           await RailReelHost.sendTo(conn, rosterJson(participantsRef.current)).catch(() => false)
           if (!live()) return
+          await sendPlaybackTo(conn)
+          if (!live()) return
           RailReelHost.sendTo(conn, JSON.stringify({ t: 'requestDecision', id, approved: true })).catch(() => {})
         })
         .catch((e) => setError(String(e)))
     },
-    [updateParticipants, hostIds, rosterJson],
+    [updateParticipants, hostIds, rosterJson, sendPlaybackTo],
   )
 
   const deny = useCallback(
