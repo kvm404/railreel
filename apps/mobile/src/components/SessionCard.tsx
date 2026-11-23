@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { Pressable, StyleSheet, View } from 'react-native'
 import Animated, {
   cancelAnimation,
+  interpolateColor,
   useAnimatedStyle,
   useSharedValue,
   withSpring,
@@ -37,7 +38,11 @@ export function SessionCard({
   const reduced = useReduceMotion()
   const pressed = useSharedValue(0)
 
+  // The tint is the press cue that survives reduce-motion (the scale is dropped there).
+  const raised = t.palette.raised
+  const pressedFill = t.palette.overlay
   const animStyle = useAnimatedStyle(() => ({
+    backgroundColor: interpolateColor(pressed.value, [0, 1], [raised, pressedFill]),
     transform: reduced ? [] : [{ scale: 1 - pressed.value * 0.02 }],
   }))
 
@@ -66,8 +71,8 @@ export function SessionCard({
       <Animated.View
         style={[
           styles.card,
+          { borderColor: t.palette.hairline, borderRadius: t.radii.lg },
           animStyle,
-          { backgroundColor: t.palette.raised, borderColor: t.palette.hairline, borderRadius: t.radii.lg },
           disabled && { opacity: 0.5 },
         ]}
       >

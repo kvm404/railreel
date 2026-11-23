@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react'
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native'
+import { ScrollView, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { ChevronLeft } from 'lucide-react-native'
 import { Text } from '@/ui'
-import { useTheme } from '@/theme/ThemeProvider'
+import { IconButton } from '@/ui/IconButton'
 import { sizes } from '@/theme/tokens'
 import { useBackHandler, useNavigation } from '@/navigation/context'
 
@@ -29,7 +29,6 @@ export function Screen({
    */
   onBack?: () => void
 }) {
-  const t = useTheme()
   const insets = useSafeAreaInsets()
   const nav = useNavigation()
   // A screen with its own exit keeps it even at the stack root (it knows where it's going).
@@ -54,15 +53,16 @@ export function Screen({
       {(showBack || title) && (
         <View style={styles.header}>
           {canExit ? (
-            <Pressable
-              onPress={back}
-              hitSlop={12}
-              accessibilityRole="button"
+            // The shared control: a real 44dp target, pressed wash/scale and a focus ring.
+            <IconButton
+              variant="ghost"
+              size={BACK_SIZE}
+              minTouch={sizes.touch}
+              haptic="none"
+              icon={(c) => <ChevronLeft size={20} color={c} strokeWidth={2.25} />}
               accessibilityLabel="Go back"
-              style={[styles.back, { borderColor: t.palette.hairline }]}
-            >
-              <ChevronLeft size={20} color={t.palette.textSecondary} strokeWidth={2.25} />
-            </Pressable>
+              onPress={back}
+            />
           ) : (
             <View style={styles.backSpacer} />
           )}
@@ -95,18 +95,12 @@ export function Screen({
   )
 }
 
+const BACK_SIZE = sizes.touch - 4
+
 const styles = StyleSheet.create({
   fill: { flex: 1 },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', height: 44 },
-  back: {
-    width: sizes.touch - 4,
-    height: sizes.touch - 4,
-    borderRadius: (sizes.touch - 4) / 2,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  backSpacer: { width: sizes.touch - 4, height: sizes.touch - 4 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: sizes.touch },
+  backSpacer: { width: sizes.touch, height: sizes.touch },
   body: { flex: 1 },
   scrollContent: { flexGrow: 1 },
 })
