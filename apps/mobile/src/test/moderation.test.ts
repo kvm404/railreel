@@ -5,6 +5,7 @@ import {
   parseServerMsg,
   isPlaybackRequest,
   isPlaybackRequestDecision,
+  playbackRequestOutcome,
   type ClientMsg,
   type ServerMsg,
   type PlaybackRequestMsg,
@@ -679,5 +680,22 @@ describe('Milestone 2: Follower Playback Requests & Host Moderation', () => {
       // Riya's status updates to approved
       expect(harness.followerState.status).toBe('approved')
     })
+  })
+})
+
+describe('playbackRequestOutcome', () => {
+  it('tells a host decline from a host timeout; older hosts (no reason) read as declined', () => {
+    expect(playbackRequestOutcome({ approved: true })).toBe('approved')
+    expect(playbackRequestOutcome({ approved: true, reason: 'expired' })).toBe('approved')
+    expect(playbackRequestOutcome({ approved: false, reason: 'expired' })).toBe('expired')
+    expect(playbackRequestOutcome({ approved: false, reason: 'declined' })).toBe('declined')
+    expect(playbackRequestOutcome({ approved: false })).toBe('declined')
+    expect(playbackRequestOutcome({ approved: false, reason: 'weird' })).toBe('declined')
+  })
+
+  it('a decision carrying a reason still validates', () => {
+    const raw = encodeMsg({ t: 'playbackRequestDecision', requestId: 'r1', requesterId: 'g1', approved: false, action: 'pause', reason: 'expired' })
+    const r = parseServerMsg(raw)
+    expect(r.ok && isPlaybackRequestDecision(r.msg) && playbackRequestOutcome(r.msg)).toBe('expired')
   })
 })

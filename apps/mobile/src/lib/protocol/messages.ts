@@ -60,6 +60,9 @@ export type ServerMsg =
       approved: boolean
       action: 'pause' | 'rewind'
       seconds?: number
+      /** Why a request was NOT approved: the host said no, or let it time out. Absent from older
+       *  hosts (read as 'declined'); unknown values are read as 'declined' too. */
+      reason?: 'declined' | 'expired'
     }
 
 // ── Client → host ───────────────────────────────────────────────────────────

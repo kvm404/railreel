@@ -67,6 +67,7 @@ import {
   parseClientMsg,
   parseServerMsg,
   parseSubtitlePayload,
+  playbackRequestOutcome,
   recordSubtitlePull,
   SUBTITLE_PULL_TIMEOUT_MS,
   PROTOCOL_VERSION,
@@ -291,7 +292,24 @@ export interface SessionStore {
   purgeCache: (options?: { movie?: boolean; subtitles?: boolean }) => Promise<ClearCacheResult>
 }
 
-export type PlaybackRequestStatus = 'idle' | 'pending' | 'approved' | 'dismissed'
+/**
+ * A guest's playback request, from sending to its outcome (outcomes show ~3s, then 'idle'):
+ *  - 'approved' — the host said yes;
+ *  - 'declined' — the host said no;
+ *  - 'expired'  — no decision in time (the host let it time out, or its answer never came);
+ *  - 'lost'     — the connection dropped while waiting, so any answer went with it.
+ */
+export type PlaybackRequestStatus =
+  | 'idle'
+  | 'pending'
+  | 'approved'
+  | 'declined'
+  | 'expired'
+  | 'lost'
+  /** @deprecated Never set any more (split into 'declined' | 'expired' | 'lost'). */
+  | 'dismissed'
+/** The terminal request states the store actually emits. */
+export type PlaybackRequestOutcomeStatus = 'approved' | 'declined' | 'expired' | 'lost'
 
 export interface PendingPlaybackRequest {
   requestId: string
@@ -847,7 +865,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setPendingPlaybackRequests(pendingPlaybackRequestsRef.current)
 
         const timer = setTimeout(() => {
-          handlePlaybackRequestRef.current(req.requestId, false)
+          handlePlaybackRequestRef.current(req.requestId, false, 'expired') // nobody decided
         }, 10_000)
         autoDismissTimersRef.current.set(req.requestId, timer)
       } else if (msg.t === 'leave') {
@@ -1347,8 +1365,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [updateParticipants, hostIds],
   )
 
+  // `reason` tells the requester why a request wasn't approved: the host's own "no" (default)
+  // or the auto-dismiss timing out ('expired').
   const handlePlaybackRequest = useCallback(
-    (requestId: string, approved: boolean) => {
+    (requestId: string, approved: boolean, reason: 'declined' | 'expired' = 'declined') => {
       const timer = autoDismissTimersRef.current.get(requestId)
       if (timer) {
         clearTimeout(timer)
@@ -1404,6 +1424,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             approved: false,
             action: req.action,
             seconds: req.seconds,
+            reason,
           }),
         ).catch(() => {})
       }
@@ -1427,7 +1448,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   // Show a request's outcome briefly, then return the controls to idle.
   const showRequestOutcome = useCallback(
-    (status: 'approved' | 'dismissed') => {
+    (status: PlaybackRequestOutcomeStatus) => {
       clearRequestDeadline()
       setPlaybackRequestStatus(status)
       if (dismissToastTimerRef.current) clearTimeout(dismissToastTimerRef.current)
@@ -1456,7 +1477,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       clearRequestDeadline()
       requestDeadlineRef.current = setTimeout(() => {
         requestDeadlineRef.current = null
-        if (activeRequestIdRef.current === requestId) showRequestOutcome('dismissed')
+        if (activeRequestIdRef.current === requestId) showRequestOutcome(reconnectingRef.current ? 'lost' : 'expired')
       }, PLAYBACK_REQUEST_DEADLINE_MS)
       c.session.send({
         t: 'playbackRequest',
@@ -2121,7 +2142,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             } else if (m.t === 'playbackRequestDecision') {
               // Only the decision for OUR live request: a late one for an expired request is moot.
               if (m.requesterId === myId && m.requestId === activeRequestIdRef.current) {
-                showRequestOutcome(m.approved ? 'approved' : 'dismissed')
+                showRequestOutcome(playbackRequestOutcome(m))
               }
             } else if (m.t === 'ended') {
               // The host wrapped the show / left. leave() clears everything (incl. sessionEnd), so
@@ -2167,6 +2188,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const rejoin = !approvedRef.current
     reconnectingRef.current = true
     setReconnecting(true)
+    // A playback request still waiting died with the socket — its decision is never replayed.
+    if (requestDeadlineRef.current) showRequestOutcome('lost')
     // Release the reconnecting flag only while it is still OURS: leave()/connect() reset it
     // themselves, and a newer session's loop may own it by the time a stale one notices.
     const release = () => {
@@ -2191,9 +2214,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         reconnectingRef.current = false
         setReconnecting(false)
         sendBeat()
-        // A pending playback request's decision may have been lost with the old socket and is
-        // never replayed — release the request controls.
-        if (requestDeadlineRef.current) clearPlaybackRequestStatus()
+        // A request sent while the old socket was already dying (after the drop was noticed)
+        // can't have been answered either.
+        if (requestDeadlineRef.current) showRequestOutcome('lost')
         // Anything we asked for on the dead socket may be lost too: re-evaluate the subtitle
         // against the latest roster (a replacement may have gone out while we were away).
         resetSubtitlePull()
@@ -2220,7 +2243,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         body: "Couldn't reach the host — they may have left, or the hotspot dropped.",
       })
     }
-  }, [openClient, sendBeat, clearPlaybackRequestStatus, maybeFetchSubtitle, recoverTransfer, resetSubtitlePull])
+  }, [openClient, sendBeat, showRequestOutcome, maybeFetchSubtitle, recoverTransfer, resetSubtitlePull])
 
   useEffect(() => {
     reconnectRef.current = reconnect
