@@ -46,6 +46,22 @@ import {
   type PlaybackState,
 } from '@/lib/protocol'
 import { parseSrt, type SubtitleCue } from '@/lib/subtitles'
+import {
+  applyJoin,
+  approvalTicket,
+  approveWithTicket,
+  bind,
+  createHostIdentity,
+  decideFrame,
+  decideJoin,
+  forget,
+  isApproved,
+  openConnection,
+  releaseConnection,
+  resetHostIdentity,
+  ticketValid,
+  type HostIdentity,
+} from '@/lib/host/identity'
 
 /**
  * Session store: the one place that owns a live RailReel session and survives screen navigation
@@ -359,7 +375,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [role])
 
   // ── host roster helpers ─────────────────────────────────────────────────────
-  const broadcastRoster = useCallback((list: Participant[]) => {
+  const rosterJson = useCallback((list: Participant[]): string => {
     const payload: ParticipantInfo[] = list.map((p) => ({
       id: p.id,
       name: p.name,
@@ -371,8 +387,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }))
     // media rides along so clients can do their own buffer math (duration/size).
     const media = mediaRef.current ?? undefined
-    RailReelHost.broadcast(JSON.stringify({ t: 'roster', participants: payload, media })).catch(() => {})
+    return JSON.stringify({ t: 'roster', participants: payload, media })
   }, [])
+  // Native broadcast reaches approved connections only — a pending requester never sees the
+  // roster, the media (incl. subtitle text) or any room traffic.
+  const broadcastRoster = useCallback(
+    (list: Participant[]) => {
+      RailReelHost.broadcast(rosterJson(list)).catch(() => {})
+    },
+    [rosterJson],
+  )
 
   // Update participants everywhere at once: ref (for listeners), state (for render), and — when
   // hosting — the broadcast so every client's lobby mirrors the host's.
@@ -454,20 +478,71 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [clearSubtitle, broadcastRoster])
 
-  // A later client→host frame is trusted only if it proves ownership of its `id` with the grant
-  // the host stored at join time. Blocks spoofing a peer's row or the reserved "host" id.
-  const ownsId = useCallback(
-    (id: unknown, grant: unknown): boolean =>
-      typeof id === 'string' &&
-      typeof grant === 'string' &&
-      id !== 'host' &&
-      grantsRef.current.get(id) === grant,
-    [],
+  // ── host identity ───────────────────────────────────────────────────────────
+  /** A host socket that hasn't joined / resumed within this long is closed (see the WS wiring). */
+  const UNBOUND_SOCKET_MS = 15_000
+  // Every frame/close arrives tagged with a native connection id; a participant id is trusted only
+  // on the connection it was bound to (see lib/host/identity). Shares grantsRef's map, so the
+  // session-boundary clears of grants also void every approval (approval is keyed to its grant).
+  const hostIdRef = useRef<HostIdentity | null>(null)
+  const hostIds = useCallback((): HostIdentity => {
+    if (!hostIdRef.current) hostIdRef.current = createHostIdentity(grantsRef.current)
+    return hostIdRef.current
+  }, [])
+  useEffect(() => {
+    if (role !== 'host') resetHostIdentity(hostIds())
+  }, [role, hostIds])
+
+  // Targeted roster for a socket that just became approved (it missed the broadcasts so far).
+  const sendRosterTo = useCallback(
+    (conn: string) => {
+      RailReelHost.sendTo(conn, rosterJson(participantsRef.current)).catch(() => {})
+    },
+    [rosterJson],
   )
 
   // ── WS event wiring (host side; registered once) ────────────────────────────
   useEffect(() => {
-    const onMessage = RailReelHost.addListener('onWsMessage', ({ data }) => {
+    // A departed guest's pending moderation requests go with it (their timers would fire into nothing).
+    const dropRequestsOf = (id: string) => {
+      const userReqs = pendingPlaybackRequestsRef.current.filter((r) => r.requesterId === id)
+      if (userReqs.length === 0) return
+      userReqs.forEach((r) => {
+        const t = autoDismissTimersRef.current.get(r.requestId)
+        if (t) {
+          clearTimeout(t)
+          autoDismissTimersRef.current.delete(r.requestId)
+        }
+      })
+      pendingPlaybackRequestsRef.current = pendingPlaybackRequestsRef.current.filter((r) => r.requesterId !== id)
+      setPendingPlaybackRequests(pendingPlaybackRequestsRef.current)
+    }
+    const markLeft = (id: string) => {
+      dropRequestsOf(id)
+      updateParticipants(
+        (prev) => prev.map((p) => (p.id === id ? { ...p, status: 'left', stalled: false, inShow: false } : p)),
+        true,
+      )
+    }
+    // Admit a grant-proven frame on `conn` acting for `id`. Everything a guest does once inside
+    // needs APPROVAL (not merely a non-"requested" row): a never-approved guest that dropped and
+    // came back must not promote itself. An approved guest's first frame on a new socket rebinds
+    // it (the silent reconnect) — re-admit that socket natively and retire the old one.
+    const admit = (conn: string, id: unknown, grant: unknown, needsApproval: boolean): boolean => {
+      const ids = hostIds()
+      const d = decideFrame(ids, conn, id, grant, needsApproval)
+      if (d.kind === 'reject') return false
+      if (d.bind && typeof id === 'string') {
+        bind(ids, conn, id)
+        if (d.supersedes) RailReelHost.dropConnection(d.supersedes).catch(() => {})
+        RailReelHost.approveConnection(conn)
+          .then(() => sendRosterTo(conn))
+          .catch(() => {})
+      }
+      return true
+    }
+
+    const onMessage = RailReelHost.addListener('onWsMessage', ({ data, conn }) => {
       if (roleRef.current !== 'host') return
       const r = parseClientMsg(data)
       if (!r.ok) return
@@ -485,14 +560,40 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         ) {
           return
         }
+        const ids = hostIds()
+        // A join can't re-claim an id under a different grant, nor switch this socket's identity.
+        const d = decideJoin(ids, conn, msg.id, msg.grant)
+        if (d.kind === 'reject') return
+        applyJoin(ids, conn, msg.id, msg.grant, d)
+        if (d.supersedes) RailReelHost.dropConnection(d.supersedes).catch(() => {})
+        const joinId = msg.id
         const name = msg.name.slice(0, 40)
-        grantsRef.current.set(msg.id, msg.grant)
+        if (d.kind === 'resume') {
+          // Approved while it was away and it missed the decision: re-admit this socket, repeat
+          // the decision to it alone, and keep its row (no reset to "requested"). Roster (movie
+          // metadata) first — the decision starts its download. Re-check after every await: a
+          // deny / leave / takeover in between must not get an "approved" sent after it.
+          const live = () => ids.idOf.get(conn) === joinId && isApproved(ids, joinId)
+          void (async () => {
+            await RailReelHost.approveConnection(conn).catch(() => false)
+            if (!live()) return
+            await RailReelHost.sendTo(conn, rosterJson(participantsRef.current)).catch(() => false)
+            if (!live()) return
+            RailReelHost.sendTo(conn, JSON.stringify({ t: 'requestDecision', id: joinId, approved: true })).catch(() => {})
+          })()
+          updateParticipants((prev) =>
+            prev.some((p) => p.id === joinId)
+              ? prev.map((p) => (p.id === joinId && p.status === 'left' ? { ...p, status: 'approved', lastBeatAt: Date.now() } : p))
+              : [...prev, { id: joinId, name, status: 'approved', progress: 0, downloadMbps: 0, bufferedAheadSec: 0, stalled: false, inShow: false, decodeOk: true, lastBeatAt: Date.now() }],
+          )
+          return
+        }
         updateParticipants((prev) => {
-          const without = prev.filter((p) => p.id !== msg.id)
-          return [...without, { id: msg.id, name, status: 'requested', progress: 0, downloadMbps: 0, bufferedAheadSec: 0, stalled: false, inShow: false, decodeOk: true, lastBeatAt: Date.now() }]
+          const without = prev.filter((p) => p.id !== joinId)
+          return [...without, { id: joinId, name, status: 'requested', progress: 0, downloadMbps: 0, bufferedAheadSec: 0, stalled: false, inShow: false, decodeOk: true, lastBeatAt: Date.now() }]
         })
       } else if (msg.t === 'heartbeat') {
-        if (!ownsId(msg.id, msg.grant) || !Number.isFinite(msg.progress)) return
+        if (!Number.isFinite(msg.progress) || !admit(conn, msg.id, msg.grant, true)) return
         const mbps = Number.isFinite(msg.downloadMbps) ? msg.downloadMbps : 0
         const buffered = Number.isFinite(msg.bufferedAheadSec) && msg.bufferedAheadSec >= 0 ? msg.bufferedAheadSec : 0
         const newStatus = msg.progress >= 1 ? 'ready' : 'downloading'
@@ -508,7 +609,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         updateParticipants(
           (prev) =>
             prev.map((p) =>
-              // Only an already-approved guest can report progress (no pre-approval self-ready).
               p.id === msg.id && p.status !== 'requested'
                 ? {
                     ...p,
@@ -526,14 +626,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           rosterChanged,
         )
       } else if (msg.t === 'ready') {
-        if (!ownsId(msg.id, msg.grant)) return
+        if (!admit(conn, msg.id, msg.grant, true)) return
         updateParticipants((prev) =>
           prev.map((p) => (p.id === msg.id && p.status !== 'requested' ? { ...p, status: 'ready', progress: 1 } : p)),
         )
       } else if (msg.t === 'playbackRequest') {
-        if (!ownsId(msg.id, msg.grant)) return
+        if (!admit(conn, msg.id, msg.grant, true)) return
         const sender = participantsRef.current.find((p) => p.id === msg.id)
-        if (!sender || sender.status === 'requested' || sender.status === 'left') return
+        if (!sender) return
         if (msg.action !== 'pause' && msg.action !== 'rewind') return
         if (typeof msg.requestId !== 'string' || msg.requestId.length === 0) return
         if (pendingPlaybackRequestsRef.current.some((r) => r.requestId === msg.requestId)) return
@@ -555,28 +655,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         }, 10_000)
         autoDismissTimersRef.current.set(req.requestId, timer)
       } else if (msg.t === 'leave') {
-        if (!ownsId(msg.id, msg.grant)) return
-        grantsRef.current.delete(msg.id)
+        // A pending requester may withdraw too, so no approval needed — only the bound grant.
+        if (!admit(conn, msg.id, msg.grant, false)) return
         const leftId = msg.id
-        const userReqs = pendingPlaybackRequestsRef.current.filter((r) => r.requesterId === leftId)
-        userReqs.forEach((r) => {
-          const t = autoDismissTimersRef.current.get(r.requestId)
-          if (t) {
-            clearTimeout(t)
-            autoDismissTimersRef.current.delete(r.requestId)
-          }
-        })
-        pendingPlaybackRequestsRef.current = pendingPlaybackRequestsRef.current.filter((r) => r.requesterId !== leftId)
-        setPendingPlaybackRequests(pendingPlaybackRequestsRef.current)
-        updateParticipants((prev) =>
-          prev.map((p) => (p.id === msg.id ? { ...p, status: 'left', stalled: false, inShow: false } : p)),
-          true,
-        )
+        // Revoke the data-plane grant BEFORE forgetting it, or the departed guest could keep
+        // issuing fresh movie requests while the session runs.
+        RailReelHost.revoke(msg.grant).catch(() => {})
+        const leftConn = forget(hostIds(), leftId)
+        if (leftConn) RailReelHost.dropConnection(leftConn).catch(() => {})
+        markLeft(leftId)
       } else if (msg.t === 'chat') {
         // Hub: validate ownership + approval + content, stamp the sender's NAME and our clock, fan out.
-        if (!ownsId(msg.id, msg.grant)) return
+        if (!admit(conn, msg.id, msg.grant, true)) return
         const sender = participantsRef.current.find((p) => p.id === msg.id)
-        if (!sender || sender.status === 'requested' || sender.status === 'left') return
+        if (!sender) return
         const text = sanitizeChatText(typeof msg.text === 'string' ? msg.text : '')
         if (!text) return
         const name = sender.name ?? 'Guest'
@@ -584,39 +676,50 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         RailReelHost.broadcast(JSON.stringify({ t: 'chat', from: name, fromId: msg.id, text, at })).catch(() => {})
         ingestChat(name, text, at)
       } else if (msg.t === 'reaction') {
-        if (!ownsId(msg.id, msg.grant) || !isValidReaction(msg.emoji)) return
+        if (!isValidReaction(msg.emoji) || !admit(conn, msg.id, msg.grant, true)) return
         const sender = participantsRef.current.find((p) => p.id === msg.id)
-        if (!sender || sender.status === 'requested' || sender.status === 'left') return
+        if (!sender) return
         const name = sender.name ?? 'Guest'
         RailReelHost.broadcast(JSON.stringify({ t: 'reaction', from: name, fromId: msg.id, emoji: msg.emoji, at: Date.now() })).catch(() => {})
         ingestReaction(name, msg.emoji)
       }
     })
-    const onClose = RailReelHost.addListener('onWsClose', (event?: { id?: string }) => {
-      if (roleRef.current !== 'host') return
-      if (event?.id && event.id !== 'host') {
-        const leftId = event.id
-        const userReqs = pendingPlaybackRequestsRef.current.filter((r) => r.requesterId === leftId)
-        userReqs.forEach((r) => {
-          const t = autoDismissTimersRef.current.get(r.requestId)
-          if (t) {
-            clearTimeout(t)
-            autoDismissTimersRef.current.delete(r.requestId)
-          }
-        })
-        pendingPlaybackRequestsRef.current = pendingPlaybackRequestsRef.current.filter((r) => r.requesterId !== leftId)
-        setPendingPlaybackRequests(pendingPlaybackRequestsRef.current)
-        updateParticipants((prev) =>
-          prev.map((p) => (p.id === event.id ? { ...p, status: 'left', stalled: false, inShow: false } : p)),
-          true,
-        )
+    // The session token is discoverable (mDNS TXT), so a socket must identify itself promptly — a
+    // real client sends `join` (or, reconnecting, a heartbeat) right after its clock handshake.
+    // Anything still unbound after UNBOUND_SOCKET_MS is closed so idlers can't hold slots.
+    const unboundTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    const onOpen = RailReelHost.addListener('onWsOpen', ({ conn }) => {
+      // Recorded whatever the role: the servers come up inside startHost() before role flips to
+      // 'host', and a socket opened in that window must still be able to join. Only live
+      // connections may act (lib/host/identity); native orders open strictly before close.
+      openConnection(hostIds(), conn)
+      unboundTimers.set(
+        conn,
+        setTimeout(() => {
+          unboundTimers.delete(conn)
+          if (!hostIds().idOf.has(conn)) RailReelHost.dropConnection(conn).catch(() => {})
+        }, UNBOUND_SOCKET_MS),
+      )
+    })
+    // A close affects only the participant bound to THAT connection (never an id a frame claimed).
+    // Grant + approval survive it, so an approved guest resumes silently on reconnect.
+    const onClose = RailReelHost.addListener('onWsClose', ({ conn }) => {
+      const t = unboundTimers.get(conn)
+      if (t) {
+        clearTimeout(t)
+        unboundTimers.delete(conn)
       }
+      const id = releaseConnection(hostIds(), conn) // always: keeps the live set exact
+      if (id && roleRef.current === 'host') markLeft(id)
     })
     return () => {
       onMessage.remove()
+      onOpen.remove()
       onClose.remove()
+      unboundTimers.forEach((t) => clearTimeout(t))
+      unboundTimers.clear()
     }
-  }, [updateParticipants, ownsId, ingestChat, ingestReaction])
+  }, [updateParticipants, hostIds, sendRosterTo, rosterJson, ingestChat, ingestReaction])
 
   // Host: a client whose heartbeats have gone quiet (left / backgrounded / crashed) must stop
   // holding the room — clear the flags that make it count (stalled, inShow). The next live beat
@@ -911,30 +1014,54 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const approve = useCallback(
     (id: string) => {
       if (id === 'host') return
-      const grant = grantsRef.current.get(id)
-      if (!grant) return
-      RailReelHost.approve(grant)
-        .then(() => {
-          RailReelHost.broadcast(JSON.stringify({ t: 'requestDecision', id, approved: true })).catch(() => {})
+      const ids = hostIds()
+      // The ticket pins THIS request: deny / leave / a session reset void it, so a continuation
+      // that resumes after one of those can't approve a later request without a new host decision.
+      const ticket = approvalTicket(ids, id)
+      if (!ticket) return
+      RailReelHost.approve(ticket.grant)
+        .then(async () => {
+          // Voided while the native call was in flight. Nothing to undo: deny/leave queued their
+          // revoke() after this approve() on the serial native queue (revoking here could cancel a
+          // newer approval of the same grant).
+          if (!approveWithTicket(ids, ticket)) return
+          // A guest who dropped while pending stays "left"; its re-join resumes as approved.
           updateParticipants((prev) =>
-            prev.map((p) => (p.id === id ? { ...p, status: 'approved' } : p)),
+            prev.map((p) => (p.id === id && p.status === 'requested' ? { ...p, status: 'approved' } : p)),
           )
+          const conn = ids.connOf.get(id)
+          if (!conn) return
+          const live = () => ticketValid(ids, ticket) && ids.connOf.get(id) === conn
+          await RailReelHost.approveConnection(conn).catch(() => false)
+          if (!live()) return
+          // Metadata BEFORE the decision: the decision starts the guest's download, whose storage
+          // preflight needs the movie size from the roster. Same socket queue → delivered in order.
+          await RailReelHost.sendTo(conn, rosterJson(participantsRef.current)).catch(() => false)
+          if (!live()) return
+          RailReelHost.sendTo(conn, JSON.stringify({ t: 'requestDecision', id, approved: true })).catch(() => {})
         })
         .catch((e) => setError(String(e)))
     },
-    [updateParticipants],
+    [updateParticipants, hostIds, rosterJson],
   )
 
   const deny = useCallback(
     (id: string) => {
       if (id === 'host') return
-      const grant = grantsRef.current.get(id)
+      const ids = hostIds()
+      const grant = ids.grants.get(id)
       if (grant) RailReelHost.revoke(grant).catch(() => {})
-      grantsRef.current.delete(id)
-      RailReelHost.broadcast(JSON.stringify({ t: 'requestDecision', id, approved: false })).catch(() => {})
+      const conn = forget(ids, id)
+      if (conn) {
+        // Tell that socket alone, then close it once the decision is flushed.
+        RailReelHost.sendTo(conn, JSON.stringify({ t: 'requestDecision', id, approved: false }))
+          .catch(() => false)
+          .then(() => RailReelHost.dropConnection(conn))
+          .catch(() => {})
+      }
       updateParticipants((prev) => prev.filter((p) => p.id !== id))
     },
-    [updateParticipants],
+    [updateParticipants, hostIds],
   )
 
   const handlePlaybackRequest = useCallback(
@@ -1498,8 +1625,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
     if (roleRef.current === 'host') {
       // Tell guests the cabin's closing BEFORE the servers die — they get the graceful
-      // "cabin went dark" moment instantly, instead of a ~30s reconnect timeout → "lost".
-      RailReelHost.broadcast(JSON.stringify({ t: 'ended', reason: 'host-left' })).catch(() => {})
+      // "cabin went dark" moment instantly, instead of a ~30s reconnect timeout → "lost". Every
+      // socket, pending requesters included (broadcast() is approved-only); native stop() drains
+      // queued frames for a bounded moment before closing.
+      RailReelHost.broadcastAll(JSON.stringify({ t: 'ended', reason: 'host-left' })).catch(() => {})
       if (stopTimerRef.current) clearTimeout(stopTimerRef.current)
       stopTimerRef.current = setTimeout(() => {
         RailReelHost.stop().catch(() => {})

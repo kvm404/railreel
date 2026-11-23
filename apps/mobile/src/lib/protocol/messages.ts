@@ -62,9 +62,10 @@ export type ServerMsg =
 
 // ── Client → host ───────────────────────────────────────────────────────────
 export type ClientMsg =
-  // The host can't tell connections apart (the native WS forwards frames without identity), so
-  // every client→host message that must be attributed carries the client's self-assigned `id`
-  // (a non-secret correlation handle; the secret is `grant`). The host echoes it in requestDecision.
+  // Every client→host message that must be attributed carries the client's self-assigned `id`
+  // (a non-secret correlation handle; the secret is `grant`). The host trusts it only on the
+  // native connection it was bound to by `join` (see lib/host/identity). The host echoes it in
+  // requestDecision.
   //
   // `grant` is a per-client download secret the client mints itself; the host authorizes it
   // on the data plane only when it approves this join (see docs/architecture.md §10).

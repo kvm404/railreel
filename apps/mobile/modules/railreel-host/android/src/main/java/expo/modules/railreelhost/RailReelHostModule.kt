@@ -73,14 +73,15 @@ class RailReelHostModule : Module() {
           throw CodedException("Failed to start HTTP server: ${e.message}")
         }
 
-        val c = CtrlServer(wsPort, token) { type, payload ->
+        val c = CtrlServer(wsPort, token) { type, connId, payload ->
           // CtrlServer fires these from per-connection socket threads; hop to the JS thread
-          // before touching the event emitter (sendEvent goes straight into JSI).
+          // before touching the event emitter (sendEvent goes straight into JSI). `conn` is the
+          // native connection id — the ONLY identity JS may attribute a frame or close to.
           appContext.runtime.schedule {
             when (type) {
-              "open" -> sendEvent("onWsOpen", mapOf<String, Any?>())
-              "close" -> sendEvent("onWsClose", if (payload != null) mapOf("id" to payload) else mapOf<String, Any?>())
-              "message" -> sendEvent("onWsMessage", mapOf("data" to payload))
+              "open" -> sendEvent("onWsOpen", mapOf("conn" to connId))
+              "close" -> sendEvent("onWsClose", mapOf("conn" to connId))
+              "message" -> sendEvent("onWsMessage", mapOf("data" to payload, "conn" to connId))
             }
           }
         }
@@ -91,6 +92,7 @@ class RailReelHostModule : Module() {
           c.start(WS_SOCKET_READ_TIMEOUT_MS, true)
         } catch (e: Exception) {
           runCatching { s.stop() }
+          runCatching { c.stop() } // its watchdog thread is already running
           throw CodedException("Failed to start WS server: ${e.message}")
         }
 
@@ -126,12 +128,38 @@ class RailReelHostModule : Module() {
       synchronized(lock) { server }?.revoke(grant)
     }
 
-    // Host → all clients (play/pause/seek/chat/reactions as JSON strings).
+    // Host → every APPROVED connection (state/roster/chat/reactions/subtitle as JSON strings).
+    // Only enqueues: each socket has its own bounded writer, so a stuck client can't stall this
+    // queue, start or stop.
     AsyncFunction("broadcast") { message: String ->
-      // Grab the server under the lock, but do the socket writes outside it so a slow/blocked
-      // client can't stall start/stop.
       val c = synchronized(lock) { ctrl }
       c?.broadcast(message)
+    }
+
+    // Host → every accepted connection, pending ones included. Lifecycle frames only (`ended`).
+    AsyncFunction("broadcastAll") { message: String ->
+      val c = synchronized(lock) { ctrl }
+      c?.broadcastAll(message)
+    }
+
+    // Host → one connection, approved or not (a pending requester's own requestDecision).
+    AsyncFunction("sendTo") { conn: String, message: String ->
+      val c = synchronized(lock) { ctrl }
+      c?.sendTo(conn, message) ?: false
+    }
+
+    // Mark a connection approved so broadcasts reach it. JS calls this after binding an approved
+    // guest to the connection (approval, or a grant-proven reconnect).
+    AsyncFunction("approveConnection") { conn: String ->
+      val c = synchronized(lock) { ctrl }
+      c?.approveConnection(conn) ?: false
+    }
+
+    // Stop broadcasting to a connection and close it once queued frames are flushed (leave, deny,
+    // or an old socket superseded by a reconnect).
+    AsyncFunction("dropConnection") { conn: String ->
+      val c = synchronized(lock) { ctrl }
+      c?.dropConnection(conn) ?: false
     }
 
     AsyncFunction("stop") {
