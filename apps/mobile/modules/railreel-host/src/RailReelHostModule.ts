@@ -55,8 +55,6 @@ declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
   /** Guest: stream nearby cabins via onNsdFound/onNsdLost. */
   startDiscovery(): Promise<void>
   stopDiscovery(): Promise<void>
-  /** DEV (M1): write an N-MB test file to cache and return its file:// uri. */
-  createTestFile(sizeMb: number): Promise<string>
 }
 
 // Android-only native module. In non-Android environments (e.g. tests), expose a stub so importing it
@@ -83,7 +81,6 @@ const androidOnly = (): RailReelHostModule => {
     stopAdvertise: async () => {},
     startDiscovery: async () => {},
     stopDiscovery: async () => {},
-    createTestFile: unavailable,
     addListener: () => ({ remove: () => {} }),
     removeAllListeners: () => {},
   } as unknown as RailReelHostModule

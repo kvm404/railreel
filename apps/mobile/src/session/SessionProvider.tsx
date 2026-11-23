@@ -685,7 +685,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     sweepOrphanCache(CACHE_DIR, fsAdapter)
       .catch(() => ({ sweptFiles: [], reclaimedBytes: 0 }))
       .then((result) => {
-        if (result.sweptFiles.length > 0) {
+        if (__DEV__ && result.sweptFiles.length > 0) {
           console.log(
             `[RailReel] Startup orphan sweep reclaimed ${result.reclaimedBytes} bytes across ${result.sweptFiles.length} files`,
           )
