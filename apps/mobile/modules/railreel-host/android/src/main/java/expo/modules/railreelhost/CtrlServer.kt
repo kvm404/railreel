@@ -33,12 +33,16 @@ import java.util.concurrent.atomic.AtomicLong
  *  - Inbound frames pass through [FrameGuardInputStream], which rejects an oversized declared
  *    length BEFORE NanoWSD allocates the payload (NanoWSD 2.3.1 trusts it up to 2 GiB), caps
  *    reassembled fragments, and rate-limits frames. JS-bound messages are rate-limited too.
- *  - Outbound frames go through a bounded per-socket queue drained by that socket's own writer
- *    thread, so a peer that stops reading can only stall itself. A watchdog force-closes the TCP
- *    socket of a writer stuck mid-frame — without touching NanoWSD's send monitor, which the
- *    stuck writer holds (its close() would block on that same monitor).
+ *  - EVERY outbound frame after admission — broadcasts, targeted sends, sync pongs, NanoWSD's own
+ *    protocol pongs and close replies (all funnel through the overridden sendFrame) — goes through
+ *    a bounded per-socket queue drained by that socket's own writer thread. So a peer that stops
+ *    reading can only stall its own writer, and the watchdog force-closes the TCP socket of a
+ *    writer stuck mid-frame — without touching NanoWSD's send monitor, which that writer holds.
+ *  - Admission is bounded per peer (remote IP) and overall; when full, the oldest UNAPPROVED socket
+ *    makes way, so pending requesters / idlers can never lock out approved guests reconnecting.
  *  - `broadcast` reaches only connections JS marked approved; a pending requester gets nothing
- *    but what JS sends it directly (`sendTo`, e.g. its requestDecision).
+ *    but what JS sends it directly (`sendTo`, e.g. its requestDecision) and lifecycle notices
+ *    (`broadcastAll`, e.g. `ended`).
  */
 class CtrlServer(
   port: Int,
@@ -78,6 +82,12 @@ class CtrlServer(
     }
   }
 
+  /** Queue a text frame for EVERY accepted connection, pending included. Lifecycle notices only. */
+  fun broadcastAll(text: String) {
+    if (stopped) return
+    for (c in sockets.values) c.enqueue(text)
+  }
+
   /** Queue a text frame for one connection, approved or not. False if it is gone. */
   fun sendTo(connId: String, text: String): Boolean = !stopped && (sockets[connId]?.enqueue(text) ?: false)
 
@@ -98,6 +108,16 @@ class CtrlServer(
 
   override fun stop() {
     stopped = true
+    // Give already-queued frames (the host's `ended` notice) a bounded moment to flush.
+    val deadline = SystemClock.elapsedRealtime() + STOP_DRAIN_MS
+    while (SystemClock.elapsedRealtime() < deadline && sockets.values.any { it.hasBacklog() }) {
+      try {
+        Thread.sleep(20L)
+      } catch (e: InterruptedException) {
+        Thread.currentThread().interrupt()
+        break
+      }
+    }
     runCatching { watchdog.shutdownNow() }
     for (c in sockets.values.toList()) c.forceClose()
     super.stop()
@@ -112,8 +132,40 @@ class CtrlServer(
     }
   }
 
+  /**
+   * Admit [s] (caller: its onOpen, after the token check). Returns the sockets to evict — already
+   * unregistered, the caller force-closes them outside the lock — or null to refuse [s].
+   */
+  private fun admit(s: CtrlSocket): List<CtrlSocket>? = synchronized(sockets) {
+    if (stopped) return@synchronized null
+    val evict = mutableListOf<CtrlSocket>()
+    // One phone needs one socket, plus a reconnect overlapping its half-open old one. Past that,
+    // that peer's OWN oldest socket makes way — one peer can never hold more than MAX_PER_PEER.
+    // Loopback is exempt: no hotspot peer can appear as it, and `adb reverse` dev setups do.
+    if (s.peer != LOOPBACK) {
+      val samePeer = sockets.values.filter { it.peer == s.peer }.sortedBy { it.openedAt }
+      val overPeer = samePeer.size - (MAX_PER_PEER - 1)
+      if (overPeer > 0) evict.addAll(samePeer.take(overPeer))
+    }
+    // Full: the oldest UNAPPROVED socket (pending requester / idler) makes way; approved guests
+    // are never evicted to admit a newcomer.
+    if (sockets.size - evict.size >= MAX_CONNECTIONS) {
+      val victim = sockets.values
+        .filter { !it.approved && it !in evict }
+        .minByOrNull { it.openedAt }
+        ?: return@synchronized null
+      evict.add(victim)
+    }
+    for (v in evict) sockets.remove(v.connId, v)
+    sockets[s.connId] = s
+    evict
+  }
+
   /** Marker queued by dropConnection: close gracefully once earlier frames are flushed. */
   private object CloseSignal
+
+  /** A clock-handshake reply; t3 is stamped by the writer at the moment it is written. */
+  private class SyncPong(val t1: Any, val t2: Double)
 
   private inner class CtrlSocket(
     private val handshake: IHTTPSession,
@@ -121,6 +173,9 @@ class CtrlServer(
     private val tcp: Socket?,
   ) : WebSocket(GuardedSession(handshake, FrameGuardInputStream(handshake.inputStream))) {
     val connId: String = "$connPrefix-${connSeq.incrementAndGet()}"
+    /** Remote address, for the per-peer admission cap. */
+    val peer: String = handshake.remoteIpAddress ?: "?"
+    val openedAt: Long = SystemClock.elapsedRealtime()
 
     /** JS approved the guest bound to this connection: it receives broadcasts. */
     @Volatile var approved = false
@@ -146,6 +201,8 @@ class CtrlServer(
       return false
     }
 
+    fun hasBacklog(): Boolean = !closedEmitted.get() && (outbox.isNotEmpty() || writeStartedAt != 0L)
+
     fun checkStuck(now: Long) {
       val w = writeStartedAt
       val c = closeRequestedAt
@@ -164,6 +221,21 @@ class CtrlServer(
       emitCloseOnce()
     }
 
+    /**
+     * Every frame NanoWSD writes funnels through here (send(), ping replies, close frames). Once the
+     * writer runs, only the writer touches the socket; any other thread just queues the frame, so
+     * no thread but the watchdog-supervised writer can ever block on a peer that stopped reading.
+     * Before admission (the unauthorized / busy close on a fresh socket) it writes directly.
+     */
+    override fun sendFrame(frame: WebSocketFrame) {
+      val w = writer
+      if (w == null || Thread.currentThread() === w) {
+        super.sendFrame(frame)
+      } else if (!enqueue(frame)) {
+        throw IOException("connection closed")
+      }
+    }
+
     private fun emitCloseOnce() {
       if (accepted && closedEmitted.compareAndSet(false, true)) {
         approved = false
@@ -179,13 +251,26 @@ class CtrlServer(
         while (true) {
           val item = outbox.take()
           writeStartedAt = SystemClock.elapsedRealtime()
-          if (item === CloseSignal) {
-            closeRequestedAt = writeStartedAt
-            close(WebSocketFrame.CloseCode.NormalClosure, "closed by host", false)
-            writeStartedAt = 0L
-            return
+          when (item) {
+            CloseSignal -> {
+              closeRequestedAt = writeStartedAt
+              close(WebSocketFrame.CloseCode.NormalClosure, "closed by host", false)
+              writeStartedAt = 0L
+              return
+            }
+            is String -> send(item)
+            is WebSocketFrame -> sendFrame(item)
+            // Stamp t3 at the real send moment: any time queued behind a broadcast lands in
+            // [t2, t3] (host processing), which the offset math already excludes.
+            is SyncPong -> send(
+              JSONObject()
+                .put("t", "syncPong")
+                .put("t1", item.t1)
+                .put("t2", item.t2)
+                .put("t3", nowMs())
+                .toString(),
+            )
           }
-          send(item as String)
           writeStartedAt = 0L
         }
       } catch (e: InterruptedException) {
@@ -200,19 +285,14 @@ class CtrlServer(
         runCatching { close(WebSocketFrame.CloseCode.PolicyViolation, "unauthorized", false) }
         return
       }
-      val admitted = synchronized(sockets) {
-        if (stopped || sockets.size >= MAX_CONNECTIONS) {
-          false
-        } else {
-          accepted = true
-          sockets[connId] = this
-          true
-        }
-      }
-      if (!admitted) {
+      accepted = true // before registering, so a racing forceClose (stop/evict) still emits close
+      val evicted = admit(this)
+      if (evicted == null) {
+        accepted = false
         runCatching { close(WebSocketFrame.CloseCode.PolicyViolation, "busy", false) }
         return
       }
+      for (v in evicted) v.forceClose()
       val w = Thread({ writeLoop() }, "railreel-ws-writer-$connId").apply { isDaemon = true }
       writer = w
       w.start()
@@ -232,22 +312,10 @@ class CtrlServer(
       val obj = runCatching { JSONObject(text) }.getOrNull() ?: return
       if (obj.optString("t") == "syncPing") {
         // Answer the clock handshake natively for accuracy. Only reply to a well-formed ping
-        // (finite t1) so a malformed frame can't produce a NaN sample on the client. Sent inline
-        // (not via the outbox) and t3 is stamped while holding the send monitor, so queueing
-        // behind a broadcast can't skew the sample.
+        // (finite t1) so a malformed frame can't produce a NaN sample on the client. Queued like
+        // every other frame (the reader never writes); the writer stamps t3.
         val t1 = obj.opt("t1")
-        if (t1 is Number && t1.toDouble().isFinite()) {
-          val pong = JSONObject()
-            .put("t", "syncPong")
-            .put("t1", t1)
-            .put("t2", recvMs)
-          runCatching {
-            synchronized(this@CtrlSocket) { // the same monitor NanoWSD's sendFrame takes
-              pong.put("t3", nowMs())
-              send(pong.toString())
-            }
-          }
-        }
+        if (t1 is Number && t1.toDouble().isFinite()) enqueue(SyncPong(t1, recvMs))
         return
       }
       // Over budget: drop. A real client stays far below it (beats ~3/s + chat/reactions).
@@ -276,12 +344,18 @@ class CtrlServer(
     const val MESSAGE_PER_SEC = 20.0
     /** Concurrent accepted sockets (4–6 guests, plus reconnect overlap before a stale one times out). */
     const val MAX_CONNECTIONS = 24
+    /** Accepted sockets per remote address (live + half-open old + a reconnect attempt). */
+    const val MAX_PER_PEER = 3
+    /** NanoHTTPD reports every loopback / any-local client as this. */
+    private const val LOOPBACK = "127.0.0.1"
     /** Frames queued per socket before it is considered dead. */
     const val OUTBOX_CAPACITY = 256
     /** A single frame write taking longer than this means the peer stopped reading. */
     const val WRITE_TIMEOUT_MS = 10_000L
     const val CLOSE_GRACE_MS = 3_000L
     const val WATCHDOG_MS = 500L
+    /** stop() waits at most this long for queued frames (the `ended` notice) to flush. */
+    const val STOP_DRAIN_MS = 750L
 
     private val handlerSocket = ThreadLocal<Socket?>()
 

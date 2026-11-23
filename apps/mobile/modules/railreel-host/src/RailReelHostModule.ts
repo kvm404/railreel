@@ -52,6 +52,9 @@ declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
   /** Send a JSON message to every APPROVED connection (state/roster/chat/reactions/subtitle).
    *  Never blocks on a slow client: each socket has its own bounded writer. */
   broadcast(message: string): Promise<void>
+  /** Send a JSON message to EVERY accepted connection, pending ones included — only for session
+   *  lifecycle frames (e.g. `ended`), never room traffic. */
+  broadcastAll(message: string): Promise<void>
   /** Send a JSON message to one connection, approved or not. Resolves false if it is gone. */
   sendTo(conn: ConnId, message: string): Promise<boolean>
   /** Let a connection receive broadcasts (after binding an approved guest to it). */
@@ -103,6 +106,7 @@ const androidOnly = (): RailReelHostModule => {
     approve: async () => {},
     revoke: async () => {},
     broadcast: async () => {},
+    broadcastAll: async () => {},
     sendTo: async () => false,
     approveConnection: async () => false,
     dropConnection: async () => false,

@@ -136,6 +136,12 @@ class RailReelHostModule : Module() {
       c?.broadcast(message)
     }
 
+    // Host → every accepted connection, pending ones included. Lifecycle frames only (`ended`).
+    AsyncFunction("broadcastAll") { message: String ->
+      val c = synchronized(lock) { ctrl }
+      c?.broadcastAll(message)
+    }
+
     // Host → one connection, approved or not (a pending requester's own requestDecision).
     AsyncFunction("sendTo") { conn: String, message: String ->
       val c = synchronized(lock) { ctrl }

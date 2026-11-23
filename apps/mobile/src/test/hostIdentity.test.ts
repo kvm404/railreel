@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import {
   applyJoin,
+  approvalTicket,
+  approveWithTicket,
   bind,
   createHostIdentity,
   decideFrame,
@@ -10,6 +12,7 @@ import {
   markApproved,
   releaseConnection,
   resetHostIdentity,
+  ticketValid,
   type HostIdentity,
 } from '@/lib/host/identity'
 
@@ -128,10 +131,26 @@ describe('host identity — frames', () => {
     const d = decideFrame(s, 'c2', ALICE, ALICE_GRANT, true)
     expect(d).toEqual({ kind: 'accept', bind: true, supersedes: 'c1' })
     bind(s, 'c2', ALICE)
-    // The stale socket's frames and its eventual close no longer speak for Alice.
-    expect(decideFrame(s, 'c1', ALICE, ALICE_GRANT, true).kind).toBe('accept') // c1 unbound + approved → would rebind
+    // The superseded socket is retired: a delayed frame from it can't take Alice back (which
+    // would also drop her live replacement), and its eventual close speaks for no one.
+    expect(decideFrame(s, 'c1', ALICE, ALICE_GRANT, true)).toEqual({ kind: 'reject', reason: 'retired' })
+    expect(decideJoin(s, 'c1', ALICE, ALICE_GRANT)).toEqual({ kind: 'reject', reason: 'retired' })
     expect(releaseConnection(s, 'c1')).toBeNull()
     expect(s.connOf.get(ALICE)).toBe('c2')
+  })
+
+  it('a frame delivered after its connection closed cannot bind the dead socket', () => {
+    markApproved(s, ALICE)
+    releaseConnection(s, 'c1')
+    expect(decideFrame(s, 'c1', ALICE, ALICE_GRANT, true)).toEqual({ kind: 'reject', reason: 'retired' })
+    // An unknown socket that closed before ever joining is retired too.
+    releaseConnection(s, 'c7')
+    expect(decideJoin(s, 'c7', MALLORY, MALLORY_GRANT)).toEqual({ kind: 'reject', reason: 'retired' })
+  })
+
+  it("a left/denied guest's socket is retired", () => {
+    forget(s, ALICE)
+    expect(decideJoin(s, 'c1', ALICE, ALICE_GRANT)).toEqual({ kind: 'reject', reason: 'retired' })
   })
 
   it('approval is tied to the grant it was given for (stale approvals authorize nothing)', () => {
@@ -181,5 +200,45 @@ describe('host identity — close attribution', () => {
     resetHostIdentity(s)
     expect(isApproved(s, ALICE)).toBe(false)
     expect(releaseConnection(s, 'c1')).toBeNull()
+  })
+})
+
+describe('host identity — async approval tickets', () => {
+  let s: HostIdentity
+  beforeEach(() => {
+    s = createHostIdentity()
+    join(s, 'c1', ALICE, ALICE_GRANT)
+  })
+
+  it('a ticket redeemed with nothing in between approves', () => {
+    const t = approvalTicket(s, ALICE)!
+    expect(approveWithTicket(s, t)).toBe(true)
+    expect(isApproved(s, ALICE)).toBe(true)
+  })
+
+  it('deny before the approve continuation runs, then a same-grant rejoin: the stale ticket is void', () => {
+    const t = approvalTicket(s, ALICE)! // host taps approve; native approve() in flight
+    forget(s, ALICE) // host denies meanwhile
+    join(s, 'c2', ALICE, ALICE_GRANT) // guest re-requests with the same id + grant
+    expect(ticketValid(s, t)).toBe(false)
+    expect(approveWithTicket(s, t)).toBe(false)
+    expect(isApproved(s, ALICE)).toBe(false)
+    // A fresh decision for the new request still works.
+    expect(markApproved(s, ALICE)).toBe(true)
+  })
+
+  it('leave (forget) and a session reset void outstanding tickets', () => {
+    const t1 = approvalTicket(s, ALICE)!
+    resetHostIdentity(s)
+    expect(approveWithTicket(s, t1)).toBe(false)
+    join(s, 'c3', ALICE, ALICE_GRANT)
+    const t2 = approvalTicket(s, ALICE)!
+    forget(s, ALICE)
+    expect(approveWithTicket(s, t2)).toBe(false)
+  })
+
+  it('no ticket for an unknown id or the host', () => {
+    expect(approvalTicket(s, 'nobody')).toBeNull()
+    expect(approvalTicket(s, 'host')).toBeNull()
   })
 })
