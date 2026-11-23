@@ -9,9 +9,10 @@ import Animated, {
 } from 'react-native-reanimated'
 import { LinearGradient } from 'expo-linear-gradient'
 import * as Haptics from 'expo-haptics'
-import { Text, type TextProps } from './Text'
+import { Text } from './Text'
 import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { useTheme } from '@/theme/ThemeProvider'
+import { ghostSkins } from '@/theme/buttonSkins'
 import { motion, radii, sizes } from '@/theme/tokens'
 
 /**
@@ -40,14 +41,6 @@ export type ButtonProps = {
   style?: ViewStyle
 }
 
-type Skin = {
-  border: string
-  bg: string
-  pressed: string
-  title: TextProps['tone']
-  subtitle: TextProps['tone']
-}
-
 export function Button({
   title,
   subtitle,
@@ -67,12 +60,8 @@ export function Button({
   const h = height ?? (compact ? sizes.buttonCompact : 66)
   const radius = compact ? radii.md : Math.min(radii.xl, h / 2)
 
-  const skins: Record<Exclude<ButtonIntent, 'amber'>, Skin> = {
-    cyan: { border: t.veils.cyanBorder, bg: t.veils.cyanTint, pressed: t.veils.cyanTintStrong, title: 'cyan', subtitle: 'secondary' },
-    neutral: { border: t.veils.steelBorder, bg: t.veils.steelTint, pressed: t.veils.steelTintPressed, title: 'primary', subtitle: 'muted' },
-    danger: { border: t.veils.dangerBorder, bg: t.veils.dangerTint, pressed: t.veils.dangerTintPressed, title: 'danger', subtitle: 'muted' },
-  }
-  const skin = isAmber ? null : skins[intent]
+  const g = isAmber ? null : ghostSkins[intent]
+  const skin = g && { border: t.veils[g.border], bg: t.veils[g.bg], pressed: t.veils[g.pressed], title: g.title, subtitle: g.subtitle }
 
   const cardStyle = useAnimatedStyle(() => ({
     transform: reduced
@@ -150,7 +139,7 @@ export function Button({
               {title}
             </Text>
             {subtitle ? (
-              <Text variant="caption" tone={isAmber ? 'onAmber' : skin!.subtitle} style={styles.subtitle}>
+              <Text variant="caption" tone={isAmber ? 'onAmber' : skin!.subtitle}>
                 {subtitle}
               </Text>
             ) : null}
@@ -172,6 +161,5 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', alignItems: 'center', gap: 14 },
   icon: { width: 24, alignItems: 'center', justifyContent: 'center' },
   labels: { gap: 2, flexShrink: 1 },
-  subtitle: { opacity: 0.85 },
   disabled: { opacity: 0.4 },
 })
