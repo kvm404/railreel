@@ -34,6 +34,7 @@ import {
   targetPositionSec,
 } from '@/lib/sync/playback'
 import { playerLayout } from '@/lib/player/layout'
+import { shouldPublishHostExit } from '@/lib/player/exit'
 import { lastChatId, unreadCount } from '@/lib/social/feed'
 import { cleanupFailureMessage, formatBytes, type ClearCacheResult } from '@/lib/storage'
 import type { PlaybackState } from '@/lib/protocol'
@@ -145,6 +146,10 @@ export function PlayerScreen() {
   const mounted = useMountedRef()
   const sessionRef = useRef(s)
   sessionRef.current = s
+  // The session this player was mounted for, and whether WE just left it: leave() and the
+  // navigation reset land in one commit, so the last-rendered `s` still says "host" at unmount.
+  const mountedJoinCodeRef = useRef(s.joinCode)
+  const leftSessionRef = useRef(false)
 
   const handleBackPress = useLatestCallback(async () => {
     if (ended) {
@@ -185,12 +190,16 @@ export function PlayerScreen() {
     }
     setShowCleanupSheet(false)
     const step = resumeExit({ mounted: mounted.current, sessionActive: sessionRef.current.role !== 'none' })
-    if (step === 'leave') s.leave()
+    if (step === 'leave') {
+      leftSessionRef.current = true
+      s.leave()
+    }
     if (step !== 'skip') nav.reset('Home')
   }
 
   const handleKeepAndLeave = () => {
     setShowCleanupSheet(false)
+    leftSessionRef.current = true
     s.leave()
     nav.reset('Home')
   }
@@ -203,6 +212,9 @@ export function PlayerScreen() {
   const autoPausedRef = useRef(false) // host: the room-hold paused us (vs. a manual pause)
   const overrideRef = useRef(false) // host: chose to play through a hold; don't auto-pause again
   const notReadySinceRef = useRef<number | null>(null) // client: when our player first went not-ready
+  // client: we asked the native player to play. Mid-buffer `player.playing` is false while ExoPlayer
+  // still has playback requested, so `playing` alone can't tell us a pause is needed.
+  const playRequestedRef = useRef(false)
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // follower: correct only while on screen ('unknown' at launch counts as on screen)
   const appActiveRef = useRef(AppState.currentState !== 'background')
@@ -466,6 +478,7 @@ export function PlayerScreen() {
           // Unconditionally: mid-buffer expo-video reports playing=false while ExoPlayer still has
           // playback requested, which would start audio behind the lock screen once it lands.
           player.pause()
+          playRequestedRef.current = false
         } catch {
           // released
         }
@@ -507,9 +520,20 @@ export function PlayerScreen() {
   const exitRef = useRef<() => void>(() => {})
   exitRef.current = () => {
     // Use the mirrored position, never the player — by unmount expo-video may have released it
-    // (touching a released player throws "shared object already released").
+    // (touching a released player throws "shared object already released"). Keep `ended`, or
+    // guests lose "The End" the moment the host steps back to the lobby; and only for the session
+    // we were hosting — never stamp a state onto one that has ended or been replaced.
     if (isHost) {
-      setHostPlayback(playhead.get(), false)
+      const live = sessionRef.current
+      const publish = shouldPublishHostExit({
+        leftSession: leftSessionRef.current,
+        role: live.role,
+        joinCode: live.joinCode,
+        mountedJoinCode: mountedJoinCodeRef.current,
+      })
+      if (publish) {
+        setHostPlayback(playhead.get(), false, 1, endedRef.current)
+      }
     } else {
       s.exitShow()
     }
@@ -578,7 +602,10 @@ export function PlayerScreen() {
     }
 
     if (c.action === 'pause') {
-      if (player.playing) player.pause()
+      // Also while buffering: a play request left standing would start the film once it lands,
+      // against a host that has paused.
+      if (player.playing || playRequestedRef.current) player.pause()
+      playRequestedRef.current = false
     } else {
       // Hold the host's plain rate while a seek settles; otherwise apply the nudged rate.
       const rate = settling ? pb.rate : c.rate
@@ -587,6 +614,7 @@ export function PlayerScreen() {
         appliedRateRef.current = rate
       }
       if (!player.playing) player.play()
+      playRequestedRef.current = true
     }
     setInSync(Math.abs(target - actual) < IN_SYNC_SEC)
 
