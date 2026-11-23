@@ -184,6 +184,16 @@ export function JoinSessionScreen({ params }: { params?: NavParams }) {
 
   const state = discoveryState({ cabinCount: cabins.length, startFailed, elapsedMs: timedOut ? DISCOVERY_EMPTY_AFTER_MS : 0 })
 
+  // Is the control that started the join still on screen to carry its failure? A cleared invite
+  // card or a cabin that left the list can't — the error then shows at the foot of the form.
+  const targetVisible =
+    target !== null &&
+    (target.kind === 'cabin'
+      ? state === 'found' && cabins.some((c) => c.name === target.name)
+      : target.kind === 'invite'
+        ? invite !== null
+        : true)
+
   const inputStyle = [
     styles.input,
     { color: t.palette.textPrimary, borderColor: t.palette.hairline, backgroundColor: t.palette.raised, fontFamily: t.fonts.monoRegular },
@@ -301,17 +311,16 @@ export function JoinSessionScreen({ params }: { params?: NavParams }) {
               )}
             </View>
 
-            <View ref={scanBtnRef} collapsable={false}>
-              <Button
-                title={connecting && is('scan') ? 'Connecting…' : 'Scan QR code'}
-                subtitle={hasName ? "Point at the host's screen" : 'Enter your name first'}
-                intent="cyan"
-                height={64}
-                icon={<QrCode size={22} color={t.palette.cyan} strokeWidth={2.25} />}
-                disabled={!hasName || connecting}
-                onPress={() => setScanning(true)}
-              />
-            </View>
+            <Button
+              ref={scanBtnRef}
+              title={connecting && is('scan') ? 'Connecting…' : 'Scan QR code'}
+              subtitle={hasName ? "Point at the host's screen" : 'Enter your name first'}
+              intent="cyan"
+              height={64}
+              icon={<QrCode size={22} color={t.palette.cyan} strokeWidth={2.25} />}
+              disabled={!hasName || connecting}
+              onPress={() => setScanning(true)}
+            />
             {failureFor('scan') ? <ConnectError error={failureFor('scan')!} /> : null}
 
             <View style={styles.orRow}>
@@ -350,7 +359,7 @@ export function JoinSessionScreen({ params }: { params?: NavParams }) {
             {failureFor('paste') ? <ConnectError error={failureFor('paste')!} /> : null}
 
             {/* An error with no visible control to pin it to (no attempt yet, or its cabin has left the list) still shows. */}
-            {failure && (target === null || (target.kind === 'cabin' && !(state === 'found' && cabins.some((c) => c.name === target.name)))) ? <ConnectError error={failure} /> : null}
+            {failure && !targetVisible ? <ConnectError error={failure} /> : null}
           </View>
         </Screen>
       </View>

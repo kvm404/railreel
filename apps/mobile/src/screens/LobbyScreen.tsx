@@ -26,7 +26,7 @@ import { useBackHandler, useNavigation } from '@/navigation/context'
 import { useMountedRef } from '@/hooks/useMountedRef'
 import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { resumeExit } from '@/lib/nav/exitGuard'
-import { cleanupFailureMessage, hasReusableMovieCopy, type ClearCacheResult } from '@/lib/storage'
+import { cleanupFailureMessage, hasReusableMovieCopy, movieIdentity, type ClearCacheResult } from '@/lib/storage'
 import { activeGuestCount, endSessionBody, needsEndConfirmation } from '@/lib/host/endSession'
 import { canJoinShow, decideStartGate, departureClock, type StartGateDecision } from '@/lib/sync/startGate'
 import { targetPositionSec } from '@/lib/sync/playback'
@@ -173,7 +173,7 @@ export function LobbyScreen() {
 
   const proceedExit = async () => {
     const info = await s.getCacheInfo()
-    const reusable = info.totalBytes > 0 ? await hasReusableMovieCopy((uri) => LegacyFS.readAsStringAsync(uri)) : false
+    const reusable = info.totalBytes > 0 ? await hasReusableMovieCopy(movieIdentity(movie), (uri) => LegacyFS.readAsStringAsync(uri)) : false
     if (!mounted.current) return
     if (info.totalBytes > 0) {
       setDeleteError(null)
