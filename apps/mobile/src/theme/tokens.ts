@@ -16,6 +16,15 @@ export const palette = {
   // Text — cool platform whites
   textPrimary: '#E9EEF7',
   textSecondary: '#97A3B8',
+  /**
+   * Accessible muted text: >= 4.5:1 on base, raised AND overlay (verified in src/test/contrast.test.ts).
+   * Use for every meaningful small string — labels, metadata, instructions, empty states.
+   */
+  textMuted: '#7F8CA3',
+  /**
+   * Dim detail ONLY: decorative glyphs, inactive dots, separators. Fails AA (2.7–3.2:1) — never use
+   * it for text a person needs to read (the `tertiary` Text tone now resolves to `textMuted`).
+   */
   textTertiary: '#58647A',
 
   // Filament Amber — warmth, people, primary actions (richer tungsten, less peach)
@@ -32,8 +41,38 @@ export const palette = {
   // Status
   danger: '#FF6B5E',
 
+  // Materials that were hardcoded in screens
+  ticket: '#F5F3EC', // warm off-white QR "film frame" (dark modules need a light field to scan)
+  flapCell: '#0C111B', // split-flap tile body
+
   black: '#000000',
   white: '#FFFFFF',
+} as const
+
+/**
+ * Recurring translucent fills/borders (so screens stop inlining rgba literals). Cool steel is the
+ * NEUTRAL secondary treatment; cyan tints are for connection/sync/scan/join only.
+ */
+export const veils = {
+  scrim: 'rgba(5,7,12,0.78)',
+  cyanTint: 'rgba(87,210,230,0.06)',
+  cyanTintStrong: 'rgba(87,210,230,0.10)',
+  cyanBorder: 'rgba(87,210,230,0.38)',
+  steelTint: 'rgba(151,163,184,0.06)',
+  steelTintPressed: 'rgba(151,163,184,0.14)',
+  steelBorder: 'rgba(151,163,184,0.34)',
+  dangerTint: 'rgba(255,107,94,0.08)',
+  dangerTintPressed: 'rgba(255,107,94,0.18)',
+  dangerBorder: 'rgba(255,107,94,0.5)',
+  amberTint: 'rgba(255,178,92,0.08)',
+  amberBorder: 'rgba(255,178,92,0.4)',
+  /** Bottom "depress" edge on filled amber. */
+  buttonEdge: 'rgba(0,0,0,0.22)',
+  flapBevelTop: 'rgba(255,255,255,0.07)',
+  flapBevelBottom: 'rgba(0,0,0,0.55)',
+  flapShade: 'rgba(0,0,0,0.35)',
+  flapHinge: 'rgba(0,0,0,0.7)',
+  flapHingeLight: 'rgba(255,255,255,0.05)',
 } as const
 
 export const gradients = {
@@ -81,6 +120,18 @@ export const spacing = {
   xxxl: 48,
 } as const
 
+/** Shared component dimensions. */
+export const sizes = {
+  /** Minimum comfortable touch target (dp). */
+  touch: 44,
+  /** Compact (inline) button height. */
+  buttonCompact: 36,
+  /** Default screen side gutter. */
+  gutter: 24,
+  /** Below this window height (landscape / split-screen) screens switch to compact layouts. */
+  compactHeight: 520,
+} as const
+
 export const radii = {
   sm: 8,
   md: 12,
@@ -101,5 +152,5 @@ export const motion = {
   expoOut: [0.16, 1, 0.3, 1] as const,
 } as const
 
-export const tokens = { palette, gradients, fonts, typography, spacing, radii, motion }
+export const tokens = { palette, veils, gradients, fonts, typography, spacing, sizes, radii, motion }
 export type Tokens = typeof tokens
