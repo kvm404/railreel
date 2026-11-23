@@ -7,7 +7,9 @@ import {
   parseServerMsg,
   encodeMsg,
   PROTOCOL_VERSION,
+  isMediaInfo,
   type JoinPayload,
+  type MediaInfo,
   type ClientMsg,
   type ServerMsg,
 } from '@/lib/protocol'
@@ -162,6 +164,49 @@ describe('message parsing', () => {
       expect(welcome.media.subtitle?.name).toBe('subs.srt')
       expect(welcome.media.subtitle?.content).toBe('1\n00:00:01,000 --> 00:00:02,000\nHi\n')
     }
+  })
+
+  it('round-trips the codec hints on MediaInfo', () => {
+    const media: MediaInfo = {
+      title: 'Film',
+      sizeBytes: 1000,
+      durationSec: 120,
+      bitrateMbps: 5,
+      hash: 'abc',
+      format: '',
+      videoMime: 'video/avc',
+      audioMime: 'audio/mp4a-latm',
+    }
+    const r = parseServerMsg(encodeMsg({ t: 'roster', participants: [], media }))
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      const roster = r.msg as Extract<ServerMsg, { t: 'roster' }>
+      expect(roster.media?.videoMime).toBe('video/avc')
+      expect(roster.media?.audioMime).toBe('audio/mp4a-latm')
+    }
+  })
+
+  describe('isMediaInfo', () => {
+    const base = { title: 'Film', sizeBytes: 1000, durationSec: 120 }
+
+    it('accepts media with or without codec hints (older hosts omit them)', () => {
+      expect(isMediaInfo(base)).toBe(true)
+      expect(isMediaInfo({ ...base, videoMime: 'video/hevc', audioMime: '' })).toBe(true)
+    })
+
+    it('rejects non-string codec hints', () => {
+      expect(isMediaInfo({ ...base, videoMime: 5 })).toBe(false)
+      expect(isMediaInfo({ ...base, audioMime: null })).toBe(false)
+    })
+
+    it('still rejects malformed core fields', () => {
+      expect(isMediaInfo(null)).toBe(false)
+      expect(isMediaInfo('x')).toBe(false)
+      expect(isMediaInfo({ ...base, sizeBytes: 0 })).toBe(false)
+      expect(isMediaInfo({ ...base, durationSec: -1 })).toBe(false)
+      expect(isMediaInfo({ ...base, durationSec: Infinity })).toBe(false)
+      expect(isMediaInfo({ ...base, title: 3 })).toBe(false)
+    })
   })
 
   it('accepts a valid client playbackRequest message', () => {
