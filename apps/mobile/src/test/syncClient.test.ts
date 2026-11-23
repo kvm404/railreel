@@ -158,3 +158,79 @@ describe('openSyncSession and rolling NTP drift compensation', () => {
     expect(onClose2).toHaveBeenCalledTimes(1)
   })
 })
+
+/**
+ * React Native's Android WebSocket registers a socket natively only in onOpen, so a close()
+ * issued while still CONNECTING does nothing and the connection opens anyway.
+ */
+class ConnectingNoopCloseSocket {
+  static last: ConnectingNoopCloseSocket | null = null
+  onopen: (() => void) | null = null
+  onmessage: ((e: { data: string }) => void) | null = null
+  onerror: (() => void) | null = null
+  onclose: (() => void) | null = null
+  open = false
+  closed = false
+  sent: string[] = []
+  constructor() {
+    ConnectingNoopCloseSocket.last = this
+  }
+  send(data: string) {
+    this.sent.push(data)
+  }
+  close() {
+    if (!this.open || this.closed) return // native no-op before onOpen
+    this.closed = true
+    this.onclose?.()
+  }
+  /** The native side finished connecting. */
+  connect() {
+    this.open = true
+    this.onopen?.()
+  }
+}
+
+describe('openSyncSession cancelled before the socket opened (Android)', () => {
+  let original: typeof WebSocket
+  beforeEach(() => {
+    original = globalThis.WebSocket
+    ConnectingNoopCloseSocket.last = null
+    // @ts-expect-error mock assignment
+    globalThis.WebSocket = ConnectingNoopCloseSocket
+  })
+  afterEach(() => {
+    globalThis.WebSocket = original
+  })
+
+  it('closes the socket for real once it opens, and never pings', async () => {
+    const onMessage = vi.fn()
+    const onClose = vi.fn()
+    const ctl = new AbortController()
+    const p = openSyncSession('127.0.0.1', 8081, 't', onMessage, onClose, 3, ctl.signal)
+    const sock = ConnectingNoopCloseSocket.last!
+    ctl.abort() // Back pressed while still CONNECTING: the close is a native no-op
+    await expect(p).rejects.toBeInstanceOf(SyncCancelledError)
+    expect(sock.closed).toBe(false)
+    sock.connect() // ...and the socket opens anyway
+    expect(sock.closed).toBe(true)
+    expect(sock.sent).toEqual([]) // no clock handshake on an abandoned socket
+    expect(onMessage).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('a handshake timeout before open also closes the socket once it opens', async () => {
+    vi.useFakeTimers()
+    try {
+      const p = openSyncSession('127.0.0.1', 8081, 't', vi.fn(), undefined, 3)
+      const sock = ConnectingNoopCloseSocket.last!
+      const rejected = expect(p).rejects.toThrow('sync timed out')
+      vi.advanceTimersByTime(8000)
+      await rejected
+      sock.connect()
+      expect(sock.closed).toBe(true)
+      expect(sock.sent).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

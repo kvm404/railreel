@@ -57,6 +57,14 @@ export function openSyncSession(
     const ws = new WebSocket(`ws://${host}:${wsPort}/?tk=${encodeURIComponent(token)}`)
     // Silenced: cancelled mid-handshake, or closed on purpose — nothing more reaches the caller.
     let silenced = false
+    // We asked for the socket to close. React Native's Android module only registers a socket in
+    // its native onOpen, so a close() issued while still CONNECTING is a native no-op and the
+    // connection would open anyway — onopen re-issues the close (now it lands) instead of pinging.
+    let closeWanted = false
+    const shut = () => {
+      closeWanted = true
+      ws.close()
+    }
     const samples: ClockSample[] = []
     const rollingSamples: ClockSample[] = []
     let currentEstimate: ClockEstimate | null = null
@@ -89,7 +97,7 @@ export function openSyncSession(
     const timeout = setTimeout(() => {
       if (!settled) {
         settled = true
-        ws.close()
+        shut()
         reject(new Error('sync timed out'))
       }
     }, 8000)
@@ -100,12 +108,18 @@ export function openSyncSession(
       settled = true
       silenced = true
       clearTimers()
-      ws.close()
+      shut()
       reject(new SyncCancelledError())
     }
     signal?.addEventListener('abort', onAbort)
 
-    ws.onopen = () => ping()
+    ws.onopen = () => {
+      if (closeWanted) {
+        ws.close() // cancelled / timed out before the socket opened: close it for real now
+        return
+      }
+      ping()
+    }
 
     ws.onmessage = (e) => {
       if (silenced) return
@@ -167,7 +181,7 @@ export function openSyncSession(
             close: () => {
               silenced = true // deliberate: not a drop, so no onClose (and no late messages)
               clearTimers()
-              ws.close()
+              shut()
             },
           })
         } else {
