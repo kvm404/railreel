@@ -18,6 +18,12 @@
  * (ticker + reactions) gets whatever is left between the captions and the top edge, separately for
  * the chrome open and hidden. When that is too little the ticker is clipped to it or dropped, and
  * reactions are dropped rather than drawn over the header — the film and its captions win.
+ *
+ * The captions themselves have a hard ceiling: their top edge never rises past the top controls
+ * (or a banner hanging below them) — `captionTop >= captionCeiling` in both chrome states. When a
+ * tall cue over a crowded curtain would break that, the layout reports the overflow and the Player
+ * escalates, one measured step at a time (`nextCompaction`): compact the notice, then fold it into
+ * the controls row, and only as a last resort cap the cue at the lines that fit.
  */
 
 export interface Insets {
@@ -47,6 +53,11 @@ export interface PlayerLayoutInput {
    * below it.
    */
   bannerHeight?: number
+  /**
+   * Last resort (compaction 'captions'): cap the caption block at the lines that fit in this chrome
+   * state. The Player then renders at most `captionMaxLines` lines and reports the capped height.
+   */
+  capCaptionLines?: 'open' | 'closed'
 }
 
 /** What the social band (chat ticker + floating reactions) may use in one chrome state. */
@@ -85,6 +96,18 @@ export interface PlayerLayout {
   bannerTop: number
   /** Bottom of the top curtain's controls (its fade excluded): nothing in the middle band may cross it. */
   topControlsBottom: number
+  /** Height budgeted for the caption block itself (0 when captions are off). */
+  captionBlock: number
+  /** The highest the caption block's top edge may reach, per chrome state (px from the top). */
+  captionCeiling: { open: number; closed: number }
+  /** Where the caption block's top edge sits, per chrome state (px from the top). */
+  captionTop: { open: number; closed: number }
+  /** How far the caption block crosses its ceiling in either state (0 = fits): compact the chrome. */
+  captionOverflow: number
+  /** The most caption lines that fit under the ceiling, per chrome state (≥ 1). */
+  captionLines: { open: number; closed: number }
+  /** The line cap in force (`capCaptionLines`), or undefined when captions render in full. */
+  captionMaxLines: number | undefined
   /** The social band's budget with the chrome open (curtains in) and hidden. */
   social: { open: SocialBand; closed: SocialBand }
 }
@@ -102,6 +125,8 @@ const CAPTION_LINE = 23
 /** Plate padding + border (12 + 2) and the gap above the plate. */
 const CAPTION_CHROME = 14
 const CAPTION_GAP = 8
+/** Clearance between the top controls and the caption block's top edge. */
+export const CAPTION_CLEARANCE = 8
 const CAPTION_REST_GAP = 20
 const CURTAIN_GAP = 10
 /**
@@ -123,9 +148,35 @@ export function railWidth(key: number): number {
   return key * RAIL_KEYS + RAIL_CHROME
 }
 
+/** A caption block of `lines` lines at the current text scale, on its plate. */
+export function captionBlockHeight(lines: number, fontScale = 1): number {
+  return Math.ceil(lines * CAPTION_LINE * fontScale + CAPTION_CHROME)
+}
+
 /** The caption block the layout always makes room for: two lines at the current text scale, on its plate. */
 export function captionFloor(fontScale = 1): number {
-  return Math.ceil(2 * CAPTION_LINE * fontScale + CAPTION_CHROME)
+  return captionBlockHeight(2, fontScale)
+}
+
+/**
+ * How hard the Player squeezes its chrome so the captions clear the top controls, in order:
+ *  0 none · 1 'notice' — the bottom-curtain notice goes to one line, its action to a compact pill
+ *  · 2 'controls' — wide layouts fold the notice into the controls row and the reaction rail down
+ *  to its chat key · 3 'captions' — the caption block is capped at the lines that fit.
+ */
+export type ChromeCompaction = 0 | 1 | 2 | 3
+export const COMPACT_NOTICE = 1
+export const COMPACT_CONTROLS = 2
+export const COMPACT_CAPTIONS = 3
+
+/**
+ * One step up while the captions still cross their ceiling — never down: the Player re-measures
+ * between steps and resets to 0 only when the situation changes (another notice, an orientation
+ * or text-scale change, captions toggled), so a squeezed curtain can't flap open and shut.
+ */
+export function nextCompaction(level: ChromeCompaction, overflowPx: number): ChromeCompaction {
+  if (!(overflowPx > 0) || level >= COMPACT_CAPTIONS) return level
+  return (level + 1) as ChromeCompaction
 }
 
 export function playerLayout(i: PlayerLayoutInput): PlayerLayout {
@@ -141,11 +192,6 @@ export function playerLayout(i: PlayerLayoutInput): PlayerLayout {
   const lifted = i.bottomCurtainHeight > 0 ? i.bottomCurtainHeight + CURTAIN_GAP : captionBottom
   const lift = Math.max(0, lifted - captionBottom)
 
-  const floor = captionFloor(fontScale)
-  const measured = i.captionHeight && i.captionHeight > 0 ? Math.ceil(i.captionHeight) : 0
-  const captionReserve = i.captionsOn ? Math.max(floor, measured) + CAPTION_GAP : 0
-  const socialBottom = captionBottom + captionReserve
-
   const topControlsBottom =
     i.topCurtainHeight && i.topCurtainHeight > TOP_FADE ? i.topCurtainHeight - TOP_FADE : i.insets.top + TOP_BAR_FALLBACK
   const bannerTop = topControlsBottom + CURTAIN_GAP
@@ -155,6 +201,28 @@ export function playerLayout(i: PlayerLayoutInput): PlayerLayout {
   const bannerBottom = banner > 0 ? bannerTop + banner + CURTAIN_GAP : 0
   const openTop = Math.max(bannerTop, bannerBottom)
   const closedTop = Math.max(i.insets.top + SIDE_MIN, bannerBottom)
+
+  // The caption ceiling, and how many lines fit under it (from the room alone — never from the
+  // caption's own height, so capping a cue can't feed back into the cap).
+  const captionCeiling = { open: Math.max(topControlsBottom + CAPTION_CLEARANCE, bannerBottom), closed: closedTop }
+  const linesIn = (room: number): number => Math.max(1, Math.floor((room - CAPTION_CHROME) / (CAPTION_LINE * fontScale)))
+  const captionLines = {
+    open: linesIn(i.height - (captionBottom + lift) - captionCeiling.open),
+    closed: linesIn(i.height - captionBottom - captionCeiling.closed),
+  }
+  const captionMaxLines = i.captionsOn && i.capCaptionLines ? captionLines[i.capCaptionLines] : undefined
+
+  const measured = i.captionHeight && i.captionHeight > 0 ? Math.ceil(i.captionHeight) : 0
+  const cap = captionMaxLines !== undefined ? captionBlockHeight(captionMaxLines, fontScale) : Number.POSITIVE_INFINITY
+  const floor = Math.min(captionFloor(fontScale), cap)
+  const captionBlock = i.captionsOn ? Math.min(Math.max(floor, measured), cap) : 0
+  const captionReserve = i.captionsOn ? captionBlock + CAPTION_GAP : 0
+  const socialBottom = captionBottom + captionReserve
+
+  const captionTop = { open: i.height - (captionBottom + lift) - captionBlock, closed: i.height - captionBottom - captionBlock }
+  const captionOverflow = i.captionsOn
+    ? Math.max(0, captionCeiling.open - captionTop.open, captionCeiling.closed - captionTop.closed)
+    : 0
 
   const tickerLine = Math.ceil(TICKER_LINE * fontScale)
   const band = (topEdge: number, bottom: number): SocialBand => {
@@ -185,6 +253,12 @@ export function playerLayout(i: PlayerLayoutInput): PlayerLayout {
     socialBottom,
     bannerTop,
     topControlsBottom,
+    captionBlock,
+    captionCeiling,
+    captionTop,
+    captionOverflow,
+    captionLines,
+    captionMaxLines,
     social,
   }
 }

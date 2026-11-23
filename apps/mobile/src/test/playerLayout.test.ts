@@ -1,7 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import {
+  captionBlockHeight,
   captionFloor,
+  nextCompaction,
   playerLayout,
+  CAPTION_CLEARANCE,
+  COMPACT_CAPTIONS,
+  COMPACT_CONTROLS,
+  COMPACT_NOTICE,
   railWidth,
   reactionLanes,
   LANE_STEP_Y,
@@ -62,6 +68,24 @@ function expectBandFits(i: PlayerLayoutInput, l: PlayerLayout) {
   }
   // the captions themselves sit clear of the open bottom curtain
   if (i.bottomCurtainHeight > 0) expect(l.captionBottom + l.lift).toBeGreaterThanOrEqual(i.bottomCurtainHeight)
+}
+
+/**
+ * The caption invariant, computed independently of the layout's own captionTop: in both chrome
+ * states the caption block's top edge stays below the top controls (+ clearance) and any banner.
+ */
+function expectCaptionsClear(i: PlayerLayoutInput, l: PlayerLayout) {
+  const block = l.captionBlock
+  const openTop = i.height - (l.captionBottom + l.lift) - block
+  const closedTop = i.height - l.captionBottom - block
+  expect(openTop).toBeGreaterThanOrEqual(l.topControlsBottom + CAPTION_CLEARANCE)
+  expect(closedTop).toBeGreaterThanOrEqual(i.insets.top + SIDE_MIN)
+  const bannerLow = bannerFloor(i, l)
+  if (bannerLow > 0) {
+    expect(openTop).toBeGreaterThan(bannerLow)
+    expect(closedTop).toBeGreaterThan(bannerLow)
+  }
+  expect(l.captionOverflow).toBe(0)
 }
 
 describe('playerLayout', () => {
@@ -182,6 +206,92 @@ describe('playerLayout', () => {
       expectBandFits(big, lb)
       expect(lb.social.open.room).toBeLessThan(l.social.open.room)
     })
+  })
+})
+
+describe('caption ceiling', () => {
+  // The audit case: a holding notice grows the landscape curtain to 190dp and a long cue (or
+  // enlarged text) measures 110dp — the caption top landed at 50dp under 58dp of top controls.
+  const crowded: PlayerLayoutInput = { ...landscape, bottomCurtainHeight: 190, captionHeight: 110 }
+
+  it('detects the crowded landscape collision instead of drawing captions over the header', () => {
+    const l = playerLayout(crowded)
+    expect(l.topControlsBottom).toBe(58)
+    expect(l.captionTop.open).toBe(50)
+    expect(l.captionOverflow).toBe(58 + CAPTION_CLEARANCE - 50)
+    expect(nextCompaction(0, l.captionOverflow)).toBe(COMPACT_NOTICE)
+  })
+
+  it('crowded landscape: folding the notice into the controls row clears the header', () => {
+    // compaction 'controls': the notice row (44 + 10 gap) leaves the curtain
+    const folded = { ...crowded, bottomCurtainHeight: 190 - 54 }
+    const l = playerLayout(folded)
+    expectCaptionsClear(folded, l)
+    expect(l.captionMaxLines).toBeUndefined() // the cue still renders in full
+  })
+
+  it('crowded landscape, last resort: the cue is capped at the lines that fit — and then fits', () => {
+    const capped = { ...crowded, capCaptionLines: 'open' as const }
+    const l = playerLayout(capped)
+    expect(l.captionMaxLines).toBe(l.captionLines.open)
+    expect(l.captionMaxLines).toBeGreaterThanOrEqual(1)
+    expect(l.captionBlock).toBeLessThanOrEqual(captionBlockHeight(l.captionMaxLines!))
+    expectCaptionsClear(capped, l)
+    // the capped block, once rendered and reported, keeps fitting (no feedback into the cap)
+    const reported = { ...capped, captionHeight: captionBlockHeight(l.captionMaxLines!) }
+    const l2 = playerLayout(reported)
+    expect(l2.captionMaxLines).toBe(l.captionMaxLines)
+    expectCaptionsClear(reported, l2)
+  })
+
+  it('crowded landscape with the chrome hidden: plenty of lines once the curtain is away', () => {
+    const l = playerLayout(crowded)
+    expect(l.captionLines.closed).toBeGreaterThan(l.captionLines.open)
+    expect(l.captionTop.closed).toBeGreaterThanOrEqual(l.captionCeiling.closed)
+  })
+
+  it('portrait 360×760 and 360×640: captions clear the header without any compaction', () => {
+    expectCaptionsClear(portrait, playerLayout(portrait))
+    const tallCue = { ...portrait, bottomCurtainHeight: 234, captionHeight: 140 }
+    expectCaptionsClear(tallCue, playerLayout(tallCue))
+    const big = { ...small, fontScale: 1.5, captionHeight: 150, topCurtainHeight: small.topCurtainHeight! + 24 }
+    expectCaptionsClear(big, playerLayout(big))
+  })
+
+  it('portrait with a join-request banner: captions stay below the banner too', () => {
+    const withBanner = { ...portrait, bottomCurtainHeight: 234, captionHeight: 110, bannerHeight: 112 }
+    const l = playerLayout(withBanner)
+    expectCaptionsClear(withBanner, l)
+    expect(l.captionCeiling.open).toBeGreaterThan(l.bannerTop + 112)
+  })
+
+  it('captions off: nothing to budget, never an overflow', () => {
+    const l = playerLayout({ ...crowded, captionsOn: false })
+    expect(l.captionBlock).toBe(0)
+    expect(l.captionOverflow).toBe(0)
+    expect(l.captionMaxLines).toBeUndefined()
+  })
+
+  it('the cap never goes below one line, and grows with the room', () => {
+    const cramped = playerLayout({ ...crowded, bannerHeight: 120, capCaptionLines: 'open' })
+    expect(cramped.captionMaxLines).toBe(1)
+    const roomy = playerLayout({ ...portrait, capCaptionLines: 'open' })
+    expect(roomy.captionMaxLines!).toBeGreaterThan(3)
+  })
+})
+
+describe('nextCompaction', () => {
+  it('steps up one level per overflowing measurement and stops at the caption cap', () => {
+    expect(nextCompaction(0, 0)).toBe(0)
+    expect(nextCompaction(0, 4)).toBe(COMPACT_NOTICE)
+    expect(nextCompaction(COMPACT_NOTICE, 4)).toBe(COMPACT_CONTROLS)
+    expect(nextCompaction(COMPACT_CONTROLS, 4)).toBe(COMPACT_CAPTIONS)
+    expect(nextCompaction(COMPACT_CAPTIONS, 4)).toBe(COMPACT_CAPTIONS)
+  })
+
+  it('never steps down on its own (no flapping when the squeezed curtain re-measures)', () => {
+    expect(nextCompaction(COMPACT_CONTROLS, 0)).toBe(COMPACT_CONTROLS)
+    expect(nextCompaction(COMPACT_NOTICE, Number.NaN)).toBe(COMPACT_NOTICE)
   })
 })
 

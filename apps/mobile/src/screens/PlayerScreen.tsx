@@ -34,7 +34,15 @@ import {
   stallReport,
   targetPositionSec,
 } from '@/lib/sync/playback'
-import { playerLayout, TOP_FADE } from '@/lib/player/layout'
+import {
+  COMPACT_CAPTIONS,
+  COMPACT_CONTROLS,
+  COMPACT_NOTICE,
+  nextCompaction,
+  playerLayout,
+  TOP_FADE,
+  type ChromeCompaction,
+} from '@/lib/player/layout'
 import { shouldPublishHostExit } from '@/lib/player/exit'
 import { playPressPlan } from '@/lib/player/transport'
 import { admission } from '@/lib/host/admission'
@@ -70,6 +78,8 @@ const BUFFERING_SHOW_MS = 450
  * then only ever confirms a reaction that was really sent.
  */
 const LOCAL_REACTION_GAP_MS = 260
+/** Between compaction steps: long enough for the squeezed curtain to re-layout and be measured. */
+const COMPACT_SETTLE_MS = 150
 const NO_CUES: SubtitleCue[] = []
 
 /** Read cursor for the chat badge, kept across Player remounts (ids are monotonic app-wide). */
@@ -747,6 +757,26 @@ export function PlayerScreen() {
   // ── layout + curtains ────────────────────────────────────────────────────────
   const cues = s.subtitle?.cues ?? NO_CUES
   const captionsOn = subtitlesEnabled && cues.length > 0
+  const chromeOpen = showControls || ended
+
+  // Captions must clear the top controls (lib/player/layout). When a tall cue over a crowded
+  // curtain can't, squeeze the chrome one measured step at a time; the level only resets when the
+  // situation itself changes, so the curtain never flaps between a squeezed and a full layout.
+  const noticeKind = ended
+    ? 'end'
+    : isHost && waiting.length > 0
+      ? playing
+        ? 'playing-on'
+        : 'hold'
+      : !isHost && playback && !playback.isPlaying
+        ? 'paused'
+        : 'none'
+  const [compaction, setCompaction] = useState<ChromeCompaction>(0)
+  const compactionKey = `${noticeKind}|${width > height}|${captionsOn}|${fontScale}|${bannerH > 0}`
+  useEffect(() => {
+    setCompaction(0)
+  }, [compactionKey])
+  const capCaptions = compaction >= COMPACT_CAPTIONS
   const layout = useMemo(
     () =>
       playerLayout({
@@ -759,9 +789,20 @@ export function PlayerScreen() {
         captionsOn,
         captionHeight: captionH,
         bannerHeight: bannerH,
+        capCaptionLines: capCaptions ? (chromeOpen ? 'open' : 'closed') : undefined,
       }),
-    [width, height, insets, fontScale, bottomCurtainH, topCurtainH, captionsOn, captionH, bannerH],
+    [width, height, insets, fontScale, bottomCurtainH, topCurtainH, captionsOn, captionH, bannerH, capCaptions, chromeOpen],
   )
+  const captionOverflow = layout.captionOverflow
+  useEffect(() => {
+    const next = nextCompaction(compaction, captionOverflow)
+    if (next === compaction) return
+    const id = setTimeout(() => setCompaction(next), COMPACT_SETTLE_MS)
+    return () => clearTimeout(id)
+  }, [compaction, captionOverflow])
+  const compactNotice = compaction >= COMPACT_NOTICE
+  // Folding the notice into the controls row only buys height where they share a row.
+  const foldNotice = compaction >= COMPACT_CONTROLS && layout.wide
   const onBottomCurtainHeight = useCallback((h: number) => {
     setBottomCurtainH((prev) => (Math.abs(prev - h) > 1 ? Math.round(h) : prev))
   }, [])
@@ -779,7 +820,6 @@ export function PlayerScreen() {
     [captionFloorPx],
   )
 
-  const chromeOpen = showControls || ended
   const curtain = useSharedValue(1)
   useEffect(() => {
     curtain.value = withTiming(chromeOpen ? 1 : 0, { duration: motion.base, easing: Easing.bezier(...motion.expoOut) })
@@ -823,11 +863,14 @@ export function PlayerScreen() {
     if (!bannersUp) setBannerH(0)
   }, [bannersUp])
 
-  // The line above the filament: the end, a hold for stragglers, or the host's pause.
+  // The line above the filament: the end, a hold for stragglers, or the host's pause. Compacted
+  // (a caption needs the room): one line, inline, its action a compact pill.
+  const noticeLayout = [styles.noticeCol, (layout.wide || compactNotice) && styles.noticeInline]
+  const noticeLines = compactNotice ? 1 : 2
   let notice: ReactNode = null
   if (ended) {
     notice = (
-      <View style={[styles.noticeCol, layout.wide && styles.noticeInline]}>
+      <View style={noticeLayout}>
         <FlapText value="THE END" size={22} />
         {cacheBytes > 0 ? (
           <IconButton
@@ -847,20 +890,25 @@ export function PlayerScreen() {
     )
   } else if (isHost && waiting.length > 0) {
     notice = playing ? (
-      <Text variant="data" tone="secondary" style={styles.noticeText} numberOfLines={2}>
+      <Text variant="data" tone="secondary" style={styles.noticeText} numberOfLines={noticeLines}>
         {`Playing on without ${waiting.join(', ')} — they'll catch up`}
       </Text>
     ) : (
-      <View style={[styles.noticeCol, layout.wide && styles.noticeInline]}>
-        <Text variant="data" tone="secondary" style={styles.noticeText} numberOfLines={2}>
+      <View style={noticeLayout}>
+        <Text variant="data" tone="secondary" style={styles.noticeText} numberOfLines={noticeLines}>
           {`Holding for ${waiting.join(', ')} to catch up…`}
         </Text>
-        <Button title={`Play without ${waiting.length > 1 ? 'them' : waiting[0]}`} intent="neutral" height={44} onPress={playWithout} />
+        <Button
+          title={`Play without ${waiting.length > 1 ? 'them' : waiting[0]}`}
+          intent="neutral"
+          {...(compactNotice ? { compact: true } : { height: 44 })}
+          onPress={playWithout}
+        />
       </View>
     )
   } else if (!isHost && playback && !playback.isPlaying) {
     notice = (
-      <Text variant="data" tone="secondary" style={styles.noticeText}>
+      <Text variant="data" tone="secondary" style={styles.noticeText} numberOfLines={noticeLines}>
         Paused by host
       </Text>
     )
@@ -916,7 +964,14 @@ export function PlayerScreen() {
   )
 
   const rail = (
-    <ReactionRail onReact={onReact} onOpenChat={openChat} unread={unread} keySize={layout.railKey} chatButtonRef={chatButtonRef} />
+    <ReactionRail
+      onReact={onReact}
+      onOpenChat={openChat}
+      unread={unread}
+      keySize={layout.railKey}
+      chatButtonRef={chatButtonRef}
+      chatOnly={foldNotice && notice != null}
+    />
   )
   const scrubber = (
     <Scrubber playhead={playhead} durationSec={durationSec} interactive={isHost} onSeek={seekHost} onScrubStart={holdControls} />
@@ -955,6 +1010,7 @@ export function PlayerScreen() {
           right={layout.sideRight + 4}
           lift={lift}
           onHeight={onCaptionHeight}
+          maxLines={layout.captionMaxLines}
         />
         {!chatOpen && band.ticker && (
           <ChatTicker
@@ -1011,12 +1067,14 @@ export function PlayerScreen() {
 
         <Curtain edge="bottom" progress={curtain} open={chromeOpen} onHeight={onBottomCurtainHeight}>
           <View style={[styles.bottomBar, sidePad, { paddingBottom: insets.bottom + 12 }]} pointerEvents="box-none">
-            {notice ? <View style={styles.noticeRow}>{notice}</View> : null}
+            {notice && !foldNotice ? <View style={styles.noticeRow}>{notice}</View> : null}
             {layout.wide ? (
               <>
                 {scrubber}
                 <View style={styles.wideRow} pointerEvents="box-none">
                   {transport}
+                  {/* Folded (a caption needs the room): the notice takes the reactions' place. */}
+                  {notice && foldNotice ? <View style={styles.noticeFolded}>{notice}</View> : null}
                   {rail}
                 </View>
               </>
@@ -1087,6 +1145,7 @@ const styles = StyleSheet.create({
   // Landscape: notice and its action share a line, so the bottom curtain stays short.
   noticeInline: { flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: 16 },
   noticeText: { textAlign: 'center', flexShrink: 1 },
+  noticeFolded: { flex: 1, minWidth: 0, alignItems: 'center' },
   transport: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 32 },
   transportWide: { gap: 20, justifyContent: 'flex-start' },
   requests: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, flexWrap: 'wrap' },

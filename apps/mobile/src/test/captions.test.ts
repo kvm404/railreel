@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { sameActiveCues } from '@/lib/player/captions'
+import { captionLineBudget, sameActiveCues } from '@/lib/player/captions'
 import { findActiveCues, type SubtitleCue } from '@/lib/subtitles'
 
 const cue = (id: number, text: string, startMs: number, endMs: number): SubtitleCue => ({
@@ -32,5 +32,38 @@ describe('sameActiveCues', () => {
     expect(sameActiveCues([], findActiveCues(v1, 2000))).toBe(false)
     expect(sameActiveCues(findActiveCues(v1, 2000), [])).toBe(false)
     expect(sameActiveCues([], [])).toBe(true)
+  })
+})
+
+describe('captionLineBudget', () => {
+  const sum = (b: number[][]) => b.flat().reduce((a, n) => a + n, 0)
+
+  it('leaves captions alone without a cap', () => {
+    expect(captionLineBudget([2], undefined)).toBeNull()
+  })
+
+  it('gives every line one row first, then lets them wrap', () => {
+    expect(captionLineBudget([2], 2)).toEqual([[1, 1]])
+    expect(captionLineBudget([2], 3)).toEqual([[2, 1]])
+    expect(captionLineBudget([1], 3)).toEqual([[3]])
+  })
+
+  it('drops the lines that do not fit, from the bottom of the cue', () => {
+    expect(captionLineBudget([3], 1)).toEqual([[1, 0, 0]])
+  })
+
+  it('charges extra plates a line and keeps the newest cue when both cannot fit', () => {
+    expect(captionLineBudget([2, 1], 1)).toEqual([[0, 0], [1]])
+    expect(captionLineBudget([1, 1], 3)).toEqual([[1], [1]])
+  })
+
+  it('never renders more than the budget', () => {
+    for (const cues of [[1], [3], [2, 2], [1, 2, 1]]) {
+      for (let m = 1; m <= 6; m++) {
+        const b = captionLineBudget(cues, m)!
+        const plates = b.filter((c) => c.some((n) => n > 0)).length
+        expect(sum(b) + Math.max(0, plates - 1)).toBeLessThanOrEqual(m)
+      }
+    }
   })
 })
