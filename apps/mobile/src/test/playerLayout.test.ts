@@ -44,10 +44,13 @@ const small: PlayerLayoutInput = {
  * Nothing in the social band may cross the top edge of its state: the top curtain's controls
  * (open) or the safe top (hidden). Checks the highest point every layer can reach.
  */
+/** The lowest edge the host's banner stack reaches (0 when none) — it hangs in both chrome states. */
+const bannerFloor = (i: PlayerLayoutInput, l: PlayerLayout) => (i.bannerHeight ? l.bannerTop + i.bannerHeight : 0)
+
 function expectBandFits(i: PlayerLayoutInput, l: PlayerLayout) {
   for (const open of [true, false]) {
     const b = open ? l.social.open : l.social.closed
-    const topEdge = open ? l.bannerTop : i.insets.top + SIDE_MIN
+    const topEdge = Math.max(open ? l.bannerTop : i.insets.top + SIDE_MIN, bannerFloor(i, l))
     const start = l.socialBottom + (open ? l.lift : 0)
     const ceiling = i.height - topEdge
     if (b.ticker) expect(start + b.tickerMaxHeight).toBeLessThanOrEqual(ceiling)
@@ -155,6 +158,20 @@ describe('playerLayout', () => {
       expectBandFits(crowded, l)
       expect(l.social.open.ticker).toBe(false)
       expect(l.social.open.reactions).toBeNull()
+    })
+
+    it('a join-request banner pushes the social band below it, chrome open and hidden', () => {
+      const withBanner = { ...portrait, bannerHeight: 112 }
+      const l = playerLayout(withBanner)
+      const base = playerLayout(portrait)
+      expectBandFits(withBanner, l)
+      expect(l.social.open.room).toBeLessThan(base.social.open.room)
+      expect(l.social.closed.room).toBeLessThan(base.social.closed.room)
+      // landscape: a one-row banner over a crowded hold leaves no room for sparks at all
+      const crowded = { ...landscape, bottomCurtainHeight: 190, bannerHeight: 60 }
+      const lc = playerLayout(crowded)
+      expectBandFits(crowded, lc)
+      expect(lc.social.open.reactions).toBeNull()
     })
 
     it('small portrait 360×640 with the host curtain: fits, and gives way under large text', () => {

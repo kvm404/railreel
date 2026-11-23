@@ -20,6 +20,7 @@ import { ChatTicker } from '@/components/ChatTicker'
 import { CleanupSheet } from '@/components/CleanupSheet'
 import { FloatingReactions } from '@/components/FloatingReactions'
 import { ModerationBanner } from '@/components/ModerationBanner'
+import { JoinRequestBanner } from '@/components/JoinRequestBanner'
 import { Curtain, SyncTag, type SyncTone } from '@/components/PlayerChrome'
 import { PlayerStatusOverlay } from '@/components/PlayerStatusOverlay'
 import { ReactionRail } from '@/components/ReactionRail'
@@ -36,6 +37,7 @@ import {
 import { playerLayout, TOP_FADE } from '@/lib/player/layout'
 import { shouldPublishHostExit } from '@/lib/player/exit'
 import { playPressPlan } from '@/lib/player/transport'
+import { admission } from '@/lib/host/admission'
 import { lastChatId, unreadCount } from '@/lib/social/feed'
 import { cleanupFailureMessage, formatBytes, type ClearCacheResult } from '@/lib/storage'
 import type { PlaybackState } from '@/lib/protocol'
@@ -93,6 +95,8 @@ export function PlayerScreen() {
     sendPlaybackRequest,
     clearPlaybackRequestStatus,
     registerHostTransport,
+    approve,
+    deny,
   } = s
   const playback = s.playback
   const playbackRef = useRef(playback)
@@ -128,6 +132,7 @@ export function PlayerScreen() {
   const [bottomCurtainH, setBottomCurtainH] = useState(0)
   const [topCurtainH, setTopCurtainH] = useState(0)
   const [captionH, setCaptionH] = useState(0)
+  const [bannerH, setBannerH] = useState(0)
   const [screenReader, setScreenReader] = useState(false)
 
   const playingRef = useRef(playing)
@@ -753,8 +758,9 @@ export function PlayerScreen() {
         topCurtainHeight: topCurtainH,
         captionsOn,
         captionHeight: captionH,
+        bannerHeight: bannerH,
       }),
-    [width, height, insets, fontScale, bottomCurtainH, topCurtainH, captionsOn, captionH],
+    [width, height, insets, fontScale, bottomCurtainH, topCurtainH, captionsOn, captionH, bannerH],
   )
   const onBottomCurtainHeight = useCallback((h: number) => {
     setBottomCurtainH((prev) => (Math.abs(prev - h) > 1 ? Math.round(h) : prev))
@@ -805,6 +811,17 @@ export function PlayerScreen() {
   const requestPending = s.playbackRequestStatus === 'pending'
   const cacheBytes = s.cacheStatus?.totalBytes ?? 0
   const moderation = isHost ? (s.pendingPlaybackRequests[0] ?? null) : null
+  // Someone asking to board mid-show: the door is the host's call wherever the host is.
+  const participants = s.participants
+  const joinRequests = useMemo(() => (isHost ? admission(participants).pending : []), [isHost, participants])
+  const bannersUp = moderation != null || joinRequests.length > 0
+  // The banner stack's measured height is part of the overlay budget (lib/player/layout).
+  const onBannerLayout = useCallback((h: number) => {
+    setBannerH((prev) => (Math.abs(prev - h) > 1 ? Math.round(h) : prev))
+  }, [])
+  useEffect(() => {
+    if (!bannersUp) setBannerH(0)
+  }, [bannersUp])
 
   // The line above the filament: the end, a hold for stragglers, or the host's pause.
   let notice: ReactNode = null
@@ -1028,9 +1045,14 @@ export function PlayerScreen() {
       <ChatSheet visible={chatOpen} log={chatLog} onSend={sendChat} onClose={closeChat} reconnecting={s.reconnecting} />
 
       {/* Time-boxed host prompt and guest feedback sit above even the chat: they expire on their own. */}
-      {moderation ? (
-        <View style={[styles.topLayer, sidePad, { top: layout.bannerTop }]} pointerEvents="box-none">
-          <ModerationBanner request={moderation} onApprove={approveRequest} onDismiss={dismissRequest} />
+      {bannersUp ? (
+        <View
+          style={[styles.topLayer, styles.bannerStack, sidePad, { top: layout.bannerTop }]}
+          pointerEvents="box-none"
+          onLayout={(e) => onBannerLayout(e.nativeEvent.layout.height)}
+        >
+          {moderation ? <ModerationBanner request={moderation} onApprove={approveRequest} onDismiss={dismissRequest} /> : null}
+          <JoinRequestBanner requests={joinRequests} onApprove={approve} onDeny={deny} wide={layout.wide} />
         </View>
       ) : null}
       {!isHost && s.playbackRequestStatus !== 'idle' ? (
@@ -1070,5 +1092,6 @@ const styles = StyleSheet.create({
   requests: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, flexWrap: 'wrap' },
   wideRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 16 },
   topLayer: { position: 'absolute', left: 0, right: 0, zIndex: 110, elevation: 110 },
+  bannerStack: { gap: 8 },
   centered: { alignItems: 'center' },
 })

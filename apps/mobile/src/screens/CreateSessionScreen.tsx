@@ -22,6 +22,7 @@ import {
 } from '@/lib/subtitles/pick'
 import { inviteStatus, readHostNetwork } from '@/lib/net/hostNetwork'
 import { activeGuestCount, endSessionBody, needsEndConfirmation } from '@/lib/host/endSession'
+import { admission, inviteRosterLine, lobbyCtaLabel } from '@/lib/host/admission'
 
 /**
  * Host's "ready to invite" screen. Opens the movie picker, starts the native HTTP+WS servers,
@@ -133,7 +134,11 @@ export function CreateSessionScreen() {
     }
   }
 
+  // Everyone who would be cut off by ending (requests included) vs. the door and the cabin, which
+  // the invite reports separately: a request is an action for the host, not a passenger.
   const guests = activeGuestCount(s.participants)
+  const door = admission(s.participants)
+  const pending = door.pending.length
 
   // Backing out (header or hardware Back) of a live (or starting) session tears it down — servers,
   // keep-awake, roster — so the next session starts clean instead of inheriting a zombie; the stack
@@ -302,10 +307,10 @@ export function CreateSessionScreen() {
           />
         </View>
 
-        <View style={styles.waiting}>
-          <SyncDots />
-          <Text variant="data" tone="secondary">
-            {guests > 0 ? `${guests} aboard` : 'Waiting for guests…'}
+        <View style={styles.waiting} accessible accessibilityLiveRegion="polite">
+          {pending > 0 ? <View style={[styles.doorDot, { backgroundColor: t.palette.amber }]} /> : <SyncDots />}
+          <Text variant="data" tone={pending > 0 ? 'amber' : 'secondary'}>
+            {inviteRosterLine({ pending, admitted: door.admitted.length })}
           </Text>
         </View>
 
@@ -315,7 +320,13 @@ export function CreateSessionScreen() {
           </Text>
         ) : null}
 
-        <Button title="Open lobby" intent="amber" height={64} onPress={() => nav.navigate('Lobby')} />
+        <Button
+          title={lobbyCtaLabel(pending)}
+          subtitle={pending > 0 ? 'Approve or deny in the lobby' : undefined}
+          intent="amber"
+          height={64}
+          onPress={() => nav.navigate('Lobby')}
+        />
       </View>
       {endSheet}
     </Screen>
@@ -402,4 +413,5 @@ const styles = StyleSheet.create({
   stepBody: { flex: 1, paddingBottom: 16 },
   stepText: { gap: 2 },
   waiting: { flexDirection: 'row', alignItems: 'center', gap: 10, justifyContent: 'center' },
+  doorDot: { width: 8, height: 8, borderRadius: 4 },
 })

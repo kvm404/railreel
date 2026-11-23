@@ -41,6 +41,12 @@ export interface PlayerLayoutInput {
   captionHeight?: number
   /** OS text scale (useWindowDimensions().fontScale). */
   fontScale?: number
+  /**
+   * Measured height of the host's banner stack hanging at `bannerTop` (join requests, a playback
+   * request), 0 when none. It stays up whether the chrome is open or hidden, so both states budget
+   * below it.
+   */
+  bannerHeight?: number
 }
 
 /** What the social band (chat ticker + floating reactions) may use in one chrome state. */
@@ -77,6 +83,8 @@ export interface PlayerLayout {
   socialBottom: number
   /** Where the moderation banner / request toast hang (below the top curtain's controls). */
   bannerTop: number
+  /** Bottom of the top curtain's controls (its fade excluded): nothing in the middle band may cross it. */
+  topControlsBottom: number
   /** The social band's budget with the chrome open (curtains in) and hidden. */
   social: { open: SocialBand; closed: SocialBand }
 }
@@ -142,6 +150,12 @@ export function playerLayout(i: PlayerLayoutInput): PlayerLayout {
     i.topCurtainHeight && i.topCurtainHeight > TOP_FADE ? i.topCurtainHeight - TOP_FADE : i.insets.top + TOP_BAR_FALLBACK
   const bannerTop = topControlsBottom + CURTAIN_GAP
 
+  // A banner stack below the controls pushes the band's top edge down in BOTH chrome states.
+  const banner = i.bannerHeight && i.bannerHeight > 0 ? Math.ceil(i.bannerHeight) : 0
+  const bannerBottom = banner > 0 ? bannerTop + banner + CURTAIN_GAP : 0
+  const openTop = Math.max(bannerTop, bannerBottom)
+  const closedTop = Math.max(i.insets.top + SIDE_MIN, bannerBottom)
+
   const tickerLine = Math.ceil(TICKER_LINE * fontScale)
   const band = (topEdge: number, bottom: number): SocialBand => {
     const room = Math.max(0, i.height - topEdge - bottom)
@@ -155,11 +169,24 @@ export function playerLayout(i: PlayerLayoutInput): PlayerLayout {
     }
   }
   const social = {
-    open: band(bannerTop, socialBottom + lift),
-    closed: band(i.insets.top + SIDE_MIN, socialBottom),
+    open: band(openTop, socialBottom + lift),
+    closed: band(closedTop, socialBottom),
   }
 
-  return { wide, sideLeft, sideRight, railKey, captionBottom, captionReserve, captionFloor: floor, lift, socialBottom, bannerTop, social }
+  return {
+    wide,
+    sideLeft,
+    sideRight,
+    railKey,
+    captionBottom,
+    captionReserve,
+    captionFloor: floor,
+    lift,
+    socialBottom,
+    bannerTop,
+    topControlsBottom,
+    social,
+  }
 }
 
 // ── floating-reaction lanes ────────────────────────────────────────────────────
