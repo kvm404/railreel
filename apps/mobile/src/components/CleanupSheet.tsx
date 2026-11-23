@@ -1,7 +1,7 @@
 import { Modal, Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import Animated, { FadeIn, FadeOut, SlideInDown, SlideOutDown } from 'react-native-reanimated'
-import { AlertTriangle, HardDrive, Trash2, Database } from 'lucide-react-native'
+import { AlertTriangle, Film, HardDrive, Subtitles, Trash2 } from 'lucide-react-native'
 import { Button, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { formatBytes } from '@/lib/storage'
@@ -12,9 +12,12 @@ import { radii, sizes } from '@/theme/tokens'
  * Appears when exiting a session or concluding playback with multi-gigabyte cached media on device.
  *
  * Prompts the user with the exact amount of disk space to be reclaimed, offering:
- * 1. "Delete & Leave" (Amber primary CTA) - purges local cached video/subtitles and exits
- * 2. "Keep & Leave" (neutral steel secondary CTA) - retains cache and exits
- * 3. "Cancel" - stays in the session
+ * 1. "Delete and leave" (Amber primary CTA) - removes the downloaded movie/subtitles and exits
+ * 2. "Keep and leave" (neutral steel secondary CTA) - retains them and exits
+ * 3. "Stay in the session" - cancels
+ *
+ * Copy is for people, not for the file system: no internal file names, and a quick rejoin is
+ * promised only when `canRejoinQuickly` (a finished, verified copy is on the phone).
  *
  * The sheet is bounded to the visible window (landscape / large text) with a scrolling body and
  * pinned actions. If a delete did not actually free the space the caller passes `error`; the sheet
@@ -30,6 +33,8 @@ export interface CleanupSheetProps {
   onKeepAndLeave: () => void | Promise<void>
   onCancel: () => void
   isDeleting?: boolean
+  /** A complete movie copy that a rejoin could reuse is kept on this phone (see lib/storage/rejoin). */
+  canRejoinQuickly?: boolean
   /**
    * Why the last delete failed (shown inline; the primary action turns into a retry). A failed
    * delete has already torn the session's media down, so the sheet LOCKS: only Retry and Leave
@@ -49,6 +54,7 @@ export function CleanupSheet({
   onKeepAndLeave,
   onCancel,
   isDeleting = false,
+  canRejoinQuickly = false,
   error = null,
 }: CleanupSheetProps) {
   const t = useTheme()
@@ -124,17 +130,15 @@ export function CleanupSheet({
                 </View>
               )}
 
-              <Text variant="eyebrow" tone="amber" style={{ marginTop: compact ? 0 : 14 }}>
-                STORAGE RECLAMATION
-              </Text>
-
-              <Text variant="title" style={styles.headline}>
-                {totalBytes > 0 ? `Free up ${formattedTotal}` : 'Session Media Cache'}
+              <Text variant="title" style={[styles.headline, { marginTop: compact ? 0 : 14 }]} accessibilityRole="header">
+                Before you leave
               </Text>
 
               <Text variant="body" tone="secondary" style={styles.bodyText}>
                 {totalBytes > 0
-                  ? 'Local cached movie files can be purged immediately to reclaim storage space, or kept on device for quick rejoin.'
+                  ? canRejoinQuickly
+                    ? `This phone is holding ${formattedTotal} from this session. Keep it to rejoin quickly without downloading again, or delete it to free the space.`
+                    : `This phone is holding ${formattedTotal} from this session. Delete it to free the space, or keep it for now.`
                   : 'You are about to leave the session.'}
               </Text>
             </View>
@@ -153,9 +157,9 @@ export function CleanupSheet({
                 {hasMovie ? (
                   <View style={styles.breakdownRow}>
                     <View style={styles.fileLabelCol}>
-                      <Database size={15} color={t.palette.textTertiary} strokeWidth={1.75} />
+                      <Film size={15} color={t.palette.textSecondary} strokeWidth={1.75} />
                       <Text variant="caption" tone="secondary" numberOfLines={1}>
-                        railreel-movie.bin
+                        Downloaded movie
                       </Text>
                     </View>
                     <Text variant="data" tone="primary">
@@ -172,9 +176,9 @@ export function CleanupSheet({
                     ]}
                   >
                     <View style={styles.fileLabelCol}>
-                      <Database size={15} color={t.palette.textTertiary} strokeWidth={1.75} />
+                      <Subtitles size={15} color={t.palette.textSecondary} strokeWidth={1.75} />
                       <Text variant="caption" tone="secondary" numberOfLines={1}>
-                        railreel-subtitles.srt
+                        Subtitles
                       </Text>
                     </View>
                     <Text variant="data" tone="primary">
@@ -202,8 +206,8 @@ export function CleanupSheet({
             {/* Actions */}
             <View style={styles.actions}>
               <Button
-                title={isDeleting ? 'Deleting Cache…' : error ? 'Try again' : 'Delete & Leave'}
-                subtitle={error ? `Retry reclaiming ${formattedTotal}` : `Purge cache and reclaim ${formattedTotal}`}
+                title={isDeleting ? 'Deleting…' : error ? 'Try again' : 'Delete and leave'}
+                subtitle={error ? `Retry freeing ${formattedTotal}` : `Free up ${formattedTotal}`}
                 intent="amber"
                 icon={<Trash2 size={18} color={t.palette.onAmber} strokeWidth={2.2} />}
                 height={60}
@@ -212,8 +216,14 @@ export function CleanupSheet({
               />
 
               <Button
-                title={locked ? 'Leave anyway' : 'Keep & Leave'}
-                subtitle={locked ? 'The files stay on this phone' : 'Retain cache for quick rejoin'}
+                title={locked ? 'Leave anyway' : 'Keep and leave'}
+                subtitle={
+                  locked
+                    ? 'The files stay on this phone'
+                    : canRejoinQuickly
+                      ? 'Rejoin quickly without downloading again'
+                      : 'Leave the files on this phone'
+                }
                 intent="neutral"
                 height={52}
                 onPress={onKeepAndLeave}
@@ -232,10 +242,10 @@ export function CleanupSheet({
                 ]}
                 accessibilityRole="button"
                 accessibilityState={{ disabled: isDeleting }}
-                accessibilityLabel="Cancel and stay in session"
+                accessibilityLabel="Stay in the session"
               >
                 <Text variant="caption" tone="secondary" style={styles.cancelText}>
-                  Cancel and Stay in Session
+                  Stay in the session
                 </Text>
               </Pressable>
               )}

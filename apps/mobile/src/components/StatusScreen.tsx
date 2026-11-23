@@ -30,7 +30,8 @@ export function StatusScreen({
   secondary,
 }: {
   icon: ReactNode
-  tone?: 'amber' | 'cyan' | 'danger'
+  /** `neutral` is the quiet steel treatment for a human "no" (not connection state, not an error). */
+  tone?: 'amber' | 'cyan' | 'danger' | 'neutral'
   eyebrow: string
   headline: string
   body: string
@@ -44,7 +45,14 @@ export function StatusScreen({
   const { width, height } = useWindowDimensions()
   const compact = height < sizes.compactHeight
   const sideBySide = compact && width > height
-  const haloColor = tone === 'danger' ? t.palette.danger : tone === 'cyan' ? t.palette.cyan : t.palette.amber
+  const haloColor =
+    tone === 'danger'
+      ? t.palette.danger
+      : tone === 'cyan'
+        ? t.palette.cyan
+        : tone === 'neutral'
+          ? t.palette.textSecondary
+          : t.palette.amber
   const halo = compact ? 72 : 108
 
   // Move screen-reader focus to the headline when this appears over another screen.
