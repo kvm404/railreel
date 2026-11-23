@@ -33,7 +33,7 @@ import {
   stallReport,
   targetPositionSec,
 } from '@/lib/sync/playback'
-import { playerLayout } from '@/lib/player/layout'
+import { playerLayout, TOP_FADE } from '@/lib/player/layout'
 import { shouldPublishHostExit } from '@/lib/player/exit'
 import { lastChatId, unreadCount } from '@/lib/social/feed'
 import { cleanupFailureMessage, formatBytes, type ClearCacheResult } from '@/lib/storage'
@@ -76,7 +76,7 @@ export function PlayerScreen() {
   const t = useTheme()
   const nav = useNavigation()
   const insets = useSafeAreaInsets()
-  const { width, height } = useWindowDimensions()
+  const { width, height, fontScale } = useWindowDimensions()
   const s = useSession()
   const isHost = s.role === 'host'
   // Stable handles: the session object's identity changes on every roster/heartbeat, so depending on
@@ -125,6 +125,8 @@ export function PlayerScreen() {
   const [buffering, setBuffering] = useState(false)
   const [durationSec, setDurationSec] = useState(0)
   const [bottomCurtainH, setBottomCurtainH] = useState(0)
+  const [topCurtainH, setTopCurtainH] = useState(0)
+  const [captionH, setCaptionH] = useState(0)
   const [screenReader, setScreenReader] = useState(false)
 
   const playingRef = useRef(playing)
@@ -732,12 +734,35 @@ export function PlayerScreen() {
   const cues = s.subtitle?.cues ?? NO_CUES
   const captionsOn = subtitlesEnabled && cues.length > 0
   const layout = useMemo(
-    () => playerLayout({ width, height, insets, bottomCurtainHeight: bottomCurtainH, captionsOn }),
-    [width, height, insets, bottomCurtainH, captionsOn],
+    () =>
+      playerLayout({
+        width,
+        height,
+        insets,
+        fontScale,
+        bottomCurtainHeight: bottomCurtainH,
+        topCurtainHeight: topCurtainH,
+        captionsOn,
+        captionHeight: captionH,
+      }),
+    [width, height, insets, fontScale, bottomCurtainH, topCurtainH, captionsOn, captionH],
   )
   const onBottomCurtainHeight = useCallback((h: number) => {
     setBottomCurtainH((prev) => (Math.abs(prev - h) > 1 ? Math.round(h) : prev))
   }, [])
+  const onTopCurtainHeight = useCallback((h: number) => {
+    setTopCurtainH((prev) => (Math.abs(prev - h) > 1 ? Math.round(h) : prev))
+  }, [])
+  // Only a caption block TALLER than the default reservation changes the budget, so ordinary
+  // one/two-line cues never re-render the screen.
+  const captionFloorPx = layout.captionFloor
+  const onCaptionHeight = useCallback(
+    (h: number) => {
+      const next = h > captionFloorPx ? Math.round(h) : 0
+      setCaptionH((prev) => (Math.abs(prev - next) > 1 ? next : prev))
+    },
+    [captionFloorPx],
+  )
 
   const chromeOpen = showControls || ended
   const curtain = useSharedValue(1)
@@ -749,6 +774,8 @@ export function PlayerScreen() {
     liftPx.value = layout.lift
   }, [layout.lift, liftPx])
   const lift = useDerivedValue(() => curtain.value * liftPx.value)
+  // The social band's budget for the chrome state we're in (or heading to).
+  const band = chromeOpen ? layout.social.open : layout.social.closed
 
   // ── status ──────────────────────────────────────────────────────────────────
   const failed = nativeStatus === 'error'
@@ -774,7 +801,7 @@ export function PlayerScreen() {
   let notice: ReactNode = null
   if (ended) {
     notice = (
-      <View style={styles.noticeCol}>
+      <View style={[styles.noticeCol, layout.wide && styles.noticeInline]}>
         <FlapText value="THE END" size={22} />
         {cacheBytes > 0 ? (
           <IconButton
@@ -798,7 +825,7 @@ export function PlayerScreen() {
         {`Playing on without ${waiting.join(', ')} — they'll catch up`}
       </Text>
     ) : (
-      <View style={styles.noticeCol}>
+      <View style={[styles.noticeCol, layout.wide && styles.noticeInline]}>
         <Text variant="data" tone="secondary" style={styles.noticeText} numberOfLines={2}>
           {`Holding for ${waiting.join(', ')} to catch up…`}
         </Text>
@@ -901,13 +928,15 @@ export function PlayerScreen() {
           left={layout.sideLeft + 4}
           right={layout.sideRight + 4}
           lift={lift}
+          onHeight={onCaptionHeight}
         />
-        {!chatOpen && (
+        {!chatOpen && band.ticker && (
           <ChatTicker
             log={chatLog}
             bottom={layout.socialBottom}
             left={layout.sideLeft}
-            right={layout.tickerRight}
+            right={band.tickerRight}
+            maxHeight={band.tickerMaxHeight}
             lift={lift}
           />
         )}
@@ -915,11 +944,11 @@ export function PlayerScreen() {
           reactions={s.reactions}
           bottom={layout.socialBottom}
           right={layout.sideRight}
-          lanes={layout.reactions}
+          lanes={band.reactions}
           lift={lift}
         />
 
-        <Curtain edge="top" progress={curtain} open={chromeOpen}>
+        <Curtain edge="top" progress={curtain} open={chromeOpen} onHeight={onTopCurtainHeight}>
           <View style={[styles.topBar, sidePad, { paddingTop: insets.top + 10 }]} pointerEvents="box-none">
             <IconButton
               variant="glass"
@@ -1018,12 +1047,15 @@ export function PlayerScreen() {
 
 const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: palette.black },
-  topBar: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingBottom: 28 },
+  // paddingBottom is the curtain's fade below the controls — the layout's TOP_FADE.
+  topBar: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingBottom: TOP_FADE },
   titleCol: { flex: 1, minWidth: 0 },
   bottomBar: { paddingTop: 36, gap: 10 },
   noticeRow: { alignItems: 'center' },
   noticeCol: { alignItems: 'center', gap: 10 },
-  noticeText: { textAlign: 'center' },
+  // Landscape: notice and its action share a line, so the bottom curtain stays short.
+  noticeInline: { flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: 16 },
+  noticeText: { textAlign: 'center', flexShrink: 1 },
   transport: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 32 },
   transportWide: { gap: 20, justifyContent: 'flex-start' },
   requests: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, flexWrap: 'wrap' },

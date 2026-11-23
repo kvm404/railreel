@@ -22,6 +22,8 @@ export interface CaptionOverlayProps {
   right?: number
   /** Extra upward offset (px), animated with the chrome curtain on the UI thread. */
   lift?: SharedValue<number>
+  /** Measured height of the rendered caption block (0 while nothing is shown) — the Player's budget. */
+  onHeight?: (h: number) => void
 }
 
 /**
@@ -63,16 +65,24 @@ export const CaptionOverlay = memo(function CaptionOverlay({
   left = 20,
   right = 20,
   lift,
+  onHeight,
 }: CaptionOverlayProps) {
   const fallbackMs = positionMs ?? (currentTimeSec !== undefined ? currentTimeSec * 1000 : 0)
   const activeCues = useActiveCues(visible ? cues : EMPTY, playhead, fallbackMs)
   const liftStyle = useAnimatedStyle(() => ({ transform: [{ translateY: lift ? -lift.value : 0 }] }))
+  const shown = visible && activeCues.length > 0
 
-  if (!visible || activeCues.length === 0) return null
+  // Nothing on screen → nothing to reserve beyond the Player's default floor.
+  useEffect(() => {
+    if (!shown) onHeight?.(0)
+  }, [shown, onHeight])
+
+  if (!shown) return null
 
   return (
     <Animated.View
       pointerEvents="none"
+      onLayout={onHeight ? (e) => onHeight(e.nativeEvent.layout.height) : undefined}
       style={[styles.container, { left, right }, bottomOffset !== undefined && { bottom: bottomOffset }, liftStyle]}
     >
       {activeCues.map((cue, cueIdx) => (

@@ -23,6 +23,7 @@ export const ChatTicker = memo(function ChatTicker({
   bottom = 120,
   left = 16,
   right = 110,
+  maxHeight,
   lift,
 }: {
   log: ChatEntry[]
@@ -30,6 +31,8 @@ export const ChatTicker = memo(function ChatTicker({
   left?: number
   /** Keep clear of the floating-reaction lane on the right edge. */
   right?: number
+  /** The room the Player's budget leaves; older lines are clipped away at the top first. */
+  maxHeight?: number
   /** Extra upward offset (px), animated with the chrome. */
   lift?: SharedValue<number>
 }) {
@@ -48,7 +51,7 @@ export const ChatTicker = memo(function ChatTicker({
   if (lines.length === 0) return null
 
   return (
-    <Animated.View pointerEvents="none" style={[styles.stack, { bottom, left, right }, liftStyle]}>
+    <Animated.View pointerEvents="none" style={[styles.stack, { bottom, left, right, maxHeight }, liftStyle]}>
       {lines.map((l) => (
         <Animated.View key={l.id} entering={FadeInDown.duration(180)} exiting={FadeOut.duration(240)} style={styles.line}>
           <Text variant="caption" style={[styles.sender, { color: t.palette.amber, textShadowColor: t.palette.void }]} numberOfLines={1}>
@@ -64,7 +67,8 @@ export const ChatTicker = memo(function ChatTicker({
 })
 
 const styles = StyleSheet.create({
-  stack: { position: 'absolute', gap: 6 },
+  // Anchored at the bottom: when clipped, the newest lines stay and the oldest give way.
+  stack: { position: 'absolute', gap: 6, justifyContent: 'flex-end', overflow: 'hidden' },
   line: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
   sender: { maxWidth: '40%', flexShrink: 0, fontFamily: fonts.bodyBold, textShadowRadius: 6 },
   text: { flexShrink: 1, textShadowRadius: 6 },
