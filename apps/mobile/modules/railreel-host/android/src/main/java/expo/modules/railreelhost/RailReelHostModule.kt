@@ -1,6 +1,9 @@
 package expo.modules.railreelhost
 
 import android.content.ContentResolver
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -35,6 +38,13 @@ class RailReelHostModule : Module() {
     // The host's own LAN/hotspot IPv4, for the QR/join link. NanoHTTPD binds to all interfaces,
     // so we pick the address clients actually reach: prefer the hotspot/wifi interface.
     Function("getHostIpAddress") { hostIpAddress() }
+
+    // Every usable IPv4 on this device with the transport of the network that owns its interface
+    // ("none" = no network does — the SoftAP/tethering case). JS ranks them (lib/net/hostNetwork)
+    // so the invite can say whether it is really on the hotspot.
+    Function("getNetworkCandidates") {
+      networkCandidates().map { mapOf("iface" to it.iface, "ip" to it.ip, "transport" to it.transport) }
+    }
 
     // The host's MONOTONIC clock (ms) — the same timebase the WS sync handshake answers in (see
     // CtrlServer). The host stamps each PlaybackState with this so clients can convert it to their
@@ -358,25 +368,58 @@ class RailReelHostModule : Module() {
     }
   }
 
+  private data class NetCandidate(val iface: String, val ip: String, val transport: String)
+
   /**
-   * Best-effort LAN IPv4 of this device. Prefers the hotspot/wifi interface (ap, wlan, swlan)
-   * since when hosting that is the address guests on the hotspot can reach. Returns null if none.
+   * Interface name → transport of the ConnectivityManager network using it. The SoftAP (and any
+   * tethering interface) is never a network the phone itself uses, so it is absent here — that
+   * absence is how a hotspot `wlan1` is told apart from the station `wlan0`.
    */
-  private fun hostIpAddress(): String? = try {
-    val candidates = NetworkInterface.getNetworkInterfaces().toList()
+  @Suppress("DEPRECATION") // getAllNetworks: a one-shot snapshot is all we need, no callback
+  private fun transportsByInterface(): Map<String, String> {
+    val ctx = appContext.reactContext ?: return emptyMap()
+    val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return emptyMap()
+    val out = HashMap<String, String>()
+    for (network in cm.allNetworks) {
+      runCatching {
+        val name = cm.getLinkProperties(network)?.interfaceName ?: return@runCatching
+        val caps = cm.getNetworkCapabilities(network) ?: return@runCatching
+        out[name] = when {
+          caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
+          caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+          caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+          caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+          else -> "other"
+        }
+      }
+    }
+    return out
+  }
+
+  /** Every up, non-loopback IPv4 (link-local excluded) with its interface's owning transport. */
+  private fun networkCandidates(): List<NetCandidate> = try {
+    val transports = runCatching { transportsByInterface() }.getOrDefault(emptyMap())
+    NetworkInterface.getNetworkInterfaces().toList()
       .filter { it.isUp && !it.isLoopback }
       .flatMap { nif ->
         nif.inetAddresses.toList()
-          .filter { !it.isLoopbackAddress && it is Inet4Address }
-          .mapNotNull { addr -> addr.hostAddress?.let { nif.name to it } }
+          .filter { it is Inet4Address && !it.isLoopbackAddress && !it.isLinkLocalAddress && !it.isAnyLocalAddress }
+          .mapNotNull { addr -> addr.hostAddress?.let { NetCandidate(nif.name, it, transports[nif.name] ?: "none") } }
       }
-    val preferred = candidates.firstOrNull { (_, ip) -> ip.startsWith("192.168.43.") }
-      ?: candidates.firstOrNull { (name, _) ->
-        name.startsWith("ap") || name.startsWith("softap") || name.startsWith("tether") || name.startsWith("swlan") || name.startsWith("wlan")
-      }
-    (preferred ?: candidates.firstOrNull())?.second
   } catch (e: Exception) {
-    null
+    emptyList()
+  }
+
+  /**
+   * Best-effort LAN IPv4 of this device (kept for older JS; the store ranks getNetworkCandidates
+   * itself — same order): the hotspot interface (a wlan/ap interface no network owns), then the
+   * Wi-Fi station, then any other reachable link. Never cellular or VPN. Null if none.
+   */
+  private fun hostIpAddress(): String? {
+    val usable = networkCandidates().filter { it.transport != "cellular" && it.transport != "vpn" }
+    val apName = Regex("^(wlan|swlan|ap|softap|wigig|tether)", RegexOption.IGNORE_CASE)
+    val hotspot = usable.firstOrNull { it.transport == "none" && (apName.containsMatchIn(it.iface) || it.ip.startsWith("192.168.43.")) }
+    return (hotspot ?: usable.firstOrNull { it.transport == "wifi" } ?: usable.firstOrNull())?.ip
   }
 
   /** Open a raw byte stream over the picked media, whichever URI scheme the picker returned. */

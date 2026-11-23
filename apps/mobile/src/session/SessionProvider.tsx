@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { PermissionsAndroid, Platform } from 'react-native'
+import { AppState, PermissionsAndroid, Platform } from 'react-native'
 import * as DocumentPicker from 'expo-document-picker'
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
 import * as LegacyFS from 'expo-file-system/legacy'
@@ -29,6 +29,7 @@ import {
 import RailReelHost from '../../modules/railreel-host'
 import { openSyncSession, SyncCancelledError, type SyncSession } from '@/net/syncClient'
 import { reconnectDelayMs } from '@/lib/net/backoff'
+import { pickHostNetwork, sameHostNetwork, type HostNetwork } from '@/lib/net/hostNetwork'
 import {
   isTransferStalled,
   MAX_INTEGRITY_RETRIES,
@@ -141,6 +142,9 @@ const SUBTITLE_PULL_GAP_MS = 2000
 /** A stalled follower that hasn't sent a heartbeat in this long is treated as gone — clear its
  *  stall so it can't hang the room (followers beat every ~500ms during playback). */
 const STALE_BEAT_MS = 4000
+/** Host: how often the invite's address is re-checked while the app is in the foreground (the
+ *  hotspot can come up, or the phone hop networks, without the app hearing about it). */
+const HOST_NETWORK_POLL_MS = 3000
 /** Give up reconnecting (and tear down) after this many failed attempts. */
 const MAX_RECONNECT_ATTEMPTS = 8
 /** Chat history cap (older lines scroll off; this is a cabin, not an archive). */
@@ -152,6 +156,7 @@ const REACTION_SEND_GAP_MS = 250
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 export type Role = 'none' | 'host' | 'client'
+export type { HostNetwork, HostNetworkKind } from '@/lib/net/hostNetwork'
 
 /** A person in the lobby, as the UI needs them (grant stays host-side only, never in state). */
 export type Participant = {
@@ -196,6 +201,14 @@ export interface SessionStore {
   joinUrl: string | null
   joinCode: string | null
   hostIp: string | null
+  /**
+   * Host: the address the invite (joinUrl/QR) carries and what kind of link it is — 'hotspot'
+   * (this phone's SoftAP: the normal case), 'wifi' (a Wi-Fi network this phone is a client of;
+   * only guests on that same network can reach it) or 'other' (USB tether, ethernet…). null when
+   * no reachable address exists (then joinUrl is null too). Re-read on foreground, every few
+   * seconds while hosting, and by refreshJoin(); joinUrl is rebuilt whenever it changes.
+   */
+  hostNetwork: HostNetwork | null
 
   // client
   clientPhase: ClientPhase
@@ -234,7 +247,7 @@ export interface SessionStore {
 
   // actions
   startHost: () => Promise<void>
-  /** Recompute the join link from the current device IP (call after enabling the hotspot). */
+  /** Re-read the host network now and rebuild the join link (also runs automatically). */
   refreshJoin: () => void
   /** Host: publish a new playback state (play/pause/seek), stamped + broadcast to clients. */
   setHostPlayback: (positionSec: number, isPlaying: boolean, rate?: number, ended?: boolean) => void
@@ -333,6 +346,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [joinUrl, setJoinUrl] = useState<string | null>(null)
   const [joinCode, setJoinCode] = useState<string | null>(null)
   const [hostIp, setHostIp] = useState<string | null>(null)
+  const [hostNetwork, setHostNetwork] = useState<HostNetwork | null>(null)
+  const hostNetworkRef = useRef<HostNetwork | null>(null)
 
   const [clientPhase, setClientPhase] = useState<ClientPhase>('idle')
   const [progress, setProgress] = useState(0)
@@ -1138,7 +1153,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (stale()) return abandon()
 
       joinMetaRef.current = { sessionId, token, httpPort: ports.httpPort, wsPort: ports.wsPort }
-      const ip = RailReelHost.getHostIpAddress()
+      const net = currentHostNetwork()
+      const ip = net?.ip ?? null
+      hostNetworkRef.current = net
+      setHostNetwork(net)
       setHostIp(ip)
 
       // Tap-to-join: advertise the session on mDNS. The TXT mirrors the QR payload (the host IP
@@ -1218,15 +1236,37 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [updateParticipants, resetTransfer, broadcastRoster, clearSubtitle])
 
-  // Re-read the device IP and rebuild the join link — call after enabling the hotspot, when the
-  // reachable address may have changed (or only just appeared).
+  // Re-read the host network and rebuild the join link when it changed — the hotspot coming up
+  // after the session was created, or the phone hopping networks, must never leave the QR
+  // pointing at a dead address. Cheap (an interface scan), and a no-op render-wise when nothing
+  // changed, so it runs on foreground + on a short poll while hosting (below) and on demand.
   const refreshJoin = useCallback(() => {
     const meta = joinMetaRef.current
     if (!meta) return
-    const ip = RailReelHost.getHostIpAddress()
-    setHostIp(ip)
-    setJoinUrl(ip ? encodeJoinUrl(buildJoinPayload(meta, ip)) : null)
+    const net = currentHostNetwork()
+    if (sameHostNetwork(net, hostNetworkRef.current)) return
+    hostNetworkRef.current = net
+    setHostNetwork(net)
+    setHostIp(net?.ip ?? null)
+    setJoinUrl(net ? encodeJoinUrl(buildJoinPayload(meta, net.ip)) : null)
   }, [])
+
+  // There is no connectivity event for "this phone's hotspot came up" short of a native
+  // callback; returning from Settings (foreground) plus a light poll covers it.
+  useEffect(() => {
+    if (role !== 'host') return
+    refreshJoin()
+    const poll = setInterval(() => {
+      if (AppState.currentState === 'active') refreshJoin()
+    }, HOST_NETWORK_POLL_MS)
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') refreshJoin()
+    })
+    return () => {
+      clearInterval(poll)
+      sub.remove()
+    }
+  }, [role, refreshJoin])
 
   // Host: publish playback. Stamp it with the host's monotonic clock (the timebase clients sync
   // against) so a follower can compute where the playhead should be right now.
@@ -2305,6 +2345,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setJoinUrl(null)
     setJoinCode(null)
     setHostIp(null)
+    hostNetworkRef.current = null
+    setHostNetwork(null)
     setHostPhase('idle')
     setClientPhase('idle')
     setPlayback(null)
@@ -2379,6 +2421,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       joinUrl,
       joinCode,
       hostIp,
+      hostNetwork,
       clientPhase,
       progress,
       hostName,
@@ -2420,7 +2463,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       getCacheInfo,
       purgeCache,
     }),
-    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, userLeftShow, exitShow, enterShow, retryDownload, dismissEnd, subtitle, attachSubtitle, removeSubtitle, pendingPlaybackRequests, handlePlaybackRequest, playbackRequestStatus, sendPlaybackRequest, clearPlaybackRequestStatus, registerHostTransport, cacheStatus, getCacheInfo, purgeCache],
+    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, hostNetwork, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, userLeftShow, exitShow, enterShow, retryDownload, dismissEnd, subtitle, attachSubtitle, removeSubtitle, pendingPlaybackRequests, handlePlaybackRequest, playbackRequestStatus, sendPlaybackRequest, clearPlaybackRequestStatus, registerHostTransport, cacheStatus, getCacheInfo, purgeCache],
   )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
@@ -2431,6 +2474,18 @@ const clamp01 = (n: number): number => (!Number.isFinite(n) || n < 0 ? 0 : n > 1
 /** Client monotonic clock — must match openSyncSession's timebase so the offset maps correctly. */
 const nowMs = (): number =>
   typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
+
+/** The invite's address right now (lib/net/hostNetwork ranks what the native side reports). */
+function currentHostNetwork(): HostNetwork | null {
+  try {
+    if (typeof RailReelHost.getNetworkCandidates === 'function') return pickHostNetwork(RailReelHost.getNetworkCandidates())
+    // A dev-client binary from before getNetworkCandidates: the address, kind unknown.
+    const ip = RailReelHost.getHostIpAddress()
+    return ip ? { ip, kind: 'other', iface: '' } : null
+  } catch {
+    return null
+  }
+}
 
 /** Build the join payload from the session meta + the currently-reachable IP. */
 function buildJoinPayload(
