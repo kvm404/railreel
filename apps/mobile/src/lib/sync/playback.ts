@@ -166,3 +166,32 @@ export function decideCorrection(p: CorrectionParams): Correction {
   const rate = baseRate + clamp(drift * gain, -maxNudge, maxNudge)
   return { action: 'play', rate }
 }
+
+/** The native player's own status, as expo-video reports it. */
+export type NativePlayerStatus = 'idle' | 'loading' | 'readyToPlay' | 'error'
+
+/**
+ * Host: did the native player stop on its own? Audio-focus loss (a call, another app), the OS
+ * backgrounding us, or a decode error can pause expo-video without our transport knowing — and
+ * then the 2s re-stamp keeps telling followers "playing" around a frozen position, so they run
+ * ahead and get yanked back over and over.
+ *
+ * ExoPlayer also reports not-playing while it REBUFFERS (status `loading`) or before the source
+ * is prepared (`idle`), which is not a pause — so those are `wait` (look again shortly), and only
+ * a settled not-playing player (`readyToPlay`) or a failed one (`error`) counts. Reaching the end
+ * is handled by playToEnd and is never reconciled here (it would clear "The End").
+ */
+export type NativePauseVerdict = 'reconcile' | 'wait' | 'none'
+export function nativePauseVerdict(p: {
+  /** The host transport believes the show is playing. */
+  intendsPlaying: boolean
+  /** expo-video's `playing` right now. */
+  nativePlaying: boolean
+  status: NativePlayerStatus
+  /** The playhead is at (or within a hair of) the end of the movie. */
+  atEnd: boolean
+}): NativePauseVerdict {
+  if (!p.intendsPlaying || p.nativePlaying || p.atEnd) return 'none'
+  if (p.status === 'loading' || p.status === 'idle') return 'wait'
+  return 'reconcile'
+}

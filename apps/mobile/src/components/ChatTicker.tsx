@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
-import { StyleSheet, View } from 'react-native'
-import Animated, { FadeInDown, FadeOut } from 'react-native-reanimated'
+import { memo, useEffect, useState } from 'react'
+import { StyleSheet } from 'react-native'
+import Animated, { FadeInDown, FadeOut, useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
 import { Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { tickerWindow, type ChatEntry } from '@/lib/social/feed'
@@ -9,11 +9,28 @@ import { tickerWindow, type ChatEntry } from '@/lib/social/feed'
  * Subtitle-style chat: the last few FRESH lines fade in at the bottom-left of the film — like
  * subtitles from the cabin — and melt away after a few seconds. History lives in the ChatSheet;
  * the film stays king. Mono sender name in filament amber (people are warm), body in primary.
+ *
+ * Placement comes from the Player's overlay layout (its reserved social region); `lift` rides
+ * the chrome curtain on the UI thread so the lines glide clear of the transport when it opens.
  */
 
 const TICK_MS = 1000
 
-export function ChatTicker({ log }: { log: ChatEntry[] }) {
+export const ChatTicker = memo(function ChatTicker({
+  log,
+  bottom = 120,
+  left = 16,
+  right = 110,
+  lift,
+}: {
+  log: ChatEntry[]
+  bottom?: number
+  left?: number
+  /** Keep clear of the floating-reaction lane on the right edge. */
+  right?: number
+  /** Extra upward offset (px), animated with the chrome. */
+  lift?: SharedValue<number>
+}) {
   const t = useTheme()
   const [now, setNow] = useState(() => Date.now())
 
@@ -23,33 +40,30 @@ export function ChatTicker({ log }: { log: ChatEntry[] }) {
     return () => clearInterval(id)
   }, [])
 
+  const liftStyle = useAnimatedStyle(() => ({ transform: [{ translateY: lift ? -lift.value : 0 }] }))
+
   const lines = tickerWindow(log, now)
   if (lines.length === 0) return null
 
   return (
-    <View pointerEvents="none" style={styles.stack}>
+    <Animated.View pointerEvents="none" style={[styles.stack, { bottom, left, right }, liftStyle]}>
       {lines.map((l) => (
-        <Animated.View key={`${l.at}-${l.from}`} entering={FadeInDown.duration(180)} exiting={FadeOut.duration(240)} style={styles.line}>
-          <Text variant="data" style={{ color: t.palette.amber }} numberOfLines={1}>
+        <Animated.View key={l.id} entering={FadeInDown.duration(180)} exiting={FadeOut.duration(240)} style={styles.line}>
+          <Text variant="data" style={[styles.sender, { color: t.palette.amber }]} numberOfLines={1}>
             {l.from.toLowerCase()}
           </Text>
-          <Text variant="caption" style={styles.text} numberOfLines={2}>
+          <Text variant="caption" style={[styles.text, { textShadowColor: t.palette.void }]} numberOfLines={2}>
             {l.text}
           </Text>
         </Animated.View>
       ))}
-    </View>
+    </Animated.View>
   )
-}
+})
 
 const styles = StyleSheet.create({
-  stack: {
-    position: 'absolute',
-    left: 16,
-    right: 110, // stay clear of the reaction lane
-    bottom: 120,
-    gap: 6,
-  },
+  stack: { position: 'absolute', gap: 6 },
   line: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
-  text: { flexShrink: 1, textShadowColor: 'rgba(0,0,0,0.8)', textShadowRadius: 6 },
+  sender: { maxWidth: '40%', flexShrink: 0 },
+  text: { flexShrink: 1, textShadowRadius: 6 },
 })

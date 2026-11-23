@@ -1,78 +1,74 @@
-import { useEffect, useState } from 'react'
-import { Pressable, StyleSheet, View } from 'react-native'
+import { memo, useEffect, useState } from 'react'
+import { StyleSheet, View } from 'react-native'
+import Animated, { Easing, useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from 'react-native-reanimated'
 import { Check, Pause, RotateCcw, X } from 'lucide-react-native'
 import { Text } from '@/ui'
+import { IconButton } from '@/ui/IconButton'
+import { withAlpha } from '@/ui/alpha'
 import { useTheme } from '@/theme/ThemeProvider'
 import { radii, spacing } from '@/theme/tokens'
+import { fractionLeft, secondsLeft } from '@/lib/social/countdown'
 import type { PendingPlaybackRequest } from '@/session/SessionProvider'
 
 export interface ModerationBannerProps {
   request: PendingPlaybackRequest | null
   onApprove: (requestId: string) => void
   onDismiss: (requestId: string) => void
-  /** Auto-dismiss timeout in milliseconds. Defaults to 10,000 (10s). */
+  /** The store's auto-dismiss window (it owns the timer; this only displays it). Defaults to 10s. */
   autoDismissMs?: number
 }
 
+const TICK_MS = 250
+
 /**
- * Host interactive notification banner adhering to the "Night Train" visual design system.
- *
- * Appears when a follower submits a transport request (pause or rewind). Displays the requester's
- * name, requested action, countdown, and Approve / Dismiss action buttons. Automatically dismisses
- * after 10 seconds if unhandled.
+ * Host prompt for a follower's transport request (pause / rewind): who asked, what, a countdown
+ * and Approve / Dismiss. The countdown is derived from the request's arrival time (see
+ * lib/social/countdown), so parent re-renders can't reset it and it always agrees with the
+ * session store, which owns the actual auto-dismiss. A thin amber fuse drains along the bottom
+ * edge (static under reduce-motion).
  */
-export function ModerationBanner({
+export const ModerationBanner = memo(function ModerationBanner({
   request,
   onApprove,
   onDismiss,
   autoDismissMs = 10_000,
 }: ModerationBannerProps) {
   const t = useTheme()
-  const [secondsRemaining, setSecondsRemaining] = useState(Math.ceil(autoDismissMs / 1000))
+  const reduced = useReducedMotion()
+  const [now, setNow] = useState(() => Date.now())
+  const fuse = useSharedValue(1)
+  const requestId = request?.requestId
+  const receivedAt = request?.receivedAt ?? 0
 
   useEffect(() => {
-    if (!request) return
+    if (!requestId) return
+    const start = Date.now()
+    setNow(start)
+    const id = setInterval(() => setNow(Date.now()), TICK_MS)
+    // One UI-thread tween for the whole remaining window — no per-frame JS.
+    const left = fractionLeft(receivedAt, start, autoDismissMs)
+    fuse.value = left
+    if (!reduced) fuse.value = withTiming(0, { duration: left * autoDismissMs, easing: Easing.linear })
+    return () => clearInterval(id)
+  }, [requestId, receivedAt, autoDismissMs, reduced, fuse])
 
-    setSecondsRemaining(Math.ceil(autoDismissMs / 1000))
-
-    const countdownInterval = setInterval(() => {
-      setSecondsRemaining((prev) => (prev > 1 ? prev - 1 : 0))
-    }, 1000)
-
-    const dismissTimer = setTimeout(() => {
-      onDismiss(request.requestId)
-    }, autoDismissMs)
-
-    return () => {
-      clearInterval(countdownInterval)
-      clearTimeout(dismissTimer)
-    }
-  }, [request?.requestId, autoDismissMs, onDismiss])
+  const fuseStyle = useAnimatedStyle(() => ({ transform: [{ scaleX: fuse.value }] }))
 
   if (!request) return null
 
   const isRewind = request.action === 'rewind'
   const rewindSec = request.seconds ?? 15
   const actionText = isRewind ? `wants to rewind ${rewindSec}s` : 'wants to pause'
+  const left = secondsLeft(request.receivedAt, now, autoDismissMs)
 
   return (
     <View
-      style={[
-        styles.container,
-        {
-          backgroundColor: t.palette.raised,
-          borderColor: t.palette.hairline,
-        },
-      ]}
+      style={[styles.container, { backgroundColor: t.palette.raised, borderColor: t.palette.hairline }]}
       accessibilityRole="alert"
+      accessibilityLabel={`${request.requesterName} ${actionText}`}
     >
       <View style={styles.contentRow}>
-        <View
-          style={[
-            styles.iconContainer,
-            { backgroundColor: 'rgba(255, 178, 92, 0.15)', borderColor: t.palette.amber },
-          ]}
-        >
+        <View style={[styles.iconContainer, { backgroundColor: withAlpha(t.palette.amber, 0.15), borderColor: t.palette.amber }]}>
           {isRewind ? (
             <RotateCcw size={18} color={t.palette.amber} strokeWidth={2.2} />
           ) : (
@@ -89,66 +85,49 @@ export function ModerationBanner({
           </Text>
         </View>
 
-        <View style={styles.timerBadge}>
-          <Text variant="eyebrow" tone="tertiary">
-            {secondsRemaining}s
-          </Text>
-        </View>
+        <Text variant="eyebrow" tone="secondary" accessibilityLabel={`${left} seconds left`}>
+          {`${left}s`}
+        </Text>
       </View>
 
       <View style={styles.actionRow}>
-        <Pressable
+        <IconButton
+          variant="ghost"
+          size={40}
+          label="Dismiss"
+          radius={radii.md}
+          icon={(c) => <X size={15} color={c} strokeWidth={2} />}
+          accessibilityLabel={`Dismiss ${request.requesterName}'s request`}
           onPress={() => onDismiss(request.requestId)}
-          hitSlop={8}
-          accessibilityRole="button"
-          accessibilityLabel="Dismiss playback request"
-          style={[styles.btn, styles.dismissBtn, { borderColor: t.palette.hairline }]}
-        >
-          <X size={15} color={t.palette.textSecondary} strokeWidth={2} />
-          <Text variant="caption" tone="secondary" style={styles.btnText}>
-            Dismiss
-          </Text>
-        </Pressable>
-
-        <Pressable
+        />
+        <IconButton
+          variant="amber"
+          size={40}
+          label="Approve"
+          radius={radii.md}
+          icon={(c) => <Check size={15} color={c} strokeWidth={2.5} />}
+          accessibilityLabel={isRewind ? `Approve: rewind ${rewindSec} seconds` : 'Approve: pause for everyone'}
           onPress={() => onApprove(request.requestId)}
-          hitSlop={8}
-          accessibilityRole="button"
-          accessibilityLabel="Approve playback request"
-          style={[
-            styles.btn,
-            styles.approveBtn,
-            { backgroundColor: t.palette.amber, borderColor: t.palette.amberGlow },
-          ]}
-        >
-          <Check size={15} color="#0A0E16" strokeWidth={2.5} />
-          <Text variant="caption" style={[styles.btnText, { color: '#0A0E16', fontWeight: '700' }]}>
-            Approve
-          </Text>
-        </Pressable>
+        />
       </View>
+
+      {reduced ? null : (
+        <Animated.View pointerEvents="none" style={[styles.fuse, { backgroundColor: t.palette.amber }, fuseStyle]} />
+      )}
     </View>
   )
-}
+})
 
 const styles = StyleSheet.create({
   container: {
-    marginHorizontal: spacing.lg,
     borderRadius: radii.lg,
     borderWidth: 1,
     padding: spacing.md,
     gap: spacing.sm,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 10,
+    overflow: 'hidden',
     elevation: 6,
   },
-  contentRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-  },
+  contentRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   iconContainer: {
     width: 36,
     height: 36,
@@ -157,35 +136,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  textContainer: {
-    flex: 1,
-  },
-  timerBadge: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radii.sm,
-  },
-  actionRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    justifyContent: 'flex-end',
-    marginTop: 2,
-  },
-  btn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingHorizontal: spacing.md,
-    height: 34,
-    borderRadius: radii.md,
-    borderWidth: 1,
-  },
-  dismissBtn: {
-    backgroundColor: 'transparent',
-  },
-  approveBtn: {},
-  btnText: {
-    fontFamily: 'SpaceGrotesk_500Medium',
+  textContainer: { flex: 1 },
+  actionRow: { flexDirection: 'row', gap: spacing.sm, justifyContent: 'flex-end', marginTop: 2 },
+  fuse: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: 2,
+    transformOrigin: 'left',
   },
 })

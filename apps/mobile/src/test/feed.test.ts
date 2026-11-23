@@ -3,15 +3,17 @@ import {
   appendCapped,
   CHAT_MAX_CHARS,
   isValidReaction,
+  lastChatId,
   liveReactions,
   reactionLane,
   sanitizeChatText,
   tickerWindow,
+  unreadCount,
   type ChatEntry,
   type ReactionEvent,
 } from '@/lib/social/feed'
 
-const line = (at: number, text = 'hi'): ChatEntry => ({ from: 'asha', text, at })
+const line = (at: number, text = 'hi', id = at): ChatEntry => ({ id, from: 'asha', text, at })
 const rx = (seq: number, at: number): ReactionEvent => ({ seq, from: 'ben', emoji: '❤️', at })
 
 describe('sanitizeChatText', () => {
@@ -59,6 +61,38 @@ describe('tickerWindow', () => {
 
   it('is empty when everything has faded', () => {
     expect(tickerWindow([line(1000)], 60_000)).toEqual([])
+  })
+})
+
+describe('unread cursor', () => {
+  const entry = (id: number, from = 'asha'): ChatEntry => ({ id, from, text: `m${id}`, at: id })
+
+  it('counts lines newer than the cursor', () => {
+    const log = [entry(1), entry(2), entry(3)]
+    expect(unreadCount(log, 1)).toBe(2)
+    expect(unreadCount(log, lastChatId(log))).toBe(0)
+  })
+
+  it('never counts our own lines', () => {
+    expect(unreadCount([entry(1), entry(2, 'You'), entry(3)], 0)).toBe(2)
+  })
+
+  it('keeps counting after the capped log starts dropping old lines (length no longer changes)', () => {
+    const CAP = 3
+    let log: ChatEntry[] = []
+    for (let id = 1; id <= CAP; id++) log = appendCapped(log, entry(id), CAP)
+    const seen = lastChatId(log) // reader caught up at the cap
+    for (let id = CAP + 1; id <= CAP + 2; id++) log = appendCapped(log, entry(id), CAP)
+    expect(log.length).toBe(CAP) // a length diff would say 0
+    expect(unreadCount(log, seen)).toBe(2)
+  })
+
+  it('reports everything when the cursor fell off the front of the log', () => {
+    expect(unreadCount([entry(50), entry(51)], 3)).toBe(2)
+  })
+
+  it('lastChatId falls back on an empty log', () => {
+    expect(lastChatId([], 7)).toBe(7)
   })
 })
 

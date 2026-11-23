@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { decideCorrection, nextSeekLead, roomGate, stallReport, targetPositionSec } from '@/lib/sync/playback'
+import { decideCorrection, nativePauseVerdict, nextSeekLead, roomGate, stallReport, targetPositionSec } from '@/lib/sync/playback'
 import type { PlaybackState } from '@/lib/protocol'
 
 const state = (over: Partial<PlaybackState> = {}): PlaybackState => ({
@@ -256,5 +256,28 @@ describe('stallReport', () => {
   it('honors a custom grace window', () => {
     expect(stallReport(true, 1000, 1300, 200).stalled).toBe(true)
     expect(stallReport(true, 1000, 1100, 200).stalled).toBe(false)
+  })
+})
+
+describe('nativePauseVerdict', () => {
+  const base = { intendsPlaying: true, nativePlaying: false, status: 'readyToPlay' as const, atEnd: false }
+
+  it('reconciles a settled native pause the transport did not ask for (audio focus, background)', () => {
+    expect(nativePauseVerdict(base)).toBe('reconcile')
+  })
+
+  it('reconciles a playback error — the host must stop advertising "playing"', () => {
+    expect(nativePauseVerdict({ ...base, status: 'error' })).toBe('reconcile')
+  })
+
+  it('waits out a rebuffer or an unprepared source instead of pausing the room', () => {
+    expect(nativePauseVerdict({ ...base, status: 'loading' })).toBe('wait')
+    expect(nativePauseVerdict({ ...base, status: 'idle' })).toBe('wait')
+  })
+
+  it('does nothing when the states agree, or at the end of the movie', () => {
+    expect(nativePauseVerdict({ ...base, nativePlaying: true })).toBe('none')
+    expect(nativePauseVerdict({ ...base, intendsPlaying: false })).toBe('none')
+    expect(nativePauseVerdict({ ...base, atEnd: true })).toBe('none')
   })
 })
