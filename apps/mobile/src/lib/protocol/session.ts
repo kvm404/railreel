@@ -40,11 +40,16 @@ export interface MediaInfo {
   /** Android mime of the first video / audio track (e.g. "video/avc"). Guests check THEIR decoder against the real codec; absent from older hosts → assume H.264. */
   videoMime?: string
   audioMime?: string
-  /** Sidecar subtitle metadata attached by the host. */
+  /**
+   * Sidecar subtitle METADATA attached by the host — never the body (the roster is re-broadcast
+   * constantly; the SRT goes once per revision in a `subtitle` message). See ./subtitle.ts.
+   */
   subtitle?: {
     name: string
+    /** Real UTF-8 bytes of the SRT body. */
     sizeBytes: number
-    content?: string
+    /** Content revision (subtitleRev) — a guest reloads when this changes, not when the name does. */
+    rev: string
   }
 }
 
@@ -96,4 +101,15 @@ export interface ParticipantInfo {
   decodeOk?: boolean
 }
 
-export const PROTOCOL_VERSION = 1
+/**
+ * Wire protocol version, carried in every join link / QR / mDNS advert and checked on decode.
+ * Bump it for any change an older peer would misread — the mismatched side then refuses the
+ * join up front with a clear "update both phones" message instead of half-working.
+ *  - 1: v0.1.0.
+ *  - 2: subtitles distributed by revision — the roster carries only {name, sizeBytes, rev}, and
+ *    the body is pushed once / pulled via `subtitleRequest`. A v1 guest would never pull it;
+ *    a v2 guest would read a v1 roster (no `rev`) as "no subtitle". Ships alongside the
+ *    connection-bound host control plane (identity bound by `join`, approved-only broadcasts,
+ *    targeted sends), whose messages are unchanged on the wire.
+ */
+export const PROTOCOL_VERSION = 2

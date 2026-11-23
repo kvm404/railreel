@@ -4,20 +4,41 @@ import * as DocumentPicker from 'expo-document-picker'
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
 import * as LegacyFS from 'expo-file-system/legacy'
 import {
+  awaitOwnership,
   clearSessionCache,
   configureCacheStorage,
   createExpoFileSystemAdapter,
+  createOwnershipQueue,
+  type OwnershipQueue,
+  encodeKeptMovieMeta,
+  findKeptCacheFiles,
   getCacheStatus,
   getMovieCachePath,
+  getMovieMetaPath,
   getSubtitleCachePath,
+  isKeptMovieIntact,
+  keptReuseDecision,
+  parseKeptMovieMeta,
   sweepOrphanCache,
   type CacheStatus,
   type ClearCacheResult,
+  type OrphanSweepResult,
 } from '@/lib/storage'
 
 import RailReelHost from '../../modules/railreel-host'
 import { openSyncSession, type SyncSession } from '@/net/syncClient'
 import { reconnectDelayMs } from '@/lib/net/backoff'
+import {
+  isTransferStalled,
+  MAX_INTEGRITY_RETRIES,
+  MAX_TRANSFER_RETRIES,
+  resumeOffset,
+  shouldAutoResume,
+  retriesAfterFailure,
+  unvalidatedProgress,
+  transferResultOk,
+  transferRetryDelayMs,
+} from '@/lib/net/transfer'
 import {
   appendCapped,
   isValidReaction,
@@ -35,15 +56,26 @@ import {
   generateGrant,
   generateSessionId,
   isMediaInfo,
+  isSubtitleMeta,
   isValidSecret,
+  isVersionMismatch,
+  VERSION_MISMATCH_MESSAGE,
+  needsSubtitleFetch,
   newSession,
   parseClientMsg,
   parseServerMsg,
+  parseSubtitlePayload,
+  recordSubtitlePull,
+  SUBTITLE_PULL_TIMEOUT_MS,
   PROTOCOL_VERSION,
+  subtitleMeta,
+  subtitleRev,
   type JoinPayload,
   type MediaInfo,
   type ParticipantInfo,
   type PlaybackState,
+  type SubtitleMeta,
+  type SubtitlePull,
 } from '@/lib/protocol'
 import { parseSrt, type SubtitleCue } from '@/lib/subtitles'
 import {
@@ -80,7 +112,29 @@ const CACHE_DIR = LegacyFS.cacheDirectory ?? ''
 const fsAdapter = createExpoFileSystemAdapter(LegacyFS)
 configureCacheStorage(CACHE_DIR, fsAdapter)
 const MOVIE_CACHE = getMovieCachePath(CACHE_DIR)
+const MOVIE_META = getMovieMetaPath(CACHE_DIR) // "Keep & Leave" identity record (lib/storage/keptCache)
 const SUBTITLE_CACHE = getSubtitleCachePath(CACHE_DIR)
+/** Kept-copy reuse: how long to wait for the roster carrying the host's fingerprint. */
+const KEPT_HASH_WAIT_MS = 3000
+/** A new transfer attempt waits this long for the previous one to settle before giving up (it
+ *  then errors + retries; it never shares MOVIE_CACHE with a possibly-live writer). */
+const PREV_ATTEMPT_CEILING_MS = 30_000
+/**
+ * Who may touch MOVIE_CACHE right now: the startup sweep and every transfer attempt queue here.
+ * MODULE scope on purpose — a remounted provider (StrictMode, a Fast Refresh of this module)
+ * must inherit an outstanding owner whose native writer may still be running (see
+ * lib/storage/ownership). Pinned on globalThis so a Fast Refresh re-evaluating this module keeps
+ * the same queue; a full JS reload starts fresh (nothing in JS survives it).
+ */
+const cacheGlobals = globalThis as {
+  __railreelMovieCacheOwner?: OwnershipQueue
+  __railreelStartupSweep?: Promise<OrphanSweepResult>
+}
+const movieCacheOwner = (cacheGlobals.__railreelMovieCacheOwner ??= createOwnershipQueue())
+/** A guest's playback request with no decision by now is shown as dismissed (decision lost). */
+const PLAYBACK_REQUEST_DEADLINE_MS = 12_000
+/** Host: ignore a guest's repeat pull of the same subtitle revision within this window. */
+const SUBTITLE_PULL_GAP_MS = 2000
 /** A stalled follower that hasn't sent a heartbeat in this long is treated as gone — clear its
  *  stall so it can't hang the room (followers beat every ~500ms during playback). */
 const STALE_BEAT_MS = 4000
@@ -238,6 +292,8 @@ export interface HostTransportHandler {
 export interface SubtitleState {
   name: string
   content: string
+  /** Content revision (subtitleRev) — identity for reloads, so a same-name replacement isn't missed. */
+  rev: string
   cues: SubtitleCue[]
 }
 
@@ -337,9 +393,64 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Playback-proxy lifecycle (client). 'starting' claims synchronously so racing progress
   // callbacks can't double-start; 'failed' pins the pre-cache fallback (no native retry storm).
   const proxyStateRef = useRef<'idle' | 'starting' | 'up' | 'failed'>('idle')
+  // Proxy generation: bumped whenever the proxy must let go of the file (fresh restart, session
+  // reset). An in-flight startProxy from an older generation must not publish its URL; it stops
+  // the proxy it started only if no newer start has been issued since (stopProxy is global).
+  const proxyGenRef = useRef(0)
+  const proxyIssuedGenRef = useRef(0)
+  const proxyStartRef = useRef<Promise<void> | null>(null)
+  // Transfer attempt generation: bumped by resetTransfer and by a forced restart, so every await
+  // in a superseded attempt bails without touching state, telemetry or MOVIE_CACHE.
+  const attemptRef = useRef(0)
+  // (The cache-ownership queue every attempt joins is module-level: movieCacheOwner.)
+  // Epoch whose transfer wrote the partial MOVIE_CACHE (null: none, or not a clean prefix). Only
+  // that partial may be resumed with a Range request.
+  const partialEpochRef = useRef<number | null>(null)
+  // The stall watchdog's clocks: when this attempt's request went out, and its latest progress
+  // event (0 = no byte yet → the longer initial-response grace applies).
+  const transferStartedAtRef = useRef(0)
+  const lastProgressAtRef = useRef(0)
+  // Consecutive fully-downloaded copies that failed validation — a separate, small budget
+  // (lib/net/transfer MAX_INTEGRITY_RETRIES); discarded bytes never earn retry credit.
+  const integrityFailuresRef = useRef(0)
+  // Bytes the running attempt has pulled beyond its resume offset (retry credit, see transfer.ts).
+  const attemptBytesRef = useRef(0)
+  // The provider has unmounted: socket handlers, timers and async entry points must not act.
+  const disposedRef = useRef(false)
+  // The movie is cached AND validated (status, size, fingerprint). Byte progress is capped below 1
+  // until then, so neither the host nor the retry logic mistakes "all bytes read" for "ready".
+  const completeRef = useRef(false)
+  // An automatic retry's backoff elapsed while the WS was re-handshaking; reconnect fires it.
+  const retryPendingRef = useRef(false)
+  const transferRetriesRef = useRef(0) // automatic retries spent in the current failure streak
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const startDownloadRef = useRef<(opts?: { resume?: boolean }) => Promise<void>>(async () => {})
+  // Subtitles (client): the roster's latest subtitle metadata, and our outstanding pull on this
+  // connection (so a roster storm can't become a request storm, yet a lost reply is re-asked).
+  const rosterSubtitleRef = useRef<SubtitleMeta | null>(null)
+  const subtitlePullRef = useRef<SubtitlePull | null>(null)
+  const subtitlePullTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Subtitles (host): last pull answered per CONNECTION (a rebind after a reconnect is a new
+  // connection, so its request is never suppressed by the dead socket's cooldown).
+  const subtitlePullsRef = useRef<Map<string, { rev: string; at: number }>>(new Map())
+  const sendSubtitleToRef = useRef<(id: string) => void>(() => {})
+  // Guest playback request still awaiting a decision (cleared on decision, deadline, reconnect).
+  const requestDeadlineRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
+    // Mount (and StrictMode's re-mount, which reuses these refs): we're live again.
+    disposedRef.current = false
     return () => {
+      // Disposed: socket handlers, reconnect, timers and async entry points all check this.
+      disposedRef.current = true
+      leavingRef.current = true // no reconnect loop may start (or continue) from a dead provider
+      reconnectingRef.current = false
+      if (clientRef.current) {
+        clientRef.current.session.close()
+        clientRef.current = null
+      }
+      if (subtitlePullTimerRef.current) clearTimeout(subtitlePullTimerRef.current)
+      subtitlePullTimerRef.current = null
       if (stopTimerRef.current) {
         clearTimeout(stopTimerRef.current)
         stopTimerRef.current = null
@@ -350,6 +461,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         clearTimeout(dismissToastTimerRef.current)
         dismissToastTimerRef.current = null
       }
+      if (requestDeadlineRef.current) clearTimeout(requestDeadlineRef.current)
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+      retryTimerRef.current = null
+      // Invalidate ownership: every in-flight continuation (transfer awaits, proxy start, retry
+      // and reconnect timers) checks the epoch/attempt and bails instead of updating a dead
+      // provider or arming new work. The native download is cancelled; its attempt stays in the
+      // module-level movieCacheOwner queue, so a remounted provider waits for the writer to stop.
+      epochRef.current++
+      attemptRef.current++
+      proxyGenRef.current++
+      downloadRef.current?.cancelAsync().catch(() => {})
+      downloadRef.current = null
+      downloadingRef.current = false
     }
   }, [])
 
@@ -425,10 +549,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [])
 
   // ── subtitle helpers ────────────────────────────────────────────────────────
-  const loadSubtitle = useCallback(async (name: string, content: string) => {
+  const loadSubtitle = useCallback(async (name: string, content: string, rev?: string) => {
     try {
       const cues = parseSrt(content)
-      const sub: SubtitleState = { name, content, cues }
+      const sub: SubtitleState = { name, content, rev: rev ?? subtitleRev(content), cues }
       subtitleRef.current = sub
       setSubtitle(sub)
       await LegacyFS.writeAsStringAsync(SUBTITLE_CACHE, content, {
@@ -447,24 +571,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const attachSubtitle = useCallback(
     async (name: string, content: string) => {
-      await loadSubtitle(name, content)
-      if (mediaRef.current) {
-        mediaRef.current = {
-          ...mediaRef.current,
-          subtitle: {
-            name,
-            sizeBytes: content.length,
-            content,
-          },
-        }
-      }
+      const meta = subtitleMeta(name, content)
+      await loadSubtitle(name, content, meta.rev)
+      // The roster carries only metadata (it's re-broadcast on every download percent); the body
+      // goes out once here, and again to any guest that pulls the revision (sendSubtitleTo).
+      if (mediaRef.current) mediaRef.current = { ...mediaRef.current, subtitle: meta }
       if (roleRef.current === 'host') {
-        RailReelHost.broadcast(JSON.stringify({ t: 'subtitle', name, content })).catch(() => {})
+        subtitlePullsRef.current.clear() // a new revision — every guest may pull it once
+        RailReelHost.broadcast(JSON.stringify({ t: 'subtitle', name, content, rev: meta.rev })).catch(() => {})
         broadcastRoster(participantsRef.current)
       }
     },
     [loadSubtitle, broadcastRoster],
   )
+
 
   const removeSubtitle = useCallback(() => {
     clearSubtitle()
@@ -500,6 +620,31 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     },
     [rosterJson],
   )
+
+  // Host: deliver the current subtitle body to ONE guest, on the connection its identity is bound
+  // to — its pull (`subtitleRequest`, sent when the roster names a revision it lacks: just
+  // approved, or reconnected after a replacement). Only an approved, live guest gets it; each may
+  // pull a given revision once per SUBTITLE_PULL_GAP_MS.
+  const sendSubtitleTo = useCallback(
+    (id: string) => {
+      if (roleRef.current !== 'host' || id === 'host') return
+      const ids = hostIds()
+      const conn = ids.connOf.get(id)
+      if (!conn || !isApproved(ids, id)) return
+      const sub = subtitleRef.current
+      if (!sub) return // nothing attached — the roster (no subtitle) already tells it to clear
+      // Cooldown per CONNECTION: a guest that reconnected (rebound to a new socket) right after
+      // a reply was lost with the old one must get its fresh request answered.
+      const now = Date.now()
+      const last = subtitlePullsRef.current.get(conn)
+      if (last && last.rev === sub.rev && now - last.at < SUBTITLE_PULL_GAP_MS) return
+      if (subtitlePullsRef.current.size > 64) subtitlePullsRef.current.clear() // dead sockets' entries
+      subtitlePullsRef.current.set(conn, { rev: sub.rev, at: now })
+      RailReelHost.sendTo(conn, JSON.stringify({ t: 'subtitle', name: sub.name, content: sub.content, rev: sub.rev })).catch(() => {})
+    },
+    [hostIds],
+  )
+  sendSubtitleToRef.current = sendSubtitleTo
 
   // ── WS event wiring (host side; registered once) ────────────────────────────
   useEffect(() => {
@@ -682,6 +827,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         const name = sender.name ?? 'Guest'
         RailReelHost.broadcast(JSON.stringify({ t: 'reaction', from: name, fromId: msg.id, emoji: msg.emoji, at: Date.now() })).catch(() => {})
         ingestReaction(name, msg.emoji)
+      } else if (msg.t === 'subtitleRequest') {
+        // Approved, connection-bound senders only; the body goes back to that connection alone.
+        if (!admit(conn, msg.id, msg.grant, true)) return
+        sendSubtitleToRef.current(msg.id)
       }
     })
     // The session token is discoverable (mDNS TXT), so a socket must identify itself promptly — a
@@ -745,10 +894,28 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // path and the gate's ETA math trusts these refs, so EVERY session boundary (leave, a fresh
   // connect, re-hosting) must pass through here — a prior session's dying download otherwise
   // keeps feeding near-zero Mbps into the new session's gate (the "~232 min ETA" bug).
+  const clearRetryTimer = useCallback(() => {
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current)
+      retryTimerRef.current = null
+    }
+  }, [])
+
   const resetTransfer = useCallback(() => {
+    attemptRef.current++ // every await of the running attempt now bails
+    clearRetryTimer()
+    transferRetriesRef.current = 0
+    partialEpochRef.current = null
+    lastProgressAtRef.current = 0
+    transferStartedAtRef.current = 0
+    integrityFailuresRef.current = 0
+    completeRef.current = false
+    retryPendingRef.current = false
     downloadingRef.current = false
     downloadRef.current?.cancelAsync().catch(() => {})
     downloadRef.current = null
+    proxyGenRef.current++ // an in-flight startProxy must not publish into whatever comes next
+    proxyStartRef.current = null
     RailReelHost.stopProxy().catch(() => {})
     proxyStateRef.current = 'idle'
     progressRef.current = 0
@@ -759,7 +926,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     inShowRef.current = false
     setProgress(0)
     setMovieUri(null)
-  }, [])
+  }, [clearRetryTimer])
 
   // ── cache management ────────────────────────────────────────────────────────
   const getCacheInfo = useCallback(async (): Promise<CacheStatus> => {
@@ -795,10 +962,25 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   )
 
   useEffect(() => {
-    // Startup orphan sweep: remove any abandoned cache files from previous crashed sessions
-    sweepOrphanCache(CACHE_DIR, fsAdapter)
-      .catch(() => ({ sweptFiles: [], reclaimedBytes: 0 }))
+    // Startup orphan sweep: remove any abandoned cache files from previous crashed sessions —
+    // except a copy the user chose to keep ("Keep & Leave") that is still complete. It runs once
+    // per JS runtime, queued in the module-level movieCacheOwner: behind any writer a previous
+    // provider instance left running, and ahead of every download (whose kept-copy check, deletes
+    // and writes then run only after it), so a snapshot keep-set can never delete a movie +
+    // record that a download completed meanwhile.
+    const startupSweep = (cacheGlobals.__railreelStartupSweep ??= movieCacheOwner.run(async (prev) => {
+        await prev // no ceiling: deleting under a live writer is exactly what this prevents
+        try {
+          const keep = await findKeptCacheFiles(CACHE_DIR, fsAdapter, (uri) => LegacyFS.readAsStringAsync(uri))
+          return await sweepOrphanCache(CACHE_DIR, fsAdapter, keep)
+        } catch {
+          return { sweptFiles: [], reclaimedBytes: 0 }
+        }
+    }))
+    startupSweep
       .then((result) => {
+        if (disposedRef.current) return
+
         if (__DEV__ && result.sweptFiles.length > 0) {
           console.log(
             `[RailReel] Startup orphan sweep reclaimed ${result.reclaimedBytes} bytes across ${result.sweptFiles.length} files`,
@@ -930,15 +1112,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         height: probed.height || 0,
         videoMime: probed.videoMime,
         audioMime: probed.audioMime,
-        ...(subtitleRef.current
-          ? {
-              subtitle: {
-                name: subtitleRef.current.name,
-                sizeBytes: subtitleRef.current.content.length,
-                content: subtitleRef.current.content,
-              },
-            }
-          : {}),
+        // Metadata only — the body never rides the roster (see attachSubtitle / sendSubtitleTo).
+        ...(subtitleRef.current ? { subtitle: subtitleMeta(subtitleRef.current.name, subtitleRef.current.content) } : {}),
       }
       setMovie({ title, sizeBytes, durationSec, fastStart })
       setMovieUri(asset.uri) // the host plays the same source it shares
@@ -1135,13 +1310,46 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     hostTransportRef.current = handler
   }, [])
 
+  const clearRequestDeadline = useCallback(() => {
+    if (requestDeadlineRef.current) {
+      clearTimeout(requestDeadlineRef.current)
+      requestDeadlineRef.current = null
+    }
+  }, [])
+
+  // Show a request's outcome briefly, then return the controls to idle.
+  const showRequestOutcome = useCallback(
+    (status: 'approved' | 'dismissed') => {
+      clearRequestDeadline()
+      setPlaybackRequestStatus(status)
+      if (dismissToastTimerRef.current) clearTimeout(dismissToastTimerRef.current)
+      dismissToastTimerRef.current = setTimeout(() => {
+        dismissToastTimerRef.current = null
+        setPlaybackRequestStatus('idle')
+        activeRequestIdRef.current = null
+      }, 3000)
+    },
+    [clearRequestDeadline],
+  )
+
   const sendPlaybackRequest = useCallback(
     (action: 'pause' | 'rewind', seconds?: number) => {
       const c = clientRef.current
       if (!c) return
       const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
       activeRequestIdRef.current = requestId
+      if (dismissToastTimerRef.current) {
+        clearTimeout(dismissToastTimerRef.current)
+        dismissToastTimerRef.current = null
+      }
       setPlaybackRequestStatus('pending')
+      // The decision (or the host's own 10s auto-dismiss) can be lost to a WS drop, and nothing
+      // replays it — so the request expires here too, or the request buttons stay disabled forever.
+      clearRequestDeadline()
+      requestDeadlineRef.current = setTimeout(() => {
+        requestDeadlineRef.current = null
+        if (activeRequestIdRef.current === requestId) showRequestOutcome('dismissed')
+      }, PLAYBACK_REQUEST_DEADLINE_MS)
       c.session.send({
         t: 'playbackRequest',
         id: c.myId,
@@ -1151,17 +1359,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         seconds: typeof seconds === 'number' && seconds > 0 ? seconds : (action === 'rewind' ? 15 : undefined),
       })
     },
-    [],
+    [clearRequestDeadline, showRequestOutcome],
   )
 
   const clearPlaybackRequestStatus = useCallback(() => {
+    clearRequestDeadline()
     if (dismissToastTimerRef.current) {
       clearTimeout(dismissToastTimerRef.current)
       dismissToastTimerRef.current = null
     }
     setPlaybackRequestStatus('idle')
     activeRequestIdRef.current = null
-  }, [])
+  }, [clearRequestDeadline])
 
   // ── client actions ──────────────────────────────────────────────────────────
   // One heartbeat builder for both phases (downloading + playback), reading the telemetry refs so
@@ -1243,128 +1452,451 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [ingestReaction],
   )
 
-  const startDownload = useCallback(async () => {
-    const c = clientRef.current
-    if (!c) return
-    // Re-entrancy guard: a duplicate approval (host double-tap, decision re-delivered after a
-    // reconnect) must NOT start a second download — two writers on the same cache file, and
-    // either one's failure path deleting the file out from under the other (the player then
-    // streams a ghost inode the proxy can't see).
-    if (downloadRef.current || downloadingRef.current) {
-      return
-    }
-    downloadingRef.current = true
-    // Session epoch at start: if a leave()/new connect() bumps it, this download is a zombie —
-    // it must not write telemetry, state, or errors into whatever session came after it.
-    const myEpoch = epochRef.current
-    const stale = (): boolean => epochRef.current !== myEpoch
-    setClientPhase('downloading')
-    const url = `http://${c.payload.host}:${c.payload.httpPort}/movie?tk=${encodeURIComponent(c.payload.token)}&g=${encodeURIComponent(c.grant)}`
-    try {
-      // Clear any stale partial from a previous attempt BEFORE the download opens the file —
-      // never after another attempt may have started (deleting a file mid-write detaches the
-      // writer onto a deleted inode while the proxy reads the path).
-      await LegacyFS.deleteAsync(MOVIE_CACHE, { idempotent: true }).catch(() => {})
+  // Fresh-restart prerequisite: everything reading the old file must let go BEFORE we unlink it.
+  // The proxy holds an open fd on the current inode (it would serve the dead partial until its
+  // edge timeout), and the player holds the proxy URL. A new proxy comes up with the new transfer.
+  const detachProgressive = useCallback(async () => {
+    proxyGenRef.current++
+    const pending = proxyStartRef.current
+    proxyStartRef.current = null
+    setMovieUri(null)
+    if (pending) await pending.catch(() => {}) // its handler sees the bumped generation and bails
+    await RailReelHost.stopProxy().catch(() => {})
+    proxyStateRef.current = 'idle'
+  }, [])
 
-      // Storage preflight (PRD §8: surface the 1–4 GB requirement up front, not at 97%).
-      const freeBytes = await LegacyFS.getFreeDiskStorageAsync().catch(() => -1)
-      const storageMsg = storageWarning(freeBytes, mediaRef.current?.sizeBytes ?? 0)
-      if (storageMsg) {
-        downloadingRef.current = false
-        setError(storageMsg)
-        setClientPhase('approved') // freeing space + a re-approval retries
+  // Keep & Leave reuse: is the kept MOVIE_CACHE this exact movie? The record is only a pre-filter
+  // (same size + same recorded fingerprint); the proof is a fresh fingerprint of the local file
+  // matching the host's. The roster carrying the host's fingerprint can trail the approval by a
+  // moment, so wait briefly for it — never long: a normal download is the safe fallback.
+  const reuseKeptCopy = useCallback(async (stale: () => boolean): Promise<boolean> => {
+    const meta = parseKeptMovieMeta(await LegacyFS.readAsStringAsync(MOVIE_META).catch(() => null))
+    if (stale() || !meta) return false
+    const info = await LegacyFS.getInfoAsync(MOVIE_CACHE).catch(() => null)
+    if (stale() || !info) return false
+    const file = info.exists ? { exists: true, size: info.size } : { exists: false }
+    const decide = () => {
+      const m = mediaRef.current
+      if (!m) return isKeptMovieIntact(meta, file) ? 'need-hash' : 'mismatch'
+      return keptReuseDecision(meta, file, { sizeBytes: m.sizeBytes, hash: m.hash })
+    }
+    let decision = decide()
+    for (let waited = 0; decision === 'need-hash' && waited < KEPT_HASH_WAIT_MS; waited += 150) {
+      await sleep(150)
+      if (stale()) return false
+      decision = decide()
+    }
+    const hostHash = mediaRef.current?.hash ?? ''
+    if (decision !== 'verify' || !hostHash) return false
+    const local = await RailReelHost.fingerprint(MOVIE_CACHE, meta.sizeBytes).catch(() => '')
+    return !stale() && local === hostHash
+  }, [])
+
+  // Arm the next automatic transfer retry (bounded backoff). It only fires into the same session,
+  // and only if the transfer still needs it (see maybeAutoResume) — during playback there is no
+  // retry button, so a hotspot blip must heal on its own.
+  const maybeAutoResume = useCallback((): boolean => {
+    const go = shouldAutoResume({
+      approved: approvedRef.current,
+      phase: clientPhaseRef.current,
+      complete: completeRef.current, // validated — byte progress alone can hit 100% and still fail
+      transferring: downloadingRef.current || downloadRef.current !== null,
+      reconnecting: reconnectingRef.current,
+      retries: transferRetriesRef.current,
+      integrityFailures: integrityFailuresRef.current,
+    })
+    if (disposedRef.current || !go) return false
+    transferRetriesRef.current++
+    startDownloadRef.current({ resume: true }).catch(() => {})
+    return true
+  }, [])
+
+  const scheduleTransferRetry = useCallback(() => {
+    clearRetryTimer()
+    const n = transferRetriesRef.current
+    if (disposedRef.current || n >= MAX_TRANSFER_RETRIES || integrityFailuresRef.current > MAX_INTEGRITY_RETRIES) return
+    const myEpoch = epochRef.current
+    retryTimerRef.current = setTimeout(() => {
+      retryTimerRef.current = null
+      if (epochRef.current !== myEpoch) return // session over (or provider unmounted)
+      // The backoff has elapsed, but the WS is still re-handshaking (a retry would fail the same
+      // way): park it — the reconnect success path fires it, keeping budget and backoff intact.
+      if (reconnectingRef.current) {
+        retryPendingRef.current = true
         return
       }
-      const dl = LegacyFS.createDownloadResumable(url, MOVIE_CACHE, {}, (p) => {
-        if (stale()) return // a newer session owns the telemetry refs now
-        const total = p.totalBytesExpectedToWrite
-        const frac = total > 0 ? clamp01(p.totalBytesWritten / total) : 0
-        progressRef.current = frac
-        setProgress(frac)
+      maybeAutoResume()
+    }, transferRetryDelayMs(n))
+  }, [clearRetryTimer, maybeAutoResume])
 
-        // Measured throughput (smoothed) — the number the host's start gate reasons about.
-        const now = Date.now()
-        const sample = mbpsSampleRef.current
-        if (!sample) {
-          mbpsSampleRef.current = { bytes: p.totalBytesWritten, ms: now }
-        } else if (now - sample.ms >= 1000) {
-          mbpsRef.current = smoothedMbps(mbpsRef.current, p.totalBytesWritten - sample.bytes, now - sample.ms)
-          mbpsSampleRef.current = { bytes: p.totalBytesWritten, ms: now }
-        }
+  // A running transfer that has gone silent is dead (OkHttp would wait out its 60s read timeout;
+  // the proxy gives up on a silent edge after 30s). Abort it and let the normal retry path —
+  // budget + backoff — resume it. Abandoning bumps the attempt, so the dead attempt's own
+  // continuations bail; the next attempt waits for its native download to settle.
+  const abortStalledTransfer = useCallback(() => {
+    if (disposedRef.current) return
+    // Credit FIRST: the aborted attempt exits at its own stale guard and never reaches its error
+    // handler, so the kept-bytes credit it earned must be applied here. Its partial is still this
+    // session's clean prefix (a stall doesn't invalidate it), which the resume will continue.
+    const retained = partialEpochRef.current === epochRef.current
+    transferRetriesRef.current = retriesAfterFailure(transferRetriesRef.current, attemptBytesRef.current, retained)
+    attemptBytesRef.current = 0
+    attemptRef.current++
+    downloadRef.current?.cancelAsync().catch(() => {})
+    downloadRef.current = null
+    downloadingRef.current = false
+    // Like any failure: the lobby offers Retry (which also covers a spent automatic budget).
+    setError('The transfer stalled — reconnecting to the host…')
+    setClientPhase('approved')
+    clientPhaseRef.current = 'approved'
+    scheduleTransferRetry()
+  }, [scheduleTransferRetry])
 
-        // Progressive playback: as soon as we know the final size, stand up the localhost proxy
-        // over the growing file and hand THAT to the player — never the partially-written file.
-        // FastStart required: non-faststart MP4 has moov at EOF which causes proxy stalls and ExoPlayer crashes.
-        if (total > 0 && proxyStateRef.current === 'idle' && mediaRef.current?.fastStart === true) {
-          proxyStateRef.current = 'starting'
-          RailReelHost.startProxy(MOVIE_CACHE, total)
-            .then((port) => {
-              if (stale()) {
-                RailReelHost.stopProxy().catch(() => {})
+  // Pull the subtitle body when the roster names a revision we don't have. Only once approved
+  // (the host serves only admitted guests). An unanswered pull is re-sent after a timeout — the
+  // reply can die with a dropped socket — a bounded number of times (lib/protocol/subtitle).
+  const maybeFetchSubtitle = useCallback(function fetchSubtitle() {
+    if (disposedRef.current) return
+    const c = clientRef.current
+    const meta = rosterSubtitleRef.current
+    if (!c || !approvedRef.current || !meta) return
+    const now = Date.now()
+    if (!needsSubtitleFetch(subtitleRef.current?.rev ?? null, meta, subtitlePullRef.current, now)) return
+    subtitlePullRef.current = recordSubtitlePull(subtitlePullRef.current, meta.rev, now)
+    c.session.send({ t: 'subtitleRequest', id: c.myId, grant: c.grant, rev: meta.rev })
+    if (subtitlePullTimerRef.current) clearTimeout(subtitlePullTimerRef.current)
+    subtitlePullTimerRef.current = setTimeout(() => {
+      subtitlePullTimerRef.current = null
+      fetchSubtitle() // no-op if it arrived (rev matches) or the tries are spent
+    }, SUBTITLE_PULL_TIMEOUT_MS)
+  }, [])
+
+  // A fresh connection: forget the old one's pull so it's asked again right away.
+  const resetSubtitlePull = useCallback(() => {
+    subtitlePullRef.current = null
+    if (subtitlePullTimerRef.current) clearTimeout(subtitlePullTimerRef.current)
+    subtitlePullTimerRef.current = null
+  }, [])
+
+  /**
+   * Client: fetch (or resume) the movie into MOVIE_CACHE and publish it to the player.
+   *
+   * Ownership: every await re-checks `stale()` (session epoch AND attempt generation) before it
+   * mutates state, telemetry or the shared MOVIE_CACHE, so an abandoned attempt can never create
+   * a download, delete the next session's file, or publish ready. A new attempt also waits for
+   * the previous one to unwind before touching the file.
+   *
+   * `resume`: continue this session's partial file with a Range request (same inode → the proxy
+   * and the playing show keep working). Falls back to a clean restart when there's no trustworthy
+   * partial. A fresh start first tries a kept copy (Keep & Leave).
+   */
+  const startDownload = useCallback(
+    (opts: { resume?: boolean } = {}): Promise<void> => {
+      const c = clientRef.current
+      if (!c || disposedRef.current) return Promise.resolve()
+      // Re-entrancy guard: a duplicate approval (host double-tap, decision re-delivered after a
+      // reconnect) must NOT start a second writer on the same cache file.
+      if (downloadRef.current || downloadingRef.current) return Promise.resolve()
+      downloadingRef.current = true
+      clearRetryTimer()
+      retryPendingRef.current = false
+      completeRef.current = false
+      const myEpoch = epochRef.current
+      const myAttempt = ++attemptRef.current
+      const stale = (): boolean =>
+        disposedRef.current || epochRef.current !== myEpoch || attemptRef.current !== myAttempt
+      setError(null)
+      setClientPhase('downloading')
+      clientPhaseRef.current = 'downloading' // synchronously: retry decisions read the ref
+      const url =`http://${c.payload.host}:${c.payload.httpPort}/movie?tk=${encodeURIComponent(c.payload.token)}&g=${encodeURIComponent(c.grant)}`
+      const expectedSize = (): number => mediaRef.current?.sizeBytes ?? 0
+      let dl: LegacyFS.DownloadResumable | null = null
+
+      const publishReady = () => {
+        transferRetriesRef.current = 0
+        integrityFailuresRef.current = 0
+        completeRef.current = true // the ONLY place completion is claimed: after validation
+        progressRef.current = 1
+        setProgress(1)
+        // If the proxy is serving the show (or about to — its handler sets the source), leave it
+        // alone: swapping the source mid-playback would rebuffer. Otherwise open the file directly.
+        if (proxyStateRef.current === 'idle' || proxyStateRef.current === 'failed') setMovieUri(MOVIE_CACHE)
+        setError(null)
+        setClientPhase('ready')
+        clientPhaseRef.current = 'ready'
+        getCacheInfo().catch(() => {})
+        sendBeat()
+        const live = clientRef.current ?? c
+        live.session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: positionRef.current })
+      }
+
+      // Bytes this attempt pulled (beyond its resume offset) live in attemptBytesRef: credited to
+      // the retry budget only if they're still on disk when it ends — whether it fails on its own
+      // (catch below) or the watchdog aborts it (abortStalledTransfer).
+      attemptBytesRef.current = 0
+
+      const run = async (prev: Promise<void> | null): Promise<void> => {
+        try {
+          // Exclusive ownership of MOVIE_CACHE: everything queued before us in movieCacheOwner
+          // (earlier attempts — even a previous provider instance's — and the startup sweep) must
+          // have FULLY settled. cancelAsync only requests cancellation; the native downloadAsync
+          // promise settles only once its writer has stopped. Starting early would let the old
+          // writer append behind our resume offset, so a wedged predecessor is never "timed
+          // out" into sharing the file: past the ceiling we give up THIS attempt (error + the
+          // normal retry path) without touching the file, and the predecessor stays at the head
+          // of the queue for every later attempt.
+          {
+            const owned = await awaitOwnership(prev, PREV_ATTEMPT_CEILING_MS, sleep)
+            if (stale()) return
+            if (!owned) {
+              setError('The previous transfer is still shutting down — trying again shortly.')
+              setClientPhase('approved')
+              clientPhaseRef.current = 'approved'
+              downloadingRef.current = false
+              scheduleTransferRetry()
+              return
+            }
+          }
+
+          if (!opts.resume) {
+            const reused = await reuseKeptCopy(stale)
+            if (stale()) return
+            if (reused) {
+              partialEpochRef.current = null
+              publishReady()
+              return
+            }
+          }
+
+          // Resume only a partial THIS session wrote as a clean prefix.
+          let from = 0
+          if (opts.resume && partialEpochRef.current === myEpoch) {
+            const info = await LegacyFS.getInfoAsync(MOVIE_CACHE).catch(() => null)
+            if (stale()) return
+            from = resumeOffset(info?.exists ? info.size : 0, expectedSize())
+          }
+          if (from === 0) {
+            await detachProgressive()
+            if (stale()) return
+            partialEpochRef.current = null
+            progressRef.current = 0
+            setProgress(0)
+            mbpsRef.current = 0
+            // The kept-copy record describes the file we're about to replace — drop it first.
+            await LegacyFS.deleteAsync(MOVIE_META, { idempotent: true }).catch(() => {})
+            if (stale()) return
+            await LegacyFS.deleteAsync(MOVIE_CACHE, { idempotent: true }).catch(() => {})
+            if (stale()) return
+          }
+          mbpsSampleRef.current = null // the outage gap is not a throughput sample
+
+          // Storage preflight (PRD §8: surface the 1–4 GB requirement up front, not at 97%).
+          const freeBytes = await LegacyFS.getFreeDiskStorageAsync().catch(() => -1)
+          if (stale()) return
+          const storageMsg = storageWarning(freeBytes, Math.max(0, expectedSize() - from))
+          if (storageMsg) {
+            setError(storageMsg)
+            setClientPhase('approved') // freeing space + Retry tries again; no auto-retry (it'd fail the same way)
+            clientPhaseRef.current = 'approved'
+            return
+          }
+
+          const resumedFrom = from
+          dl = LegacyFS.createDownloadResumable(
+            url,
+            MOVIE_CACHE,
+            {},
+            (p) => {
+              if (stale()) return // a newer attempt owns the telemetry refs now
+              const now = Date.now()
+              if (p.totalBytesWritten > resumedFrom) lastProgressAtRef.current = now // real bytes only
+              const total = p.totalBytesExpectedToWrite
+              const size = expectedSize()
+              // A resumed transfer that isn't a 206 for the rest of THIS file (an error page, a
+              // full-body 200) is being appended as garbage — stop it; the retry restarts clean.
+              if (resumedFrom > 0 && size > 0 && total > 0 && total !== size) {
+                partialEpochRef.current = null
+                dl?.cancelAsync().catch(() => {})
                 return
               }
-              proxyStateRef.current = 'up'
-              setMovieUri(`http://127.0.0.1:${port}/movie`)
-            })
-            .catch(() => {
-              if (stale()) return
-              // Full pre-cache fallback — and if the download already finished while we were
-              // starting, the completion block has passed, so set the source here.
-              proxyStateRef.current = 'failed'
-              if (progressRef.current >= 1) setMovieUri(MOVIE_CACHE)
-            })
-        }
+              // Progress against the movie's real size when known, so an error body's tiny
+              // Content-Length can't read as "100%". Capped below 1 until validated: the host
+              // treats 1 as ready, and the last read can still fail its write or fingerprint.
+              const frac = unvalidatedProgress(p.totalBytesWritten, size > 0 ? size : total)
+              progressRef.current = frac
+              setProgress(frac)
+              attemptBytesRef.current = Math.max(0, p.totalBytesWritten - resumedFrom)
 
-        // Throttle heartbeats to ~3/s so a fast download doesn't flood the control channel. Once
-        // our player is live the PlayerScreen's report loop is already beating — don't double up.
-        if (!inShowRef.current && now - lastBeatRef.current > 300) {
-          lastBeatRef.current = now
+              // Measured throughput (smoothed) — the number the host's start gate reasons about.
+              const sample = mbpsSampleRef.current
+              if (!sample) {
+                mbpsSampleRef.current = { bytes: p.totalBytesWritten, ms: now }
+              } else if (now - sample.ms >= 1000) {
+                mbpsRef.current = smoothedMbps(mbpsRef.current, p.totalBytesWritten - sample.bytes, now - sample.ms)
+                mbpsSampleRef.current = { bytes: p.totalBytesWritten, ms: now }
+              }
+
+              // Progressive playback: once the final size is confirmed, stand up the localhost
+              // proxy over the growing file and hand THAT to the player — never the partial file.
+              // FastStart required: moov at EOF can't be opened partially (proxy stalls, crashes).
+              // The proxy belongs to the session's file, not to this attempt: a resume keeps it.
+              if (
+                total > 0 &&
+                (size <= 0 || total === size) &&
+                proxyStateRef.current === 'idle' &&
+                mediaRef.current?.fastStart === true
+              ) {
+                proxyStateRef.current = 'starting'
+                const gen = proxyGenRef.current
+                proxyIssuedGenRef.current = gen
+                const proxyStale = () => epochRef.current !== myEpoch || proxyGenRef.current !== gen
+                proxyStartRef.current = RailReelHost.startProxy(MOVIE_CACHE, total)
+                  .then((port) => {
+                    if (proxyStale()) {
+                      // Ours is orphaned — stop it unless a newer start already replaced it.
+                      if (proxyIssuedGenRef.current === gen) RailReelHost.stopProxy().catch(() => {})
+                      return
+                    }
+                    proxyStateRef.current = 'up'
+                    setMovieUri(`http://127.0.0.1:${port}/movie`)
+                  })
+                  .catch(() => {
+                    if (proxyStale()) return
+                    // Full pre-cache fallback — and if the download already finished while we
+                    // were starting, the completion block has passed, so set the source here.
+                    proxyStateRef.current = 'failed'
+                    if (completeRef.current) setMovieUri(MOVIE_CACHE)
+                  })
+              }
+
+              // Throttle heartbeats to ~3/s so a fast download doesn't flood the control channel.
+              // Once our player is live the PlayerScreen's report loop is already beating.
+              if (!inShowRef.current && now - lastBeatRef.current > 300) {
+                lastBeatRef.current = now
+                sendBeat()
+              }
+            },
+            resumedFrom > 0 ? String(resumedFrom) : undefined,
+          )
+          downloadRef.current = dl
+          partialEpochRef.current = myEpoch // from here MOVIE_CACHE is this session's partial
+          transferStartedAtRef.current = Date.now()
+          lastProgressAtRef.current = 0 // no byte yet → the initial-response grace applies
+          // Watchdog for the whole transfer, not just at WS reconnect: a quick WS blip can leave
+          // the HTTP request silently dead long after the reconnect check has passed.
+          const watched = dl
+          const watchdog = setInterval(() => {
+            if (stale() || downloadRef.current !== watched) return
+            if (isTransferStalled(true, transferStartedAtRef.current, lastProgressAtRef.current, Date.now())) {
+              abortStalledTransfer()
+            }
+          }, 1000)
+          let res: Awaited<ReturnType<LegacyFS.DownloadResumable['downloadAsync']>>
+          try {
+            res = await dl.downloadAsync()
+          } finally {
+            clearInterval(watchdog)
+          }
+          if (stale() || downloadRef.current !== dl) return // superseded — not ours to finish
+          downloadRef.current = null
+
+          // The legacy downloader writes ANY response body to disk (and appends on a resume) —
+          // trust the file only with the right status and the exact final size.
+          const done = await LegacyFS.getInfoAsync(MOVIE_CACHE).catch(() => null)
+          if (stale()) return
+          const finalBytes = done?.exists ? done.size : null
+          if (!transferResultOk(resumedFrom, res?.status, finalBytes, expectedSize())) {
+            partialEpochRef.current = null // not a clean prefix any more → the retry restarts
+            // A full-length body that is still wrong (wrong size / unexpected status after all
+            // bytes arrived) counts against the integrity budget, like a failed fingerprint.
+            if (typeof res?.status === 'number' && res.status >= 200 && res.status < 300) integrityFailuresRef.current++
+            throw new Error(`download failed (HTTP ${res?.status ?? '?'})`)
+          }
+
+          // Integrity: our copy must match the host's fingerprint — but only pre-show. During a
+          // progressive show the proxy is actively serving this file (deleting it would kill the
+          // playback that's demonstrably working); a truly wrong file would never have decoded.
+          const expected = mediaRef.current?.hash ?? ''
+          const size = expectedSize()
+          let fingerprint = ''
+          if (!inShowRef.current && expected.startsWith('qf1:') && size > 0) {
+            fingerprint = await RailReelHost.fingerprint(MOVIE_CACHE, size).catch(() => '')
+            if (stale()) return
+            if (fingerprint !== expected) {
+              partialEpochRef.current = null
+              integrityFailuresRef.current++ // its own budget; these bytes earn no retry credit
+              await LegacyFS.deleteAsync(MOVIE_CACHE, { idempotent: true }).catch(() => {})
+              throw new Error(
+                integrityFailuresRef.current > MAX_INTEGRITY_RETRIES
+                  ? 'The downloaded copy keeps failing its integrity check — ask the host to re-share the movie.'
+                  : 'The downloaded copy failed its integrity check — trying again.',
+              )
+            }
+          }
+          partialEpochRef.current = null
+          publishReady()
+
+          // Keep & Leave: record what this file IS, so a rejoin can skip the transfer. Part of this
+          // attempt's promise, so the next attempt can't replace the file mid-write.
+          if (size > 0) {
+            if (!fingerprint) fingerprint = await RailReelHost.fingerprint(MOVIE_CACHE, size).catch(() => '')
+            if (fingerprint.startsWith('qf1:')) {
+              await LegacyFS.writeAsStringAsync(
+                MOVIE_META,
+                encodeKeptMovieMeta({ hash: fingerprint, sizeBytes: size, title: mediaRef.current?.title ?? '', savedAt: Date.now() }),
+              ).catch(() => {})
+            }
+          }
+        } catch (e) {
+          if (stale()) return // a zombie's failure must not clobber the session that came after
+          if (downloadRef.current === dl) downloadRef.current = null
+          if (clientPhaseRef.current === 'denied' || !approvedRef.current) return
+          // NOTE: no deleteAsync for a network failure — the partial is a clean prefix we resume.
+          // If the partial is NOT resumable (bad status, wrong size, failed fingerprint), withdraw
+          // the progress we advertised: the next attempt starts from zero.
+          const retained = partialEpochRef.current === myEpoch
+          if (!retained) {
+            progressRef.current = 0
+            setProgress(0)
+          }
+          // Real forward progress that is still on disk earns back the automatic retry budget
+          // (a WS reconnect doesn't; bytes we just discarded don't either).
+          transferRetriesRef.current = retriesAfterFailure(transferRetriesRef.current, attemptBytesRef.current, retained)
+          attemptBytesRef.current = 0
           sendBeat()
-        }
-      })
-      downloadRef.current = dl
-      const res = await dl.downloadAsync()
-      if (stale() || downloadRef.current !== dl) return // superseded — not ours to finish
-      downloadRef.current = null
-      downloadingRef.current = false
-      // downloadAsync resolves even on 4xx/5xx (writing the error body to disk) — verify the status
-      // before trusting the file, or a 403 would show up as "ready".
-      if (!res || res.status < 200 || res.status >= 300) {
-        await LegacyFS.deleteAsync(MOVIE_CACHE, { idempotent: true }).catch(() => {})
-        throw new Error(`download failed (HTTP ${res?.status ?? '?'})`)
-      }
-      // Integrity: our copy must match the host's fingerprint — but only pre-show. During a
-      // progressive show the proxy is actively serving this file (deleting it would kill the
-      // playback that's demonstrably working); a truly wrong file would never have decoded.
-      const expected = mediaRef.current?.hash ?? ''
-      const expectedSize = mediaRef.current?.sizeBytes ?? 0
-      if (!inShowRef.current && expected.startsWith('qf1:') && expectedSize > 0) {
-        const local = await RailReelHost.fingerprint(MOVIE_CACHE, expectedSize).catch(() => '')
-        if (local !== expected) {
-          await LegacyFS.deleteAsync(MOVIE_CACHE, { idempotent: true }).catch(() => {})
-          throw new Error('The downloaded copy failed its integrity check — try approving again.')
+          setError(String(e))
+          setClientPhase('approved') // Retry in the lobby; automatic below (no button mid-show)
+          clientPhaseRef.current = 'approved'
+          downloadingRef.current = false
+          scheduleTransferRetry()
+        } finally {
+          if (!stale()) downloadingRef.current = false
         }
       }
-      progressRef.current = 1
-      setProgress(1)
-      // If the proxy is serving the show (or about to — its .then/.catch sets the source), leave
-      // it alone: swapping the source mid-playback would rebuffer. Otherwise this is the
-      // pre-cache path — open the finished file directly.
-      if (proxyStateRef.current === 'idle' || proxyStateRef.current === 'failed') setMovieUri(MOVIE_CACHE)
-      setClientPhase('ready')
-      getCacheInfo().catch(() => {})
-      sendBeat()
-      ;(clientRef.current ?? c).session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: positionRef.current })
-    } catch (e) {
-      downloadingRef.current = false
-      if (stale() || clientPhaseRef.current === 'denied' || !approvedRef.current) return // a zombie's or denied client's failure must not clobber phase/error
-      downloadRef.current = null
-      // NOTE: no deleteAsync here — a failed transfer's partial bytes are harmless (a retry
-      // truncates them) and the path may already belong to a newer attempt.
-      setError(String(e))
-      setClientPhase('approved') // allow a retry
+
+      // Join the module-level queue: the next attempt waits on this one AND everything before it
+      // (if this attempt gives up on a wedged predecessor, that predecessor still guards the file).
+      return movieCacheOwner.run(run)
+    },
+    [sendBeat, getCacheInfo, clearRetryTimer, detachProgressive, reuseKeptCopy, scheduleTransferRetry, abortStalledTransfer],
+  )
+  startDownloadRef.current = startDownload
+
+  // The WS is back (hotspot blip): bring the HTTP transfer back with it — WITHOUT resetting the
+  // retry budget or skipping the backoff (a WS handshake can succeed while HTTP keeps failing).
+  // A retry whose backoff elapsed during the outage fires now; a pending one keeps its deadline;
+  // a silent "running" transfer is caught here immediately and by its watchdog thereafter.
+  const recoverTransfer = useCallback(() => {
+    if (disposedRef.current) return
+    if (isTransferStalled(downloadRef.current !== null, transferStartedAtRef.current, lastProgressAtRef.current, Date.now())) {
+      abortStalledTransfer()
+      return
     }
-  }, [sendBeat])
+    if (retryPendingRef.current) {
+      retryPendingRef.current = false
+      maybeAutoResume()
+    }
+  }, [abortStalledTransfer, maybeAutoResume])
 
   // Open a client WS session (clock handshake + handlers). On the FIRST connect we send `join`;
   // on a reconnect we don't — the host still has our approved grant and our cached file, so we just
@@ -1378,14 +1910,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         payload.wsPort,
         payload.token,
         (raw) => {
+          if (disposedRef.current) return // a dead provider's socket must not restart anything
           const r = parseServerMsg(JSON.stringify(raw))
           if (!r.ok) return
           const m = r.msg
           if (m.t === 'requestDecision' && m.id === myId) {
             if (m.approved) {
+              // A re-delivered approval (reconnect, host double-tap) while we're already
+              // transferring or done must not restart: a fresh start would delete a good file.
+              if (approvedRef.current && (downloadingRef.current || completeRef.current)) return
               approvedRef.current = true // from now on, reconnects resume silently (no re-join)
               setClientPhase('approved')
+              clientPhaseRef.current = 'approved'
               startDownload()
+              maybeFetchSubtitle() // the roster may already have named a subtitle revision
             } else {
               approvedRef.current = false
               setClientPhase('denied')
@@ -1411,12 +1949,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               decodeOkRef.current = ok
               setDecodeCaution(decodeWarning(ok, h))
             }
-            if (m.media?.subtitle?.content && typeof m.media.subtitle.name === 'string') {
-              if (!subtitleRef.current || subtitleRef.current.name !== m.media.subtitle.name) {
-                loadSubtitle(m.media.subtitle.name, m.media.subtitle.content)
-              }
-            } else if (m.media && !m.media.subtitle && subtitleRef.current) {
-              clearSubtitle()
+            // Subtitles: the roster names the current revision; the body is pulled when ours
+            // differs (identity is the content revision, so a same-name replacement reloads).
+            if (isMediaInfo(m.media)) {
+              const meta = isSubtitleMeta(m.media.subtitle) ? m.media.subtitle : null
+              rosterSubtitleRef.current = meta
+              if (meta) maybeFetchSubtitle()
+              else if (subtitleRef.current) clearSubtitle()
             }
             const list: Participant[] = m.participants
               .filter(isParticipantInfo)
@@ -1449,25 +1988,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               ingestReaction(displayName, m.emoji)
             }
           } else if (m.t === 'subtitle') {
-            if (typeof m.name === 'string' && typeof m.content === 'string' && m.name && m.content) {
-              loadSubtitle(m.name, m.content)
-            } else {
+            const sub = parseSubtitlePayload(m)
+            if (sub?.kind === 'load') {
+              if (subtitleRef.current?.rev !== sub.rev) loadSubtitle(sub.name, sub.content, sub.rev)
+            } else if (sub?.kind === 'clear') {
               clearSubtitle()
             }
           } else if (m.t === 'playbackRequestDecision') {
-            if (m.requesterId === myId || m.requestId === activeRequestIdRef.current) {
-              if (m.approved) {
-                setPlaybackRequestStatus('approved')
-              } else {
-                setPlaybackRequestStatus('dismissed')
-              }
-              if (dismissToastTimerRef.current) {
-                clearTimeout(dismissToastTimerRef.current)
-              }
-              dismissToastTimerRef.current = setTimeout(() => {
-                setPlaybackRequestStatus('idle')
-                activeRequestIdRef.current = null
-              }, 3000)
+            // Only the decision for OUR live request: a late one for an expired request is moot.
+            if (m.requesterId === myId && m.requestId === activeRequestIdRef.current) {
+              showRequestOutcome(m.approved ? 'approved' : 'dismissed')
             }
           } else if (m.t === 'ended') {
             // The host wrapped the show / left. leave() clears everything (incl. sessionEnd), so
@@ -1483,20 +2013,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         },
         // Socket dropped after we were live: kick off a reconnect (unless we're deliberately leaving).
         () => {
-          if (!leavingRef.current && roleRef.current === 'client') reconnectRef.current()
+          if (!disposedRef.current && !leavingRef.current && roleRef.current === 'client') reconnectRef.current()
         },
       )
       if (initial) session.send({ t: 'join', id: myId, name, token: payload.token, grant })
       return session
     },
-    [startDownload, ingestChat, ingestReaction, loadSubtitle, clearSubtitle],
+    [startDownload, ingestChat, ingestReaction, loadSubtitle, clearSubtitle, maybeFetchSubtitle, showRequestOutcome],
   )
 
   // Reconnect loop: re-handshake with exponential backoff, then resume the same session identity.
   // Gives up (and tears down) after MAX_RECONNECT_ATTEMPTS so the UI can't hang forever.
   const reconnect = useCallback(async () => {
     const c = clientRef.current
-    if (!c || reconnectingRef.current || leavingRef.current || clientPhaseRef.current === 'denied') return
+    if (!c || disposedRef.current || reconnectingRef.current || leavingRef.current || clientPhaseRef.current === 'denied') return
     const myEpoch = epochRef.current // a leave()/new connect() bumps this → this loop is stale, abort
     const stale = (): boolean => leavingRef.current || epochRef.current !== myEpoch
     // Re-join only if the host hasn't approved us yet (e.g. it approved during the outage and we
@@ -1523,6 +2053,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         reconnectingRef.current = false
         setReconnecting(false)
         sendBeat()
+        // A pending playback request's decision may have been lost with the old socket and is
+        // never replayed — release the request controls.
+        if (requestDeadlineRef.current) clearPlaybackRequestStatus()
+        // Anything we asked for on the dead socket may be lost too: re-evaluate the subtitle
+        // against the latest roster (a replacement may have gone out while we were away).
+        resetSubtitlePull()
+        maybeFetchSubtitle()
+        // The HTTP transfer died with the hotspot too — bring it back (no retry UI mid-show).
+        recoverTransfer()
         return
       } catch {
         // keep retrying until the attempt budget runs out
@@ -1539,7 +2078,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         body: "Couldn't reach the host — they may have left, or the hotspot dropped.",
       })
     }
-  }, [openClient, sendBeat])
+  }, [openClient, sendBeat, clearPlaybackRequestStatus, maybeFetchSubtitle, recoverTransfer, resetSubtitlePull])
 
   useEffect(() => {
     reconnectRef.current = reconnect
@@ -1547,13 +2086,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const connect = useCallback(
     async (joinLink: string, name: string) => {
+      if (disposedRef.current) return
       setError(null)
       setClientPhase('connecting')
       let payload: JoinPayload
       try {
         payload = decodeJoinUrl(joinLink.trim())
       } catch (e) {
-        setError(`Bad join link: ${String(e)}`)
+        // A version mismatch is not a "bad link" — say what to do about it.
+        setError(isVersionMismatch(e) ? VERSION_MISMATCH_MESSAGE : `Bad join link: ${String(e)}`)
         setClientPhase('idle')
         return
       }
@@ -1571,6 +2112,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       clientRef.current?.session.close()
       clientRef.current = null
       mediaRef.current = null
+      rosterSubtitleRef.current = null
+      resetSubtitlePull()
       setPlayback(null)
       participantsRef.current = []
       setParticipants([])
@@ -1595,7 +2138,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setClientPhase('idle')
       }
     },
-    [openClient, resetTransfer],
+    [openClient, resetTransfer, resetSubtitlePull],
   )
 
   const leave = useCallback(() => {
@@ -1686,9 +2229,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   // Client: retry a download that failed (bad HTTP, integrity mismatch). The grant + approval
   // still stand, so we just kick the transfer again.
+  // Client: retry a failed download (bad HTTP, integrity mismatch, lost signal). The grant +
+  // approval still stand. Resumes this session's partial when it's a clean prefix (the proxy and
+  // any playing show keep their file); otherwise restarts clean, proxy included.
   const retryDownload = useCallback(() => {
+    transferRetriesRef.current = 0 // a deliberate retry starts fresh automatic budgets
+    integrityFailuresRef.current = 0
     setError(null)
-    startDownload()
+    startDownload({ resume: true })
   }, [startDownload])
 
   const dismissEnd = useCallback(() => setSessionEnd(null), [])

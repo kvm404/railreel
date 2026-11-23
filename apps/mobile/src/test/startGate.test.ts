@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import {
   canJoinShow,
+  conservativeCoverageSec,
   departureClock,
+  progressForCoverage,
   decideStartGate,
   downloadBufferedAheadSec,
   secondsToFinish,
@@ -159,8 +161,9 @@ describe('decideStartGate', () => {
   })
 
   it('honors custom thresholds', () => {
-    const c = client({ progress: 0.005, downloadMbps: 12 }) // 36s buffered
-    expect(decideStartGate([c], MOVIE, { minStartBufferSec: 30 }).start).toBe(true)
+    const c = client({ progress: 0.005, downloadMbps: 12 }) // 36s CBR, ~25s VBR-safe
+    expect(decideStartGate([c], MOVIE, { minStartBufferSec: 20 }).start).toBe(true)
+    expect(decideStartGate([c], MOVIE, { minStartBufferSec: 30 }).start).toBe(false)
     expect(decideStartGate([c], MOVIE, { minStartBufferSec: 60 }).start).toBe(false)
   })
 
@@ -250,24 +253,98 @@ describe('smoothedMbps', () => {
 describe('canJoinShow', () => {
   // 2h movie
   const DUR = 7200
+  // A progressive source that is open (faststart behind the proxy).
+  const SRC = { hasSource: true, progressive: true }
 
   it('lets a finished download in immediately, wherever the playhead is', () => {
-    expect(canJoinShow(1, DUR, 6000)).toBe(true)
+    expect(canJoinShow(1, DUR, 6000, SRC)).toBe(true)
   })
 
   it('lets a late joiner in once its buffer covers the playhead plus the lead', () => {
     // 50% downloaded = 3600s cached; playhead at 3000s → 600s ahead ≥ 30s
-    expect(canJoinShow(0.5, DUR, 3000)).toBe(true)
+    expect(canJoinShow(0.5, DUR, 3000, SRC)).toBe(true)
   })
 
   it('holds a late joiner back when its download edge is behind the playhead', () => {
     // 10% = 720s cached; playhead already at 700s → only 20s ahead < 30s lead
-    expect(canJoinShow(0.1, DUR, 700)).toBe(false)
+    expect(canJoinShow(0.1, DUR, 700, SRC)).toBe(false)
   })
 
   it('waits for the whole file when the duration is unknown', () => {
-    expect(canJoinShow(0.9, 0, 0)).toBe(false)
-    expect(canJoinShow(1, 0, 0)).toBe(true) // finished still trumps
+    expect(canJoinShow(0.9, 0, 0, SRC)).toBe(false)
+    expect(canJoinShow(1, 0, 0, SRC)).toBe(true) // finished still trumps
+  })
+
+  it('a non-faststart file (no progressive source) only enters once the file is complete', () => {
+    // The finding's case: 2h movie, playhead at 5 min, 5% downloaded. CBR math says 60s ahead,
+    // but there is no proxy for a moov-at-EOF file — the player would have nothing to open.
+    expect(canJoinShow(0.05, DUR, 300, { hasSource: true, progressive: false })).toBe(false)
+    expect(canJoinShow(0.99, DUR, 300, { hasSource: true, progressive: false })).toBe(false)
+    expect(canJoinShow(1, DUR, 300, { hasSource: true, progressive: false })).toBe(true)
+  })
+
+  it('never enters without a usable source, even with the whole file', () => {
+    expect(canJoinShow(0.5, DUR, 0, { hasSource: false, progressive: true })).toBe(false)
+    expect(canJoinShow(1, DUR, 300, { hasSource: false, progressive: true })).toBe(false)
+    expect(canJoinShow(1, DUR, 300, { hasSource: true, progressive: false })).toBe(true)
+  })
+
+  it('judges the lead with VBR-safe coverage, not the CBR estimate', () => {
+    // 5% of 2h is 360s under CBR, but a front-loaded VBR file can cover far less. Playhead at
+    // 300s: CBR says 60s ahead (would pass the 30s lead); the conservative coverage says no.
+    expect(downloadBufferedAheadSec(0.05, DUR, 300)).toBeCloseTo(60)
+    expect(canJoinShow(0.05, DUR, 300, SRC)).toBe(false)
+    // A comfortable margin still gets in.
+    expect(canJoinShow(0.1, DUR, 300, SRC)).toBe(true)
+  })
+})
+
+describe('conservativeCoverageSec (VBR safety)', () => {
+  const DUR = 7200
+
+  it('is exact at both ends and never above the CBR estimate in between', () => {
+    expect(conservativeCoverageSec(0, DUR)).toBe(0)
+    expect(conservativeCoverageSec(1, DUR)).toBe(DUR)
+    for (const p of [0.01, 0.05, 0.25, 0.5, 0.75, 0.99]) {
+      const c = conservativeCoverageSec(p, DUR)
+      expect(c).toBeLessThan(p * DUR)
+      expect(c).toBeGreaterThan(0)
+    }
+  })
+
+  it('discounts ~30% near the start and ~7.5% at the midpoint', () => {
+    expect(conservativeCoverageSec(0.01, DUR) / (0.01 * DUR)).toBeCloseTo(0.703, 3)
+    expect(conservativeCoverageSec(0.5, DUR) / (0.5 * DUR)).toBeCloseTo(0.85, 3)
+  })
+
+  it('clamps progress and handles bad inputs', () => {
+    expect(conservativeCoverageSec(1.5, DUR)).toBe(DUR)
+    expect(conservativeCoverageSec(-1, DUR)).toBe(0)
+    expect(conservativeCoverageSec(NaN, DUR)).toBe(0)
+    expect(conservativeCoverageSec(0.5, 0)).toBe(0)
+    expect(conservativeCoverageSec(0.5, NaN)).toBe(0)
+  })
+
+  it('progressForCoverage inverts it', () => {
+    for (const sec of [30, 60, 600, 3600, 7000]) {
+      const p = progressForCoverage(sec, DUR)
+      expect(conservativeCoverageSec(p, DUR)).toBeCloseTo(sec, 6)
+    }
+    expect(progressForCoverage(0, DUR)).toBe(0)
+    expect(progressForCoverage(60, 0)).toBe(0)
+    expect(progressForCoverage(99_999, DUR)).toBeCloseTo(1, 9)
+    expect(progressForCoverage(3600, DUR, 0)).toBe(0.5)
+  })
+
+  it('the start gate needs the conservative 60s, not 60s of CBR estimate', () => {
+    // 1% of 2h = 72s under CBR (would start), but only ~50s conservatively → keep filling.
+    const d = decideStartGate([client({ progress: 0.01, downloadMbps: 12 })], MOVIE)
+    expect(d.start).toBe(false)
+    expect(d.mode).toBe('progressive')
+    // ETA covers the gap from 1% to the conservative target (~1.19%), at 12 Mbps ≈ 4s.
+    const targetP = progressForCoverage(60, MOVIE.durationSec)
+    const expected = ((targetP - 0.01) * MOVIE.sizeBytes * 8) / 12e6
+    expect(d.etaSec).toBe(Math.ceil(expected))
   })
 })
 

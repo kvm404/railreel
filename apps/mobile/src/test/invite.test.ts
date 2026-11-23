@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { encodeJoinUrl, PROTOCOL_VERSION } from '@/lib/protocol'
-import { findInviteUrl, parseInvite } from '@/lib/links/invite'
+import { encodeJoinUrl, PROTOCOL_VERSION, SUBTITLE_NAME_MAX } from '@/lib/protocol'
+import { findInviteUrl, isOtherVersionInvite, parseInvite } from '@/lib/links/invite'
 import { isValidGuestName, MAX_GUEST_NAME_LENGTH, normalizeGuestName } from '@/lib/social/name'
 import { MAX_SRT_CHARS, validateSrtFile } from '@/lib/subtitles/validate'
 import { DISCOVERY_EMPTY_AFTER_MS, discoveryState } from '@/lib/net/discovery'
@@ -26,6 +26,15 @@ describe('invite links', () => {
     expect(parseInvite('railreel://join?v=1')).toBeNull()
     expect(parseInvite(link.replace(`v=${PROTOCOL_VERSION}`, 'v=999'))).toBeNull()
     expect(parseInvite('railreel://other?x=1')).toBeNull()
+  })
+
+  it('tells an other-version invite apart from a broken one', () => {
+    const v1 = link.replace(`v=${PROTOCOL_VERSION}`, 'v=1')
+    expect(isOtherVersionInvite(v1)).toBe(true)
+    expect(isOtherVersionInvite(`join me: ${v1}`)).toBe(true)
+    expect(isOtherVersionInvite(link)).toBe(false) // valid
+    expect(isOtherVersionInvite('railreel://join?v=2')).toBe(false) // same version, just broken
+    expect(isOtherVersionInvite('hello')).toBe(false)
   })
 })
 
@@ -63,6 +72,16 @@ describe('subtitle validation', () => {
     expect(validateSrtFile('a.srt', 'this is not a subtitle file at all')).toMatchObject({ ok: false, reason: 'no-cues' })
     expect(validateSrtFile('a.txt', good)).toMatchObject({ ok: false, reason: 'not-srt' })
     expect(validateSrtFile('a.srt', good + 'x'.repeat(MAX_SRT_CHARS))).toMatchObject({ ok: false, reason: 'too-large' })
+  })
+
+  it('applies the receivers’ limits: UTF-8 bytes, not UTF-16 characters, and the name cap', () => {
+    // ~700k Devanagari characters: under 2M UTF-16 units, but ~2.1 MB of UTF-8 — guests would drop it.
+    const hindi = good + 'क'.repeat(700_000)
+    expect(hindi.length).toBeLessThan(MAX_SRT_CHARS)
+    expect(validateSrtFile('a.srt', hindi)).toMatchObject({ ok: false, reason: 'too-large' })
+    const longName = `${'x'.repeat(SUBTITLE_NAME_MAX)}.srt`
+    expect(validateSrtFile(longName, good)).toMatchObject({ ok: false, reason: 'name-too-long' })
+    expect(validateSrtFile(`${'x'.repeat(SUBTITLE_NAME_MAX - 4)}.srt`, good).ok).toBe(true)
   })
 })
 

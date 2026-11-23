@@ -67,8 +67,12 @@ const GATE_DEFAULTS = { minStartBufferSec: 60, finishMarginSec: 60 }
 
 /**
  * Seconds of playable media between the playhead and the download edge, from download progress.
- * Approximates the file as constant-bitrate: `progress × duration − position`. Good enough for the
- * gate/floor (H.264 MP4s the app accepts are near-CBR at this granularity); never negative.
+ * Approximates the file as constant-bitrate: `progress × duration − position`; never negative.
+ * This is the TELEMETRY number (heartbeats → buffer floor) and stays an unbiased estimate on
+ * purpose: during the show a VBR miss is backstopped by the player's own stall report, while a
+ * pessimistic floor would hold the room for marginal-but-fine downloaders mid-movie. The
+ * decisions that put a player INTO playback (start gate, late join) use the conservative
+ * `conservativeCoverageSec` below instead.
  */
 export function downloadBufferedAheadSec(progress: number, durationSec: number, positionSec: number): number {
   const p = !Number.isFinite(progress) || progress < 0 ? 0 : progress > 1 ? 1 : progress
@@ -76,6 +80,32 @@ export function downloadBufferedAheadSec(progress: number, durationSec: number, 
   const pos = Number.isFinite(positionSec) && positionSec > 0 ? positionSec : 0
   const ahead = p * dur - pos
   return ahead > 0 ? ahead : 0
+}
+
+/**
+ * VBR safety for entering playback. Byte progress is not time progress: a valid H.264 MP4 whose
+ * opening scenes run at 2× the average bitrate has only ~2.5% of its RUNTIME in the first 5% of
+ * its BYTES, so a CBR estimate promises a late joiner minutes it doesn't have. We discount with
+ * `p − k·p·(1 − p)`: exact at both ends (nothing / the whole file), ~30% pessimistic near the
+ * start (where a start or late join is usually decided), ~7.5% at the midpoint. Real sample
+ * offsets from the moov would be exact, but a guest can't read them before it has the file.
+ */
+export const VBR_COVERAGE_K = 0.3
+
+/** Conservative seconds of media covered by `progress` of the file (see VBR_COVERAGE_K). */
+export function conservativeCoverageSec(progress: number, durationSec: number, k = VBR_COVERAGE_K): number {
+  const p = !Number.isFinite(progress) || progress < 0 ? 0 : progress > 1 ? 1 : progress
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0
+  return (p - k * p * (1 - p)) * dur
+}
+
+/** Inverse of conservativeCoverageSec: the progress whose conservative coverage reaches `sec`. */
+export function progressForCoverage(sec: number, durationSec: number, k = VBR_COVERAGE_K): number {
+  if (!(durationSec > 0) || !Number.isFinite(sec) || sec <= 0) return 0
+  const c = Math.min(1, sec / durationSec)
+  if (k <= 0) return c // degenerates to CBR
+  // k·p² + (1 − k)·p − c = 0 → the positive root.
+  return (-(1 - k) + Math.sqrt((1 - k) ** 2 + 4 * k * c)) / (2 * k)
 }
 
 /** Seconds until this client's download completes at its measured rate (Infinity if unknowable). */
@@ -119,7 +149,8 @@ export function decideStartGate(
     const pos = Number.isFinite(c.positionSec) && c.positionSec > 0 ? Math.min(media.durationSec, c.positionSec) : 0
     const remainingPlaySec = Math.max(0, media.durationSec - pos)
     const outruns = finish < remainingPlaySec - finishMarginSec
-    const buffered = downloadBufferedAheadSec(c.progress, media.durationSec, pos)
+    // Starting puts a player into playback → judge the buffer with the VBR-safe coverage.
+    const buffered = Math.max(0, conservativeCoverageSec(c.progress, media.durationSec) - pos)
     if (!outruns) {
       // Throughput can't beat the playhead — a progressive start would stall mid-movie. The only
       // safe start for this client is after its download completes.
@@ -128,9 +159,9 @@ export function decideStartGate(
       if (Number.isFinite(finish)) etaSec = Math.max(etaSec, finish)
     } else if (buffered < minStartBufferSec) {
       waitingOn.push(c.name)
-      // Not the full download — just how long until the start buffer fills.
-      const needSec = minStartBufferSec - buffered
-      const needBytes = (needSec / media.durationSec) * media.sizeBytes
+      // Not the full download — just how long until the (conservative) start buffer fills.
+      const targetP = progressForCoverage(pos + minStartBufferSec, media.durationSec)
+      const needBytes = Math.max(0, targetP - c.progress) * media.sizeBytes
       etaSec = Math.max(etaSec, (needBytes * 8) / (c.downloadMbps * 1e6))
     }
   }
@@ -198,15 +229,36 @@ export function departureClock(etaSec: number | null): string {
 /** Lead a late joiner needs beyond the live playhead before it may enter the show (seconds). */
 export const CATCH_UP_LEAD_SEC = 30
 
+/** What a late joiner can actually play right now. Required: no default may admit an empty player. */
+export interface JoinShowSource {
+  /**
+   * A partial copy is playable (faststart MP4 behind the local proxy). false → no progressive
+   * source exists (moov at EOF), so only a FINISHED file may enter.
+   */
+  progressive: boolean
+  /** The player has a source to open right now (the store's movieUri is set). */
+  hasSource: boolean
+}
+
 /**
- * May a late joiner enter the show yet? Its download edge must cover the CURRENT playhead plus a
- * lead (or the download is simply done) — entering earlier would just stall the player at a
- * position it hasn't downloaded and hold nothing but its own experience hostage.
+ * May a late joiner enter the show yet? It needs something to play, and its download edge must
+ * cover the CURRENT playhead plus a lead — judged with the VBR-safe coverage — or the download is
+ * simply done. Without a progressive source only a finished file can enter: an empty player would
+ * report itself in-show and stalled, pausing the established room for the rest of the transfer.
  */
-export function canJoinShow(progress: number, durationSec: number, positionSec: number, leadSec = CATCH_UP_LEAD_SEC): boolean {
+export function canJoinShow(
+  progress: number,
+  durationSec: number,
+  positionSec: number,
+  source: JoinShowSource,
+  leadSec = CATCH_UP_LEAD_SEC,
+): boolean {
+  if (!source.hasSource) return false
   if (progress >= 1) return true
+  if (!source.progressive) return false
   if (!(durationSec > 0)) return false // can't reason without a duration — wait for the full file
-  return downloadBufferedAheadSec(progress, durationSec, positionSec) >= leadSec
+  const pos = Number.isFinite(positionSec) && positionSec > 0 ? positionSec : 0
+  return conservativeCoverageSec(progress, durationSec) - pos >= leadSec
 }
 
 /**

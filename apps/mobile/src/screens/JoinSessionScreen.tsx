@@ -23,8 +23,8 @@ import { useNavigation, type NavParams } from '@/navigation/context'
 import { useTheme } from '@/theme/ThemeProvider'
 import { radii } from '@/theme/tokens'
 import { useSession } from '@/session/SessionProvider'
-import { encodeJoinUrl, PROTOCOL_VERSION } from '@/lib/protocol'
-import { parseInvite, type Invite } from '@/lib/links/invite'
+import { encodeJoinUrl, PROTOCOL_VERSION, VERSION_MISMATCH_MESSAGE } from '@/lib/protocol'
+import { isOtherVersionInvite, parseInvite, type Invite } from '@/lib/links/invite'
 import { DISCOVERY_EMPTY_AFTER_MS, discoveryState } from '@/lib/net/discovery'
 import { isValidGuestName, MAX_GUEST_NAME_LENGTH, normalizeGuestName } from '@/lib/social/name'
 
@@ -283,7 +283,7 @@ export function JoinSessionScreen({ params }: { params?: NavParams }) {
           />
           {pasteInvalid ? (
             <Text variant="caption" tone="danger" accessibilityLiveRegion="polite">
-              That doesn't look like a RailReel invite link.
+              {isOtherVersionInvite(link) ? VERSION_MISMATCH_MESSAGE : "That doesn't look like a RailReel invite link."}
             </Text>
           ) : null}
           <Button

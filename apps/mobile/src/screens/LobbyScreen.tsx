@@ -62,13 +62,17 @@ export function LobbyScreen() {
 
   // A guest enters the show once the host has started it AND its own download covers the live
   // playhead (+lead) — for a late joiner mid-movie, it waits here until buffered past that point.
+  // It also needs something to PLAY: a source (the proxy or the finished file), and — for a
+  // partial copy — a file the player can open partially (faststart).
   const { playback, hostNowMs, progress, movie, userLeftShow } = s
   const durationSec = movie?.durationSec ?? 0
+  const hasSource = s.movieUri != null
+  const progressive = movie?.fastStart === true
   useEffect(() => {
     if (isHost || !playback || userLeftShow) return
     const livePos = targetPositionSec(playback, hostNowMs())
-    if (canJoinShow(progress, durationSec, livePos)) nav.navigate('Player')
-  }, [isHost, playback, hostNowMs, progress, durationSec, nav, userLeftShow])
+    if (canJoinShow(progress, durationSec, livePos, { hasSource, progressive })) nav.navigate('Player')
+  }, [isHost, playback, hostNowMs, progress, durationSec, nav, userLeftShow, hasSource, progressive])
 
   // Relabel the host's own entry to "You"; show our own ring from local progress (smoother echo).
   const people: Participant[] = useMemo(
@@ -361,7 +365,7 @@ export function LobbyScreen() {
           </View>
         ) : downloadFailed ? (
           <Button title="The reel snagged — try again" intent="amber" height={68} onPress={s.retryDownload} />
-        ) : !isHost && userLeftShow && playback && canJoinShow(progress, durationSec, targetPositionSec(playback, hostNowMs())) ? (
+        ) : !isHost && userLeftShow && playback && canJoinShow(progress, durationSec, targetPositionSec(playback, hostNowMs()), { hasSource, progressive }) ? (
           <Button
             title="Rejoin the show"
             intent="amber"

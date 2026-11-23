@@ -50,7 +50,9 @@ export type ServerMsg =
   | { t: 'reaction'; from: string; fromId?: string; emoji: string; at: number }
   | { t: 'syncPong'; t1: number; t2: number; t3: number }
   | { t: 'ended'; reason: 'host-left' | 'host-ended' }
-  | { t: 'subtitle'; name: string; content: string }
+  // The SRT body, once per revision (empty name+content = removed). `rev` mirrors the roster's
+  // media.subtitle.rev; receivers recompute it from `content` rather than trusting it.
+  | { t: 'subtitle'; name: string; content: string; rev?: string }
   | {
       t: 'playbackRequestDecision'
       requestId: string
@@ -105,6 +107,9 @@ export type ClientMsg =
   | { t: 'chat'; id: string; grant: string; text: string }
   | { t: 'reaction'; id: string; grant: string; emoji: string }
   | { t: 'syncPing'; t1: number }
+  // Pull the subtitle body: the roster named revision `rev` and we don't have it (just approved,
+  // or reconnected after missing a replacement). The host answers with a `subtitle` message.
+  | { t: 'subtitleRequest'; id: string; grant: string; rev: string }
 
 export type AnyMsg = ServerMsg | ClientMsg
 
@@ -134,4 +139,5 @@ export const CLIENT_MSG_TYPES = [
   'chat',
   'reaction',
   'syncPing',
+  'subtitleRequest',
 ] as const

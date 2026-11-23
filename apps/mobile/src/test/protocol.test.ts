@@ -7,7 +7,10 @@ import {
   parseServerMsg,
   encodeMsg,
   PROTOCOL_VERSION,
+  VersionMismatchError,
+  isVersionMismatch,
   isMediaInfo,
+  subtitleMeta,
   type JoinPayload,
   type MediaInfo,
   type ClientMsg,
@@ -33,8 +36,16 @@ describe('join payload codec', () => {
   })
 
   it('rejects a mismatched protocol version', () => {
-    const url = encodeJoinUrl(payload).replace('v=1', 'v=999')
+    const url = encodeJoinUrl(payload).replace(`v=${PROTOCOL_VERSION}`, 'v=999')
     expect(() => decodeJoinUrl(url)).toThrow(/unsupported protocol/)
+  })
+
+  it('refuses a v0.1.0 (protocol 1) link explicitly — subtitles would silently break', () => {
+    expect(PROTOCOL_VERSION).toBe(2)
+    const url = encodeJoinUrl(payload).replace(`v=${PROTOCOL_VERSION}`, 'v=1')
+    expect(() => decodeJoinUrl(url)).toThrow(VersionMismatchError)
+    expect(isVersionMismatch(new VersionMismatchError(1))).toBe(true)
+    expect(isVersionMismatch(new Error('x'))).toBe(false)
   })
 
   it('rejects an out-of-range port', () => {
@@ -150,11 +161,7 @@ describe('message parsing', () => {
         bitrateMbps: 5,
         hash: 'abc',
         format: 'mp4',
-        subtitle: {
-          name: 'subs.srt',
-          sizeBytes: 50,
-          content: '1\n00:00:01,000 --> 00:00:02,000\nHi\n',
-        },
+        subtitle: subtitleMeta('subs.srt', '1\n00:00:01,000 --> 00:00:02,000\nHi\n'),
       },
     }
     const r = parseServerMsg(encodeMsg(welcomeMsg))
@@ -162,7 +169,10 @@ describe('message parsing', () => {
     if (r.ok) {
       const welcome = r.msg as Extract<ServerMsg, { t: 'welcome' }>
       expect(welcome.media.subtitle?.name).toBe('subs.srt')
-      expect(welcome.media.subtitle?.content).toBe('1\n00:00:01,000 --> 00:00:02,000\nHi\n')
+      expect(welcome.media.subtitle?.sizeBytes).toBe(35)
+      expect(welcome.media.subtitle?.rev).toMatch(/^s1:/)
+      // Metadata only — the body never rides the roster/media.
+      expect(welcome.media.subtitle).not.toHaveProperty('content')
     }
   })
 
@@ -207,6 +217,13 @@ describe('message parsing', () => {
       expect(isMediaInfo({ ...base, durationSec: Infinity })).toBe(false)
       expect(isMediaInfo({ ...base, title: 3 })).toBe(false)
     })
+  })
+
+  it('accepts a client subtitleRequest message', () => {
+    const msg: ClientMsg = { t: 'subtitleRequest', id: 'c1', grant: 'g1', rev: 's1:deadbeef-10' }
+    const r = parseClientMsg(encodeMsg(msg))
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.msg).toEqual(msg)
   })
 
   it('accepts a valid client playbackRequest message', () => {
