@@ -214,7 +214,10 @@ jobs:
           fi
 
           echo "--- apksigner verify ---"
-          "$BT/apksigner" verify --verbose --print-certs "$OUT" | tee "$RUNNER_TEMP/certs.txt"
+          # No pipe: a failed verification must fail the step (bash -e without pipefail
+          # would otherwise report tee's success and let an invalid APK be published).
+          "$BT/apksigner" verify --verbose --print-certs "$OUT" > "$RUNNER_TEMP/certs.txt"
+          cat "$RUNNER_TEMP/certs.txt"
           if [ "$SIGNED" = release ] && grep -qi 'CN=Android Debug' "$RUNNER_TEMP/certs.txt"; then
             echo "::error::APK still carries the debug certificate"
             exit 1
