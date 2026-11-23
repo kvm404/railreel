@@ -3,12 +3,14 @@ import { StyleSheet } from 'react-native'
 import Animated, { FadeInDown, FadeOut, useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
 import { Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
+import { fonts } from '@/theme/tokens'
 import { tickerWindow, type ChatEntry } from '@/lib/social/feed'
 
 /**
  * Subtitle-style chat: the last few FRESH lines fade in at the bottom-left of the film — like
  * subtitles from the cabin — and melt away after a few seconds. History lives in the ChatSheet;
- * the film stays king. Mono sender name in filament amber (people are warm), body in primary.
+ * the film stays king. Sender name in filament amber (people are warm), body in primary — both in
+ * Space Grotesk: this is conversation, not instrumentation.
  *
  * Placement comes from the Player's overlay layout (its reserved social region); `lift` rides
  * the chrome curtain on the UI thread so the lines glide clear of the transport when it opens.
@@ -49,8 +51,8 @@ export const ChatTicker = memo(function ChatTicker({
     <Animated.View pointerEvents="none" style={[styles.stack, { bottom, left, right }, liftStyle]}>
       {lines.map((l) => (
         <Animated.View key={l.id} entering={FadeInDown.duration(180)} exiting={FadeOut.duration(240)} style={styles.line}>
-          <Text variant="data" style={[styles.sender, { color: t.palette.amber }]} numberOfLines={1}>
-            {l.from.toLowerCase()}
+          <Text variant="caption" style={[styles.sender, { color: t.palette.amber, textShadowColor: t.palette.void }]} numberOfLines={1}>
+            {l.from}
           </Text>
           <Text variant="caption" style={[styles.text, { textShadowColor: t.palette.void }]} numberOfLines={2}>
             {l.text}
@@ -64,6 +66,6 @@ export const ChatTicker = memo(function ChatTicker({
 const styles = StyleSheet.create({
   stack: { position: 'absolute', gap: 6 },
   line: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
-  sender: { maxWidth: '40%', flexShrink: 0 },
+  sender: { maxWidth: '40%', flexShrink: 0, fontFamily: fonts.bodyBold, textShadowRadius: 6 },
   text: { flexShrink: 1, textShadowRadius: 6 },
 })

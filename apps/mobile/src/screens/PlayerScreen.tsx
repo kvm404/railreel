@@ -987,7 +987,7 @@ export function PlayerScreen() {
         />
       ) : null}
 
-      <ChatSheet visible={chatOpen} log={chatLog} onSend={sendChat} onClose={closeChat} />
+      <ChatSheet visible={chatOpen} log={chatLog} onSend={sendChat} onClose={closeChat} reconnecting={s.reconnecting} />
 
       {/* Time-boxed host prompt and guest feedback sit above even the chat: they expire on their own. */}
       {moderation ? (

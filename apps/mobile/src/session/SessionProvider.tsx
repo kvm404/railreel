@@ -220,8 +220,12 @@ export interface SessionStore {
   chatLog: ChatEntry[]
   /** Recent reaction events for the floating overlay (UI filters by freshness). */
   reactions: ReactionEvent[]
-  /** Send a chat line to the room (host broadcasts; a guest routes via the host). */
-  sendChat: (text: string) => void
+  /**
+   * Send a chat line to the room (host broadcasts; a guest routes via the host). Returns whether
+   * the line was accepted: false for empty text, or for a guest whose link to the host is down or
+   * reconnecting — the caller keeps the draft.
+   */
+  sendChat: (text: string) => boolean
   /** Send a floating emoji reaction to the room. */
   sendReaction: (emoji: string) => void
 
@@ -1420,17 +1424,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Both role-aware: the host IS the hub (stamp + broadcast + local append); a guest routes via
   // the host and waits for the echo — the host's ordering is the only ordering.
   const sendChat = useCallback(
-    (raw: string) => {
+    (raw: string): boolean => {
       const text = sanitizeChatText(raw)
-      if (!text) return
+      if (!text) return false
       if (roleRef.current === 'host') {
         const at = Date.now()
         RailReelHost.broadcast(JSON.stringify({ t: 'chat', from: 'Host', fromId: 'host', text, at })).catch(() => {})
         ingestChat('You', text, at)
-      } else {
-        const c = clientRef.current
-        if (c) c.session.send({ t: 'chat', id: c.myId, grant: c.grant, text })
+        return true
       }
+      // Mid-reconnect clientRef still holds the dead socket, whose send fails silently.
+      const c = clientRef.current
+      if (!c || reconnectingRef.current) return false
+      c.session.send({ t: 'chat', id: c.myId, grant: c.grant, text })
+      return true
     },
     [ingestChat],
   )
