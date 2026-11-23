@@ -52,7 +52,7 @@ export interface AutoResumeInput {
   approved: boolean
   /** Current client phase. */
   phase: string
-  /** The movie is fully cached. */
+  /** The movie is fully cached AND validated (status, size, fingerprint) — not merely all bytes read. */
   complete: boolean
   /** A transfer attempt is running right now. */
   transferring: boolean
@@ -74,14 +74,48 @@ export function shouldAutoResume(i: AutoResumeInput): boolean {
   )
 }
 
-/** A running transfer that has made no progress for this long through a WS drop is presumed dead. */
-export const TRANSFER_STALL_MS = 5000
+/**
+ * A running transfer with no bytes for this long is presumed dead. Well under the playback
+ * proxy's 30s silent-edge timeout (and OkHttp's 60s read timeout), well over a healthy hotspot's
+ * gaps between progress events (~100ms) and the host's time to first byte.
+ */
+export const TRANSFER_STALL_MS = 8000
 
 /**
- * After the WS comes back: is the transfer still "running" but silently dead (OkHttp's 60s read
- * timeout hasn't fired yet)? Then abort and resume it now rather than wait out the timeout —
- * the playback proxy gives up on a silent edge after 30s.
+ * Watchdog tick: is the transfer still "running" but silently dead (OkHttp's 60s read timeout
+ * hasn't fired yet)? Then abort and resume it now rather than wait out the timeout — the
+ * playback proxy gives up on a silent edge after 30s. `lastProgressAtMs` starts at the moment
+ * the request was issued, which is the first-byte grace.
  */
-export function isTransferStalled(transferring: boolean, lastProgressAtMs: number, nowMs: number): boolean {
-  return transferring && lastProgressAtMs > 0 && nowMs - lastProgressAtMs >= TRANSFER_STALL_MS
+export function isTransferStalled(
+  transferring: boolean,
+  lastProgressAtMs: number,
+  nowMs: number,
+  stallMs = TRANSFER_STALL_MS,
+): boolean {
+  return transferring && lastProgressAtMs > 0 && nowMs - lastProgressAtMs >= stallMs
+}
+
+/** Bytes of real progress in one attempt that earn back the automatic retry budget. */
+export const MEANINGFUL_PROGRESS_BYTES = 4 * 1024 * 1024
+
+/**
+ * Reset the retry budget? Only on success or real forward progress — never merely because the
+ * WS reconnected (WS handshakes can succeed while HTTP keeps failing; resetting on reconnect
+ * would allow unlimited, un-backed-off attempts).
+ */
+export function earnsRetryBudget(bytesThisAttempt: number): boolean {
+  return Number.isFinite(bytesThisAttempt) && bytesThisAttempt >= MEANINGFUL_PROGRESS_BYTES
+}
+
+/**
+ * Byte progress for telemetry and the UI before the file is validated: never a full 1, because
+ * the host treats progress ≥ 1 as "ready" and an unvalidated file (fingerprint pending, disk
+ * write failed after the last read) is not.
+ */
+export const UNVALIDATED_PROGRESS_CAP = 0.999
+
+export function unvalidatedProgress(bytesWritten: number, totalBytes: number): number {
+  if (!(totalBytes > 0) || !Number.isFinite(bytesWritten) || bytesWritten <= 0) return 0
+  return Math.min(UNVALIDATED_PROGRESS_CAP, bytesWritten / totalBytes)
 }

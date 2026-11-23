@@ -29,6 +29,8 @@ import {
   MAX_TRANSFER_RETRIES,
   resumeOffset,
   shouldAutoResume,
+  earnsRetryBudget,
+  unvalidatedProgress,
   transferResultOk,
   transferRetryDelayMs,
 } from '@/lib/net/transfer'
@@ -51,6 +53,8 @@ import {
   isMediaInfo,
   isSubtitleMeta,
   isValidSecret,
+  isVersionMismatch,
+  VERSION_MISMATCH_MESSAGE,
   needsSubtitleFetch,
   newSession,
   parseClientMsg,
@@ -102,8 +106,6 @@ configureCacheStorage(CACHE_DIR, fsAdapter)
 const MOVIE_CACHE = getMovieCachePath(CACHE_DIR)
 const MOVIE_META = getMovieMetaPath(CACHE_DIR) // "Keep & Leave" identity record (lib/storage/keptCache)
 const SUBTITLE_CACHE = getSubtitleCachePath(CACHE_DIR)
-/** A superseded transfer attempt gets this long to unwind before a new one touches MOVIE_CACHE. */
-const PREV_ATTEMPT_SETTLE_MS = 5000
 /** Kept-copy reuse: how long to wait for the roster carrying the host's fingerprint. */
 const KEPT_HASH_WAIT_MS = 3000
 /** A guest's playback request with no decision by now is shown as dismissed (decision lost). */
@@ -383,7 +385,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Epoch whose transfer wrote the partial MOVIE_CACHE (null: none, or not a clean prefix). Only
   // that partial may be resumed with a Range request.
   const partialEpochRef = useRef<number | null>(null)
-  const lastProgressAtRef = useRef(0) // last transfer progress event (stall detection on reconnect)
+  const lastProgressAtRef = useRef(0) // last transfer progress event (the stall watchdog's clock)
+  // The movie is cached AND validated (status, size, fingerprint). Byte progress is capped below 1
+  // until then, so neither the host nor the retry logic mistakes "all bytes read" for "ready".
+  const completeRef = useRef(false)
+  // An automatic retry's backoff elapsed while the WS was re-handshaking; reconnect fires it.
+  const retryPendingRef = useRef(false)
   const transferRetriesRef = useRef(0) // automatic retries spent in the current failure streak
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const startDownloadRef = useRef<(opts?: { resume?: boolean }) => Promise<void>>(async () => {})
@@ -411,6 +418,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }
       if (requestDeadlineRef.current) clearTimeout(requestDeadlineRef.current)
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+      retryTimerRef.current = null
+      // Invalidate ownership: every in-flight continuation (transfer awaits, proxy start, retry
+      // and reconnect timers) checks the epoch/attempt and bails instead of updating a dead
+      // provider or arming new work; the native download is cancelled so a remount can't race it.
+      epochRef.current++
+      attemptRef.current++
+      proxyGenRef.current++
+      downloadRef.current?.cancelAsync().catch(() => {})
+      downloadRef.current = null
+      downloadingRef.current = false
     }
   }, [])
 
@@ -835,6 +852,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     transferRetriesRef.current = 0
     partialEpochRef.current = null
     lastProgressAtRef.current = 0
+    completeRef.current = false
+    retryPendingRef.current = false
     downloadingRef.current = false
     downloadRef.current?.cancelAsync().catch(() => {})
     downloadRef.current = null
@@ -887,10 +906,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     // Startup orphan sweep: remove any abandoned cache files from previous crashed sessions —
-    // except a copy the user chose to keep ("Keep & Leave") that is still complete.
-    findKeptCacheFiles(CACHE_DIR, fsAdapter, (uri) => LegacyFS.readAsStringAsync(uri))
+    // except a copy the user chose to keep ("Keep & Leave") that is still complete. It seeds the
+    // transfer chain (transferTaskRef), so the first download — its kept-copy check, deletes and
+    // writes — runs only after the sweep has finished: a snapshot keep-set can never delete a
+    // movie + record a download completed meanwhile.
+    const before = transferTaskRef.current
+    const sweep = (before ?? Promise.resolve())
+      .then(() => findKeptCacheFiles(CACHE_DIR, fsAdapter, (uri) => LegacyFS.readAsStringAsync(uri)))
       .then((keep) => sweepOrphanCache(CACHE_DIR, fsAdapter, keep))
       .catch(() => ({ sweptFiles: [], reclaimedBytes: 0 }))
+    transferTaskRef.current = sweep.then(() => {})
+    sweep
       .then((result) => {
         if (__DEV__ && result.sweptFiles.length > 0) {
           console.log(
@@ -1410,7 +1436,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const go = shouldAutoResume({
       approved: approvedRef.current,
       phase: clientPhaseRef.current,
-      complete: progressRef.current >= 1,
+      complete: completeRef.current, // validated — byte progress alone can hit 100% and still fail
       transferring: downloadingRef.current || downloadRef.current !== null,
       reconnecting: reconnectingRef.current,
       retries: transferRetriesRef.current,
@@ -1428,10 +1454,32 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const myEpoch = epochRef.current
     retryTimerRef.current = setTimeout(() => {
       retryTimerRef.current = null
-      // While the WS is still re-handshaking, the reconnect success path resumes instead.
-      if (epochRef.current === myEpoch) maybeAutoResume()
+      if (epochRef.current !== myEpoch) return // session over (or provider unmounted)
+      // The backoff has elapsed, but the WS is still re-handshaking (a retry would fail the same
+      // way): park it — the reconnect success path fires it, keeping budget and backoff intact.
+      if (reconnectingRef.current) {
+        retryPendingRef.current = true
+        return
+      }
+      maybeAutoResume()
     }, transferRetryDelayMs(n))
   }, [clearRetryTimer, maybeAutoResume])
+
+  // A running transfer that has gone silent is dead (OkHttp would wait out its 60s read timeout;
+  // the proxy gives up on a silent edge after 30s). Abort it and let the normal retry path —
+  // budget + backoff — resume it. Abandoning bumps the attempt, so the dead attempt's own
+  // continuations bail; the next attempt waits for its native download to settle.
+  const abortStalledTransfer = useCallback(() => {
+    attemptRef.current++
+    downloadRef.current?.cancelAsync().catch(() => {})
+    downloadRef.current = null
+    downloadingRef.current = false
+    // Like any failure: the lobby offers Retry (which also covers a spent automatic budget).
+    setError('The transfer stalled — reconnecting to the host…')
+    setClientPhase('approved')
+    clientPhaseRef.current = 'approved'
+    scheduleTransferRetry()
+  }, [scheduleTransferRetry])
 
   // Pull the subtitle body when the roster names a revision we don't have. Only once approved
   // (the host serves only admitted guests) and once per revision per connection.
@@ -1465,6 +1513,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (downloadRef.current || downloadingRef.current) return Promise.resolve()
       downloadingRef.current = true
       clearRetryTimer()
+      retryPendingRef.current = false
+      completeRef.current = false
       const myEpoch = epochRef.current
       const myAttempt = ++attemptRef.current
       const stale = (): boolean => epochRef.current !== myEpoch || attemptRef.current !== myAttempt
@@ -1478,6 +1528,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
       const publishReady = () => {
         transferRetriesRef.current = 0
+        completeRef.current = true // the ONLY place completion is claimed: after validation
         progressRef.current = 1
         setProgress(1)
         // If the proxy is serving the show (or about to — its handler sets the source), leave it
@@ -1494,7 +1545,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
       const run = async (): Promise<void> => {
         try {
-          if (prev) await Promise.race([prev.catch(() => {}), sleep(PREV_ATTEMPT_SETTLE_MS)])
+          // Exclusive ownership of MOVIE_CACHE: the previous attempt (and the startup sweep, which
+          // seeds this chain) must have FULLY settled — cancelAsync only requests cancellation, and
+          // the native downloadAsync promise settles only once its writer has stopped. No timeout:
+          // starting early would let the old writer append behind our resume offset.
+          if (prev) await prev.catch(() => {})
           if (stale()) return
 
           if (!opts.resume) {
@@ -1559,11 +1614,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 return
               }
               // Progress against the movie's real size when known, so an error body's tiny
-              // Content-Length can't read as "100%" (and beat a false ready to the host).
-              const denom = size > 0 ? size : total
-              const frac = denom > 0 ? clamp01(p.totalBytesWritten / denom) : 0
+              // Content-Length can't read as "100%". Capped below 1 until validated: the host
+              // treats 1 as ready, and the last read can still fail its write or fingerprint.
+              const frac = unvalidatedProgress(p.totalBytesWritten, size > 0 ? size : total)
               progressRef.current = frac
               setProgress(frac)
+              // Real forward progress earns back the automatic retry budget (a WS reconnect doesn't).
+              if (earnsRetryBudget(p.totalBytesWritten - resumedFrom)) transferRetriesRef.current = 0
 
               // Measured throughput (smoothed) — the number the host's start gate reasons about.
               const sample = mbpsSampleRef.current
@@ -1603,7 +1660,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                     // Full pre-cache fallback — and if the download already finished while we
                     // were starting, the completion block has passed, so set the source here.
                     proxyStateRef.current = 'failed'
-                    if (progressRef.current >= 1) setMovieUri(MOVIE_CACHE)
+                    if (completeRef.current) setMovieUri(MOVIE_CACHE)
                   })
               }
 
@@ -1618,8 +1675,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           )
           downloadRef.current = dl
           partialEpochRef.current = myEpoch // from here MOVIE_CACHE is this session's partial
-          lastProgressAtRef.current = Date.now()
-          const res = await dl.downloadAsync()
+          lastProgressAtRef.current = Date.now() // also the first-byte grace for the watchdog
+          // Watchdog for the whole transfer, not just at WS reconnect: a quick WS blip can leave
+          // the HTTP request silently dead long after the reconnect check has passed.
+          const watched = dl
+          const watchdog = setInterval(() => {
+            if (stale() || downloadRef.current !== watched) return
+            if (isTransferStalled(true, lastProgressAtRef.current, Date.now())) abortStalledTransfer()
+          }, 1000)
+          let res: Awaited<ReturnType<LegacyFS.DownloadResumable['downloadAsync']>>
+          try {
+            res = await dl.downloadAsync()
+          } finally {
+            clearInterval(watchdog)
+          }
           if (stale() || downloadRef.current !== dl) return // superseded — not ours to finish
           downloadRef.current = null
 
@@ -1667,6 +1736,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           if (downloadRef.current === dl) downloadRef.current = null
           if (clientPhaseRef.current === 'denied' || !approvedRef.current) return
           // NOTE: no deleteAsync for a network failure — the partial is a clean prefix we resume.
+          // If the partial is NOT resumable (bad status, wrong size, failed fingerprint), withdraw
+          // the progress we advertised: the next attempt starts from zero.
+          if (partialEpochRef.current !== myEpoch) {
+            progressRef.current = 0
+            setProgress(0)
+          }
+          sendBeat()
           setError(String(e))
           setClientPhase('approved') // Retry in the lobby; automatic below (no button mid-show)
           clientPhaseRef.current = 'approved'
@@ -1681,25 +1757,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       transferTaskRef.current = task
       return task
     },
-    [sendBeat, getCacheInfo, clearRetryTimer, detachProgressive, reuseKeptCopy, scheduleTransferRetry],
+    [sendBeat, getCacheInfo, clearRetryTimer, detachProgressive, reuseKeptCopy, scheduleTransferRetry, abortStalledTransfer],
   )
   startDownloadRef.current = startDownload
 
-  // The WS is back (hotspot blip): bring the HTTP transfer back with it. A transfer that is
-  // "running" but silent is presumed dead (OkHttp would wait out its 60s read timeout, while the
-  // proxy gives up on a silent edge after 30s) — abort it and resume now. A failed one resumes.
+  // The WS is back (hotspot blip): bring the HTTP transfer back with it — WITHOUT resetting the
+  // retry budget or skipping the backoff (a WS handshake can succeed while HTTP keeps failing).
+  // A retry whose backoff elapsed during the outage fires now; a pending one keeps its deadline;
+  // a silent "running" transfer is caught here immediately and by its watchdog thereafter.
   const recoverTransfer = useCallback(() => {
-    transferRetriesRef.current = 0 // connectivity is back — a fresh retry budget
     if (isTransferStalled(downloadRef.current !== null, lastProgressAtRef.current, Date.now())) {
-      attemptRef.current++ // the hung attempt's continuations now bail
-      downloadRef.current?.cancelAsync().catch(() => {})
-      downloadRef.current = null
-      downloadingRef.current = false
-      clientPhaseRef.current = 'approved'
+      abortStalledTransfer()
+      return
     }
-    clearRetryTimer()
-    maybeAutoResume()
-  }, [clearRetryTimer, maybeAutoResume])
+    if (retryPendingRef.current) {
+      retryPendingRef.current = false
+      maybeAutoResume()
+    }
+  }, [abortStalledTransfer, maybeAutoResume])
 
   // Open a client WS session (clock handshake + handlers). On the FIRST connect we send `join`;
   // on a reconnect we don't — the host still has our approved grant and our cached file, so we just
@@ -1720,7 +1795,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             if (m.approved) {
               // A re-delivered approval (reconnect, host double-tap) while we're already
               // transferring or done must not restart: a fresh start would delete a good file.
-              if (approvedRef.current && (downloadingRef.current || progressRef.current >= 1)) return
+              if (approvedRef.current && (downloadingRef.current || completeRef.current)) return
               approvedRef.current = true // from now on, reconnects resume silently (no re-join)
               setClientPhase('approved')
               clientPhaseRef.current = 'approved'
@@ -1894,7 +1969,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       try {
         payload = decodeJoinUrl(joinLink.trim())
       } catch (e) {
-        setError(`Bad join link: ${String(e)}`)
+        // A version mismatch is not a "bad link" — say what to do about it.
+        setError(isVersionMismatch(e) ? VERSION_MISMATCH_MESSAGE : `Bad join link: ${String(e)}`)
         setClientPhase('idle')
         return
       }

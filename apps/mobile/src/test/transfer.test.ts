@@ -7,6 +7,10 @@ import {
   transferResultOk,
   transferRetryDelayMs,
   TRANSFER_STALL_MS,
+  earnsRetryBudget,
+  MEANINGFUL_PROGRESS_BYTES,
+  unvalidatedProgress,
+  UNVALIDATED_PROGRESS_CAP,
   type AutoResumeInput,
 } from '@/lib/net/transfer'
 
@@ -104,5 +108,34 @@ describe('isTransferStalled', () => {
   it('never flags an idle transfer or one with no progress sample yet', () => {
     expect(isTransferStalled(false, 1000, 99_999)).toBe(false)
     expect(isTransferStalled(true, 0, 99_999)).toBe(false)
+  })
+
+  it('stays under the proxy edge timeout (30s) and over a hotspot hiccup', () => {
+    expect(TRANSFER_STALL_MS).toBeLessThan(30_000)
+    expect(TRANSFER_STALL_MS).toBeGreaterThanOrEqual(5000)
+    expect(isTransferStalled(true, 1000, 3000, 2000)).toBe(true) // custom window
+  })
+})
+
+describe('earnsRetryBudget', () => {
+  it('only real forward progress earns the budget back (never a mere WS reconnect)', () => {
+    expect(earnsRetryBudget(0)).toBe(false)
+    expect(earnsRetryBudget(MEANINGFUL_PROGRESS_BYTES - 1)).toBe(false)
+    expect(earnsRetryBudget(MEANINGFUL_PROGRESS_BYTES)).toBe(true)
+    expect(earnsRetryBudget(NaN)).toBe(false)
+  })
+})
+
+describe('unvalidatedProgress', () => {
+  it('never reports a full 1 before validation (the host reads 1 as ready)', () => {
+    expect(unvalidatedProgress(100, 100)).toBe(UNVALIDATED_PROGRESS_CAP)
+    expect(unvalidatedProgress(150, 100)).toBe(UNVALIDATED_PROGRESS_CAP)
+    expect(unvalidatedProgress(50, 100)).toBe(0.5)
+  })
+
+  it('is 0 for unknown size or no bytes', () => {
+    expect(unvalidatedProgress(50, 0)).toBe(0)
+    expect(unvalidatedProgress(0, 100)).toBe(0)
+    expect(unvalidatedProgress(NaN, 100)).toBe(0)
   })
 })
