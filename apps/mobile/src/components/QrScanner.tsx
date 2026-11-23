@@ -5,6 +5,7 @@ import { X } from 'lucide-react-native'
 import { Button, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { decodeJoinUrl } from '@/lib/protocol'
+import { useBackHandler } from '@/navigation/context'
 
 /**
  * Full-screen QR scanner overlay. Reads the host's join QR and hands back the raw railreel://
@@ -15,6 +16,14 @@ export function QrScanner({ onScan, onClose }: { onScan: (data: string) => void;
   const [permission, requestPermission] = useCameraPermissions()
   const [hint, setHint] = useState(false)
   const handled = useRef(false)
+  // Android Back closes the camera, not the Join screen behind it.
+  useBackHandler(
+    () => {
+      onClose()
+      return true
+    },
+    { layer: 'overlay' },
+  )
 
   const onBarcode = ({ data }: { data: string }) => {
     if (handled.current) return

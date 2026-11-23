@@ -4,7 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { ChevronLeft } from 'lucide-react-native'
 import { Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
-import { useNavigation } from '@/navigation/context'
+import { useBackHandler, useNavigation } from '@/navigation/context'
 
 /**
  * Standard screen frame: transparent (the persistent WindowAtmosphere shows through),
@@ -22,20 +22,33 @@ export function Screen({
   showBack?: boolean
   /** Wrap the body in a ScrollView so tall content stays reachable on small screens / large fonts. */
   scroll?: boolean
-  /** Override the back action (e.g. leave a live session before navigating). Default: goBack. */
+  /**
+   * The screen's exit (e.g. leave a live session before navigating). Default: goBack. Drives BOTH
+   * the header button and Android hardware Back, so the two can never disagree.
+   */
   onBack?: () => void
 }) {
   const t = useTheme()
   const insets = useSafeAreaInsets()
   const nav = useNavigation()
+  // A screen with its own exit keeps it even at the stack root (it knows where it's going).
+  const canExit = showBack && (onBack != null || nav.canGoBack)
+  const back = onBack ?? nav.goBack
+  useBackHandler(
+    () => {
+      back()
+      return true
+    },
+    { enabled: canExit },
+  )
 
   return (
     <View style={[styles.fill, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 20 }]}>
       {(showBack || title) && (
         <View style={styles.header}>
-          {showBack && nav.canGoBack ? (
+          {canExit ? (
             <Pressable
-              onPress={onBack ?? nav.goBack}
+              onPress={back}
               hitSlop={12}
               accessibilityRole="button"
               accessibilityLabel="Go back"

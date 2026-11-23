@@ -9,7 +9,9 @@ import { StatusScreen } from '@/components/StatusScreen'
 import { CleanupSheet } from '@/components/CleanupSheet'
 import { Button, FlapText, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
-import { useNavigation } from '@/navigation/context'
+import { useBackHandler, useNavigation } from '@/navigation/context'
+import { useMountedRef } from '@/hooks/useMountedRef'
+import { resumeExit } from '@/lib/nav/exitGuard'
 import { canJoinShow, decideStartGate, departureClock, type StartGateDecision } from '@/lib/sync/startGate'
 import { targetPositionSec } from '@/lib/sync/playback'
 import { useSession, type Participant } from '@/session/SessionProvider'
@@ -78,18 +80,39 @@ export function LobbyScreen() {
   const [showCleanupSheet, setShowCleanupSheet] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
 
-  // Backing out / leaving is a clean teardown so no zombie session poisons the next one.
+  // Session torn down under us (host ended it, reconnect gave up): reset to Home, where the
+  // store's sessionEnd shows as the designed end card — not an empty board. A denial keeps the
+  // role, so its own dead-end screen below still renders.
+  useEffect(() => {
+    if (s.role === 'none' && s.clientPhase !== 'denied') nav.reset('Home')
+  }, [s.role, s.clientPhase, nav])
+
+  // Leaving is a clean teardown so no zombie session poisons the next one, and a stack reset so
+  // Back from Home can't land on this dead board again.
   const exitSession = () => {
     s.leave()
-    nav.navigate('Home')
+    nav.reset('Home')
+  }
+
+  // Async exits resume only into the session they started from: if the host ended it meanwhile this
+  // board has already reset Home and unmounted, and the user may be in a NEW session by the time a
+  // slow purge settles — leave() then would tear that one down.
+  const mounted = useMountedRef()
+  const sessionRef = useRef(s)
+  sessionRef.current = s
+  const resumeExitSession = () => {
+    const step = resumeExit({ mounted: mounted.current, sessionActive: sessionRef.current.role !== 'none' })
+    if (step === 'leave') exitSession()
+    else if (step === 'reset') nav.reset('Home')
   }
 
   const handleExitRequest = async () => {
     const info = await s.getCacheInfo()
+    if (!mounted.current) return
     if (info.totalBytes > 0) {
       setShowCleanupSheet(true)
     } else {
-      exitSession()
+      resumeExitSession()
     }
   }
 
@@ -100,7 +123,7 @@ export function LobbyScreen() {
     } finally {
       setIsDeleting(false)
       setShowCleanupSheet(false)
-      exitSession()
+      resumeExitSession()
     }
   }
 
@@ -108,6 +131,23 @@ export function LobbyScreen() {
     setShowCleanupSheet(false)
     exitSession()
   }
+
+  // Back (header or hardware). A guest leaves through the cleanup prompt. The host steps back to
+  // the invite screen with the session still live: one stray back gesture must not end the show
+  // for the whole cabin ("Leave the platform" is the deliberate way out).
+  const handleBack = () => {
+    if (isHost && nav.canGoBack) nav.goBack()
+    else void handleExitRequest()
+  }
+
+  // The denied dead-end has no header, so it claims hardware Back itself.
+  useBackHandler(
+    () => {
+      exitSession()
+      return true
+    },
+    { enabled: s.clientPhase === 'denied' },
+  )
 
   // The host said no — a designed dead-end, not a stuck lobby.
   if (s.clientPhase === 'denied') {
@@ -129,7 +169,7 @@ export function LobbyScreen() {
   const preflight = isHost ? s.hostWarning : (s.decodeCaution ?? s.error)
 
   return (
-    <Screen title="LOBBY" scroll onBack={handleExitRequest}>
+    <Screen title="LOBBY" scroll onBack={handleBack}>
       <View style={styles.body}>
         {/* ── the board ─────────────────────────────────────────────────────── */}
         <View style={[styles.board, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}>

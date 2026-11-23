@@ -53,11 +53,13 @@ export function CreateSessionScreen() {
 
   const guests = s.participants.filter((p) => p.id !== 'host').length
 
-  // Backing out of a live (or starting) session tears it down — servers, keep-awake, roster —
-  // so the next session starts clean instead of inheriting a zombie.
+  // Backing out (header or hardware Back) of a live (or starting) session tears it down — servers,
+  // keep-awake, roster — so the next session starts clean instead of inheriting a zombie; the stack
+  // resets so nothing above Home survives the session.
   const exitSession = () => {
-    if (s.hostPhase !== 'idle') s.leave()
-    nav.goBack()
+    if (s.hostPhase === 'idle') return nav.goBack()
+    s.leave()
+    nav.reset('Home')
   }
 
   // Before the session is live: a deliberate "choose a movie" step. (We open the picker on a tap

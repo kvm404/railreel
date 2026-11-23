@@ -5,7 +5,9 @@ import { useVideoPlayer, VideoView } from 'expo-video'
 import { ChevronLeft, Pause, Play, RotateCcw, RotateCw, Subtitles, Trash2 } from 'lucide-react-native'
 import { Button, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
-import { useNavigation } from '@/navigation/context'
+import { useBackHandler, useNavigation } from '@/navigation/context'
+import { useMountedRef } from '@/hooks/useMountedRef'
+import { resumeExit } from '@/lib/nav/exitGuard'
 import { useSession } from '@/session/SessionProvider'
 import { CaptionOverlay } from '@/components/CaptionOverlay'
 import { ChatSheet } from '@/components/ChatSheet'
@@ -54,9 +56,10 @@ export function PlayerScreen() {
   playbackRef.current = playback // always read the latest host state without re-creating `correct`
 
   // Session torn down under us (host ended the show / left, reconnect gave up, or client denied): don't sit on
-  // a dead player showing "paused by host" — return to Home or Lobby, carrying any error the store set.
+  // a dead player showing "paused by host" — reset to Home (which shows the store's end card) or to
+  // the Lobby's denied screen. A reset, not a push, so Back can't return to this dead player.
   useEffect(() => {
-    if (s.role === 'none' || s.clientPhase === 'denied') nav.navigate(s.clientPhase === 'denied' ? 'Lobby' : 'Home')
+    if (s.role === 'none' || s.clientPhase === 'denied') nav.reset(s.clientPhase === 'denied' ? 'Lobby' : 'Home')
   }, [s.role, s.clientPhase, nav])
 
   const player = useVideoPlayer(s.movieUri ?? null, (p) => {
@@ -81,16 +84,32 @@ export function PlayerScreen() {
     }
   }, [ended, s])
 
+  // Back (header or hardware): after The End, offer the cache cleanup; otherwise step out to the
+  // Lobby (the session stays). A follower marks itself out of the show in the SAME update as the
+  // pop, so the Lobby mounts already knowing — its auto-enter can't bounce us straight back in.
+  // Async continuations act only if this player (and its session) is still the one on screen — see
+  // lib/nav/exitGuard: a purge that settles after the host ended the show must not leave() a newer one.
+  const mounted = useMountedRef()
+  const sessionRef = useRef(s)
+  sessionRef.current = s
+
   const handleBackPress = async () => {
     if (ended) {
       const info = await s.getCacheInfo()
+      if (!mounted.current) return
       if (info.totalBytes > 0) {
         setShowCleanupSheet(true)
         return
       }
     }
-    nav.goBack()
+    if (!isHost) s.exitShow()
+    if (nav.canGoBack) nav.goBack()
+    else nav.reset('Lobby')
   }
+  useBackHandler(() => {
+    void handleBackPress()
+    return true
+  })
 
   const handleDeleteAndLeave = async () => {
     setIsDeleting(true)
@@ -99,15 +118,16 @@ export function PlayerScreen() {
     } finally {
       setIsDeleting(false)
       setShowCleanupSheet(false)
-      s.leave()
-      nav.navigate('Home')
+      const step = resumeExit({ mounted: mounted.current, sessionActive: sessionRef.current.role !== 'none' })
+      if (step === 'leave') s.leave()
+      if (step !== 'skip') nav.reset('Home')
     }
   }
 
   const handleKeepAndLeave = () => {
     setShowCleanupSheet(false)
     s.leave()
-    nav.navigate('Home')
+    nav.reset('Home')
   }
 
   const lastSeekAtRef = useRef(0) // client: when we last issued a corrective seek (settle window)

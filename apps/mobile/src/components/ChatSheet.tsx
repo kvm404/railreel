@@ -6,6 +6,7 @@ import { Send } from 'lucide-react-native'
 import { Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { CHAT_MAX_CHARS, type ChatEntry } from '@/lib/social/feed'
+import { useBackHandler } from '@/navigation/context'
 
 /**
  * The cabin chat sheet: full history + input, pulled up over the film and dismissed with a tap
@@ -27,6 +28,14 @@ export function ChatSheet({
   const t = useTheme()
   const insets = useSafeAreaInsets()
   const [draft, setDraft] = useState('')
+  // Android Back closes the sheet first — it must never leave the show from under the chat.
+  useBackHandler(
+    () => {
+      onClose()
+      return true
+    },
+    { enabled: visible, layer: 'overlay' },
+  )
 
   if (!visible) return null
 

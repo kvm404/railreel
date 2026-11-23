@@ -300,6 +300,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const reconnectRef = useRef<() => void>(() => {})
   const approvedRef = useRef(false) // host has approved us — a reconnect must NOT re-join (that would reset us to 'requested')
   const epochRef = useRef(0) // bumps on every connect()/leave() so an in-flight reconnect loop can detect it's stale and bail
+  // Epoch of the startHost() attempt still in flight (null when none). During startup the native
+  // servers can be up while roleRef is still 'none', so leave() needs this to know to stop them.
+  const hostStartRef = useRef<number | null>(null)
   // Enough to rebuild the join link if the reachable IP changes (e.g. after the hotspot comes up).
   const joinMetaRef = useRef<{ sessionId: string; token: string; httpPort: number; wsPort: number } | null>(null)
   const downloadRef = useRef<LegacyFS.DownloadResumable | null>(null)
@@ -708,6 +711,29 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     // stale playback would yank fresh guests straight into the Player, and a leftover download /
     // floor-hold would corrupt the new gate's math. Bump the epoch so any zombie transfer bails.
     epochRef.current++
+    // Cancellation: leave() (Back during startup) bumps the epoch. Every await below re-checks it;
+    // a stale attempt releases what it acquired and returns WITHOUT touching state, so it can't
+    // resurrect a host session behind the Home screen.
+    const myEpoch = epochRef.current
+    const stale = (): boolean => epochRef.current !== myEpoch
+    hostStartRef.current = myEpoch
+    let advertised: Promise<void> | null = null
+    const abandon = async () => {
+      if (hostStartRef.current === myEpoch) hostStartRef.current = null
+      // Release the (global) native host and keep-awake only while nothing newer owns them: a newer
+      // startHost() claims hostStartRef synchronously (and its native start() re-tears down itself);
+      // a live session or a guest's proxy must survive. Re-checked after EVERY await, since a newer
+      // attempt can begin while we wait.
+      const unowned = () => hostStartRef.current === null && roleRef.current === 'none'
+      if (!unowned()) return
+      await advertised
+      if (!unowned()) return
+      await RailReelHost.stopAdvertise().catch(() => {})
+      if (!unowned()) return
+      await RailReelHost.stop().catch(() => {})
+      if (!unowned()) return
+      await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
+    }
     resetTransfer()
     setPlayback(null)
     setFloorHeld(new Set())
@@ -716,7 +742,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     clearSubtitle()
     try {
       const picked = await DocumentPicker.getDocumentAsync({ type: 'video/*', copyToCacheDirectory: false })
+      if (stale()) return // nothing acquired yet
       if (picked.canceled || !picked.assets[0]) {
+        hostStartRef.current = null
         setHostPhase('idle')
         return
       }
@@ -725,12 +753,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // Android 13+ needs runtime notification permission for the foreground-service notification.
       if (Platform.OS === 'android' && Number(Platform.Version) >= 33) {
         await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS).catch(() => {})
+        if (stale()) return
       }
 
       const { sessionId, token } = newSession(randomBytes)
       hostTokenRef.current = token
       const ports = await RailReelHost.start(asset.uri, HTTP_PORT, WS_PORT, token)
+      if (stale()) return abandon()
       await activateKeepAwakeAsync(KEEP_AWAKE_TAG)
+      if (stale()) return abandon()
 
       joinMetaRef.current = { sessionId, token, httpPort: ports.httpPort, wsPort: ports.wsPort }
       const ip = RailReelHost.getHostIpAddress()
@@ -740,7 +771,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // comes from NSD resolution itself, so hotspot IP changes never stale the advert). Anyone
       // on the network can *request* to join — the trust model already assumes that: the host
       // approves every person, and bytes flow only to approved grants (architecture §10).
-      RailReelHost.advertise(`RailReel-${humanCode(sessionId)}`, ports.wsPort, {
+      advertised = RailReelHost.advertise(`RailReel-${humanCode(sessionId)}`, ports.wsPort, {
         v: String(PROTOCOL_VERSION),
         t: token,
         s: sessionId,
@@ -757,6 +788,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // whether a partial copy is even playable. If the probe fails we keep going with 0/false:
       // the gate then degrades to "start after full pre-cache".
       const probed = await RailReelHost.probe(asset.uri).catch(() => ({ durationSec: 0, fastStart: false, width: 0, height: 0 }))
+      if (stale()) return abandon()
       const durationSec = Number.isFinite(probed.durationSec) && probed.durationSec > 0 ? probed.durationSec : 0
       const fastStart = probed.fastStart === true
       const sizeBytes = asset.size ?? 0
@@ -789,6 +821,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // Named "Host" so guests see "Host"; the host's own lobby relabels this entry to "You".
       updateParticipants(() => [{ id: 'host', name: 'Host', status: 'ready', progress: 1, downloadMbps: 0, bufferedAheadSec: Infinity, stalled: false, inShow: false, decodeOk: true, lastBeatAt: Date.now() }], false)
 
+      hostStartRef.current = null
       setRole('host')
       roleRef.current = 'host'
       setHostPhase('live')
@@ -809,6 +842,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           .catch(() => {})
       }
     } catch (e) {
+      if (stale()) return abandon() // the user already left — no error for a screen they're not on
+      hostStartRef.current = null
       setError(String(e))
       setHostPhase('idle')
       await RailReelHost.stop().catch(() => {})
@@ -1447,7 +1482,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         stopTimerRef.current = null
       }, 200) // let the frame flush first
       deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
+    } else if (hostStartRef.current !== null) {
+      // Leaving mid-startHost(): servers may already be up though the role isn't 'host' yet. No guest
+      // can have been admitted, so skip the 'ended' frame and stop now; startHost's own stale checks
+      // catch anything (keep-awake, advert) that lands after this.
+      if (stopTimerRef.current) {
+        clearTimeout(stopTimerRef.current)
+        stopTimerRef.current = null
+      }
+      RailReelHost.stopAdvertise().catch(() => {})
+      RailReelHost.stop().catch(() => {})
+      deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
     }
+    hostStartRef.current = null
     hostTokenRef.current = null
     joinMetaRef.current = null
     grantsRef.current.clear()

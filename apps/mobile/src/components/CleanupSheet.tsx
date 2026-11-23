@@ -27,6 +27,8 @@ export interface CleanupSheetProps {
   isDeleting?: boolean
 }
 
+const ignoreBack = () => {}
+
 export function CleanupSheet({
   visible,
   totalBytes,
@@ -47,7 +49,9 @@ export function CleanupSheet({
   const hasMovie = typeof movieBytes === 'number' && movieBytes > 0
 
   return (
-    <Modal visible={visible} transparent animationType="none" onRequestClose={onCancel}>
+    // Android Back lands on onRequestClose; mid-delete it's swallowed (like the backdrop tap) so
+    // the sheet can't vanish while the purge is still running.
+    <Modal visible={visible} transparent animationType="none" onRequestClose={isDeleting ? ignoreBack : onCancel}>
       <View style={StyleSheet.absoluteFill}>
         {/* Dimmed backdrop */}
         <Animated.View
