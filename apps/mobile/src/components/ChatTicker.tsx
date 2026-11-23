@@ -1,9 +1,10 @@
 import { memo, useEffect, useState } from 'react'
 import { StyleSheet } from 'react-native'
-import Animated, { FadeInDown, FadeOut, useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
+import Animated, { FadeIn, FadeInDown, FadeOut, useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
 import { Text } from '@/ui'
+import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { useTheme } from '@/theme/ThemeProvider'
-import { fonts } from '@/theme/tokens'
+import { fonts, motion } from '@/theme/tokens'
 import { tickerWindow, type ChatEntry } from '@/lib/social/feed'
 
 /**
@@ -37,6 +38,8 @@ export const ChatTicker = memo(function ChatTicker({
   lift?: SharedValue<number>
 }) {
   const t = useTheme()
+  // Read live: under reduce-motion a line just fades in, with no upward travel.
+  const reduced = useReduceMotion()
   const [now, setNow] = useState(() => Date.now())
 
   // A light clock so lines age out even when nothing new arrives.
@@ -53,7 +56,12 @@ export const ChatTicker = memo(function ChatTicker({
   return (
     <Animated.View pointerEvents="none" style={[styles.stack, { bottom, left, right, maxHeight }, liftStyle]}>
       {lines.map((l) => (
-        <Animated.View key={l.id} entering={FadeInDown.duration(180)} exiting={FadeOut.duration(240)} style={styles.line}>
+        <Animated.View
+          key={l.id}
+          entering={reduced ? FadeIn.duration(motion.fade) : FadeInDown.duration(180)}
+          exiting={FadeOut.duration(240)}
+          style={styles.line}
+        >
           <Text variant="caption" style={[styles.sender, { color: t.palette.amber, textShadowColor: t.palette.void }]} numberOfLines={1}>
             {l.from}
           </Text>
