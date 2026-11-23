@@ -560,10 +560,18 @@ class RailReelHostModule : Module() {
             }
             "moov" -> {
               if (container == "unknown") container = "quicktime"
-              val len = h.size - h.headerLen
-              if (wantMoov && len > 0 && len <= ISO_MOOV_CAP_BYTES) {
-                val bytes = ByteArray(len.toInt())
-                if (readFully(stream, bytes, bytes.size)) moov = bytes
+              if (wantMoov) {
+                if (h.size == Long.MAX_VALUE) {
+                  // size 0 = "extends to EOF": no length to trust, so read with a hard ceiling.
+                  val bytes = readBounded(stream, ISO_MOOV_CAP_BYTES)
+                  if (bytes != null && bytes.isNotEmpty()) moov = bytes
+                } else {
+                  val len = h.size - h.headerLen
+                  if (len > 0 && len <= ISO_MOOV_CAP_BYTES) {
+                    val bytes = ByteArray(len.toInt())
+                    if (readFully(stream, bytes, bytes.size)) moov = bytes
+                  }
+                }
               }
             }
             "mdat" -> if (container == "unknown") container = "quicktime"
@@ -606,6 +614,21 @@ class RailReelHostModule : Module() {
       return "matroska"
     }
     return runCatching { scanIsoBoxes(ctx, fileUri, false).first }.getOrDefault("unknown")
+  }
+
+  /** Read the rest of [s], or null if it holds more than [maxBytes] (never buffers past the cap). */
+  private fun readBounded(s: InputStream, maxBytes: Long): ByteArray? {
+    val out = java.io.ByteArrayOutputStream()
+    val chunk = ByteArray(64 * 1024)
+    var total = 0L
+    while (true) {
+      val n = s.read(chunk)
+      if (n < 0) break
+      total += n
+      if (total > maxBytes) return null
+      out.write(chunk, 0, n)
+    }
+    return out.toByteArray()
   }
 
   /** Child boxes of [type] inside b[start, end): each as (payloadStart, payloadEnd). Bounded to the buffer. */
@@ -679,8 +702,12 @@ class RailReelHostModule : Module() {
         level = level.flatMap { findBoxes(moov, it[0], it[1], name) }
       }
       val stsd = level.firstOrNull() ?: continue
-      // stsd payload: version/flags (4) + entry count (4), then the first entry (size + fourcc).
+      // stsd payload: version/flags (4) + entry count (4), then the entries (each: size + fourcc).
+      // Validate the first entry's header so trailing/garbage bytes can't pose as a codec.
       if (stsd[0] + 16 > stsd[1]) continue
+      if (be32(moov, stsd[0] + 4) <= 0L) continue
+      val entrySize = be32(moov, stsd[0] + 8)
+      if (entrySize < 8L || entrySize > (stsd[1] - (stsd[0] + 8)).toLong()) continue
       val fourcc = String(moov, stsd[0] + 12, 4, Charsets.ISO_8859_1)
       val v = videoMimeForFourcc(fourcc)
       val a = audioMimeForFourcc(fourcc)
