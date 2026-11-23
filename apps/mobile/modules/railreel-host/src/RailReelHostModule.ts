@@ -22,10 +22,14 @@ export type MediaProbeResult = {
   container: string
 }
 
+/** Opaque native id of one accepted control-socket connection. The only identity a frame or a
+ *  close can be attributed to — participant ids inside frames are untrusted until bound to one. */
+export type ConnId = string
+
 type RailReelHostEvents = {
-  onWsOpen: () => void
-  onWsClose: (event?: { id?: string }) => void
-  onWsMessage: (event: { data: string }) => void
+  onWsOpen: (event: { conn: ConnId }) => void
+  onWsClose: (event: { conn: ConnId }) => void
+  onWsMessage: (event: { data: string; conn: ConnId }) => void
   /** mDNS discovery: a nearby cabin appeared (TXT mirrors the QR payload). */
   onNsdFound: (event: { name: string; host: string; port: number; txt: Record<string, string> }) => void
   onNsdLost: (event: { name: string }) => void
@@ -45,8 +49,15 @@ declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
   approve(grant: string): Promise<void>
   /** Revoke a previously-approved grant; future requests with it are rejected. */
   revoke(grant: string): Promise<void>
-  /** Send a JSON message to every connected client (play/pause/seek/chat/reactions). */
+  /** Send a JSON message to every APPROVED connection (state/roster/chat/reactions/subtitle).
+   *  Never blocks on a slow client: each socket has its own bounded writer. */
   broadcast(message: string): Promise<void>
+  /** Send a JSON message to one connection, approved or not. Resolves false if it is gone. */
+  sendTo(conn: ConnId, message: string): Promise<boolean>
+  /** Let a connection receive broadcasts (after binding an approved guest to it). */
+  approveConnection(conn: ConnId): Promise<boolean>
+  /** Stop broadcasting to a connection and close it once its queued frames are flushed. */
+  dropConnection(conn: ConnId): Promise<boolean>
   /** Stop both servers + the foreground service. */
   stop(): Promise<void>
   /**
@@ -92,6 +103,9 @@ const androidOnly = (): RailReelHostModule => {
     approve: async () => {},
     revoke: async () => {},
     broadcast: async () => {},
+    sendTo: async () => false,
+    approveConnection: async () => false,
+    dropConnection: async () => false,
     stop: async () => {},
     probe: unavailable,
     startProxy: unavailable,
