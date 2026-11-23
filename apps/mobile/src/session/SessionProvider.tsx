@@ -719,14 +719,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     hostStartRef.current = myEpoch
     let advertised: Promise<void> | null = null
     const abandon = async () => {
-      // Only release the native host if nothing newer owns it: a newer startHost() re-tears it down
-      // itself (native start() does), and a live session or a guest's proxy must survive.
       if (hostStartRef.current === myEpoch) hostStartRef.current = null
-      else if (hostStartRef.current !== null) return
-      if (roleRef.current !== 'none') return
+      // Release the (global) native host and keep-awake only while nothing newer owns them: a newer
+      // startHost() claims hostStartRef synchronously (and its native start() re-tears down itself);
+      // a live session or a guest's proxy must survive. Re-checked after EVERY await, since a newer
+      // attempt can begin while we wait.
+      const unowned = () => hostStartRef.current === null && roleRef.current === 'none'
+      if (!unowned()) return
       await advertised
+      if (!unowned()) return
       await RailReelHost.stopAdvertise().catch(() => {})
+      if (!unowned()) return
       await RailReelHost.stop().catch(() => {})
+      if (!unowned()) return
       await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {})
     }
     resetTransfer()
