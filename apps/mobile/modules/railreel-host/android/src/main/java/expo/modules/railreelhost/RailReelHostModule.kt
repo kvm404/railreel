@@ -30,7 +30,7 @@ class RailReelHostModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("RailReelHost")
-    Events("onWsOpen", "onWsClose", "onWsMessage", "onNsdFound", "onNsdLost")
+    Events("onWsOpen", "onWsClose", "onWsMessage", "onNsdFound", "onNsdLost", "onNsdError")
 
     // The host's own LAN/hotspot IPv4, for the QR/join link. NanoHTTPD binds to all interfaces,
     // so we pick the address clients actually reach: prefer the hotspot/wifi interface.
@@ -301,7 +301,14 @@ class RailReelHostModule : Module() {
     nsd ?: appContext.reactContext?.let { ctx ->
       NsdHelper(ctx) { kind, payload ->
         appContext.runtime.schedule {
-          sendEvent(if (kind == "found") "onNsdFound" else "onNsdLost", payload)
+          sendEvent(
+            when (kind) {
+              "found" -> "onNsdFound"
+              "error" -> "onNsdError"
+              else -> "onNsdLost"
+            },
+            payload,
+          )
         }
       }.also { nsd = it }
     }

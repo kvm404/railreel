@@ -10,6 +10,8 @@ type RailReelHostEvents = {
   /** mDNS discovery: a nearby cabin appeared (TXT mirrors the QR payload). */
   onNsdFound: (event: { name: string; host: string; port: number; txt: Record<string, string> }) => void
   onNsdLost: (event: { name: string }) => void
+  /** mDNS discovery could not start (Android reports this asynchronously, after startDiscovery resolved). */
+  onNsdError: (event: { code: number }) => void
 }
 
 declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {

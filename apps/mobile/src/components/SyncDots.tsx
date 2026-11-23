@@ -4,13 +4,13 @@ import Animated, {
   cancelAnimation,
   Easing,
   useAnimatedStyle,
-  useReducedMotion,
   useSharedValue,
   withDelay,
   withRepeat,
   withSequence,
   withTiming,
 } from 'react-native-reanimated'
+import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { useTheme } from '@/theme/ThemeProvider'
 
 /**
@@ -30,7 +30,7 @@ export function SyncDots({ count = 3 }: { count?: number }) {
 
 function Dot({ index }: { index: number }) {
   const t = useTheme()
-  const reduced = useReducedMotion()
+  const reduced = useReduceMotion()
   const v = useSharedValue(0.25)
 
   useEffect(() => {

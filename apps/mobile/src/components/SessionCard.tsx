@@ -3,13 +3,13 @@ import { Pressable, StyleSheet, View } from 'react-native'
 import Animated, {
   cancelAnimation,
   useAnimatedStyle,
-  useReducedMotion,
   useSharedValue,
   withSpring,
   withTiming,
 } from 'react-native-reanimated'
 import * as Haptics from 'expo-haptics'
 import { Text, FlapText } from '@/ui'
+import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { useTheme } from '@/theme/ThemeProvider'
 import { motion } from '@/theme/tokens'
 
@@ -34,7 +34,7 @@ export function SessionCard({
   onPress?: () => void
 }) {
   const t = useTheme()
-  const reduced = useReducedMotion()
+  const reduced = useReduceMotion()
   const pressed = useSharedValue(0)
 
   const animStyle = useAnimatedStyle(() => ({
@@ -88,7 +88,7 @@ export function SessionCard({
           <Text variant="cardTitle" numberOfLines={1}>
             {host}
           </Text>
-          <Text variant="data" tone="tertiary" numberOfLines={1}>
+          <Text variant="data" tone="muted" numberOfLines={1}>
             {title} · {meta}
           </Text>
         </View>

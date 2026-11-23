@@ -1,9 +1,11 @@
 import { useRef, useState } from 'react'
-import { Linking, Pressable, StyleSheet, View } from 'react-native'
+import { Linking, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native'
 import { CameraView, useCameraPermissions } from 'expo-camera'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { X } from 'lucide-react-native'
 import { Button, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
+import { radii, sizes } from '@/theme/tokens'
 import { decodeJoinUrl } from '@/lib/protocol'
 import { useBackHandler } from '@/navigation/context'
 
@@ -13,6 +15,10 @@ import { useBackHandler } from '@/navigation/context'
  */
 export function QrScanner({ onScan, onClose }: { onScan: (data: string) => void; onClose: () => void }) {
   const t = useTheme()
+  const insets = useSafeAreaInsets()
+  const { width, height } = useWindowDimensions()
+  // Keep the reticle (and the text under it) on-screen in landscape / split-screen.
+  const reticleSize = Math.max(140, Math.min(240, Math.floor(Math.min(width, height) * 0.55)))
   const [permission, requestPermission] = useCameraPermissions()
   const [hint, setHint] = useState(false)
   const handled = useRef(false)
@@ -54,8 +60,8 @@ export function QrScanner({ onScan, onClose }: { onScan: (data: string) => void;
 
       {/* dim + framing reticle */}
       <View style={styles.overlay}>
-        {granted ? <View style={[styles.reticle, { borderColor: t.palette.amber }]} /> : null}
-        <Text variant="data" tone="secondary" style={styles.caption}>
+        {granted ? <View style={[styles.reticle, { width: reticleSize, height: reticleSize, borderColor: t.palette.amber }]} /> : null}
+        <Text variant="data" tone="primary" style={[styles.caption, { backgroundColor: t.veils.scrim }]}>
           {granted
             ? hint
               ? 'That’s not a RailReel code — point at the host’s QR'
@@ -78,7 +84,11 @@ export function QrScanner({ onScan, onClose }: { onScan: (data: string) => void;
         hitSlop={12}
         accessibilityRole="button"
         accessibilityLabel="Close scanner"
-        style={[styles.close, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}
+        style={[
+          styles.close,
+          // Clear the status bar / cutout / gesture bar in any orientation.
+          { top: insets.top + 12, right: insets.right + 16, borderColor: t.palette.hairline, backgroundColor: t.palette.raised },
+        ]}
       >
         <X size={22} color={t.palette.textSecondary} strokeWidth={2.25} />
       </Pressable>
@@ -89,15 +99,13 @@ export function QrScanner({ onScan, onClose }: { onScan: (data: string) => void;
 const styles = StyleSheet.create({
   fill: { ...StyleSheet.absoluteFill, zIndex: 10 },
   overlay: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 22, paddingHorizontal: 32 },
-  reticle: { width: 240, height: 240, borderWidth: 2, borderRadius: 28 },
-  caption: { textAlign: 'center' },
+  reticle: { width: 240, height: 240, borderWidth: 2, borderRadius: radii.xl },
+  caption: { textAlign: 'center', paddingHorizontal: 14, paddingVertical: 8, borderRadius: radii.md, overflow: 'hidden' },
   close: {
     position: 'absolute',
-    top: 56,
-    right: 24,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: sizes.touch,
+    height: sizes.touch,
+    borderRadius: sizes.touch / 2,
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',

@@ -4,6 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { ChevronLeft } from 'lucide-react-native'
 import { Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
+import { sizes } from '@/theme/tokens'
 import { useBackHandler, useNavigation } from '@/navigation/context'
 
 /**
@@ -43,7 +44,13 @@ export function Screen({
   )
 
   return (
-    <View style={[styles.fill, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 20 }]}>
+    <View
+      style={[
+        styles.fill,
+        // Left/right insets matter in landscape (cutouts, gesture bars), not just top/bottom.
+        { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 20, paddingLeft: sizes.gutter + insets.left, paddingRight: sizes.gutter + insets.right },
+      ]}
+    >
       {(showBack || title) && (
         <View style={styles.header}>
           {canExit ? (
@@ -68,10 +75,16 @@ export function Screen({
         </View>
       )}
       {scroll ? (
+        // Keyboard strategy (one, app-wide): Android `adjustResize` shrinks the window and this
+        // ScrollView keeps the focused field reachable; no KeyboardAvoidingView on top of it. Taps on
+        // buttons while the keyboard is up must act on the FIRST tap ("handled"), and dragging the
+        // form dismisses the keyboard.
         <ScrollView
           style={styles.body}
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
         >
           {children}
         </ScrollView>
@@ -83,17 +96,17 @@ export function Screen({
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1, paddingHorizontal: 24 },
+  fill: { flex: 1 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', height: 44 },
   back: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: sizes.touch - 4,
+    height: sizes.touch - 4,
+    borderRadius: (sizes.touch - 4) / 2,
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  backSpacer: { width: 40, height: 40 },
+  backSpacer: { width: sizes.touch - 4, height: sizes.touch - 4 },
   body: { flex: 1 },
   scrollContent: { flexGrow: 1 },
 })

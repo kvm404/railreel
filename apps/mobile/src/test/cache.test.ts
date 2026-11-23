@@ -8,6 +8,8 @@ import {
   getCacheStatus,
   clearSessionCache,
   executePureDeletionSequencing,
+  describeCleanupFailure,
+  cleanupFailureMessage,
   sweepOrphanCache,
   configureCacheStorage,
   resetCacheStorageConfiguration,
@@ -342,9 +344,52 @@ describe('Storage & Cache Lifecycle Management', () => {
         readDirectoryAsync: vi.fn().mockResolvedValue([]),
       }
 
-      await expect(
-        clearSessionCache({ cacheDir: TEST_DIR, fs: mockFs }),
-      ).resolves.toBeUndefined()
+      const result = await clearSessionCache({ cacheDir: TEST_DIR, fs: mockFs })
+      // A delete that throws on an already-absent file is success, not a failure.
+      expect(result.ok).toBe(true)
+      expect(result.failed).toEqual([])
+      expect(result.remainingBytes).toBe(0)
+    })
+
+    it('reports a file that survives the delete (locked / permission error) with its size', async () => {
+      const moviePath = getMovieCachePath(TEST_DIR)
+      const mockFs: FileSystemAdapter = {
+        getInfoAsync: vi.fn().mockImplementation(async (uri: string) =>
+          uri === moviePath ? { exists: true, size: 2_000_000_000 } : { exists: false },
+        ),
+        deleteAsync: vi.fn().mockImplementation(async (uri: string) => {
+          if (uri === moviePath) throw new Error('EBUSY: resource busy')
+        }),
+        readDirectoryAsync: vi.fn().mockResolvedValue([]),
+      }
+
+      const result = await clearSessionCache({ cacheDir: TEST_DIR, fs: mockFs })
+      expect(result.ok).toBe(false)
+      expect(result.failed).toEqual([{ path: moviePath, error: 'EBUSY: resource busy' }])
+      expect(result.remainingBytes).toBe(2_000_000_000)
+      expect(result.cleared).toEqual([getSubtitleCachePath(TEST_DIR)])
+    })
+
+    it('flags a silent no-op delete (resolves but the file is still there)', async () => {
+      const mockFs: FileSystemAdapter = {
+        getInfoAsync: vi.fn().mockResolvedValue({ exists: true, size: 10 }),
+        deleteAsync: vi.fn().mockResolvedValue(undefined),
+        readDirectoryAsync: vi.fn().mockResolvedValue([]),
+      }
+      const result = await clearSessionCache({ cacheDir: TEST_DIR, fs: mockFs, subtitles: false })
+      expect(result.ok).toBe(false)
+      expect(result.remainingBytes).toBe(10)
+    })
+
+    it('reports success with the hooks path too', async () => {
+      const mockFs: FileSystemAdapter = {
+        getInfoAsync: vi.fn().mockResolvedValue({ exists: false }),
+        deleteAsync: vi.fn().mockResolvedValue(undefined),
+        readDirectoryAsync: vi.fn().mockResolvedValue([]),
+      }
+      const result = await clearSessionCache({ cacheDir: TEST_DIR, fs: mockFs, hooks: { detachMedia: vi.fn() } })
+      expect(result.ok).toBe(true)
+      expect(result.cleared).toHaveLength(2)
     })
 
     it('coordinates lifecycle hooks during deletion sequencing', async () => {
@@ -515,6 +560,29 @@ describe('Storage & Cache Lifecycle Management', () => {
       expect(legacy.getInfoAsync).toHaveBeenCalledWith('test://path')
       expect(legacy.deleteAsync).toHaveBeenCalledWith('test://path', { idempotent: true })
       expect(legacy.readDirectoryAsync).toHaveBeenCalledWith('test://path')
+    })
+  })
+
+  describe('describeCleanupFailure', () => {
+    it('is null when everything was freed', () => {
+      expect(describeCleanupFailure(0)).toBeNull()
+    })
+    it('names the bytes that were not freed', () => {
+      expect(describeCleanupFailure(1024 * 1024 * 500)).toContain('500 MB')
+    })
+    it('still explains a failure with no byte count', () => {
+      expect(describeCleanupFailure(0, true)).toMatch(/Couldn't delete/)
+    })
+  })
+
+  describe('cleanupFailureMessage', () => {
+    it('is null for a clean result and a message for any failure', () => {
+      expect(cleanupFailureMessage({ cleared: ['a'], failed: [], remainingBytes: 0, ok: true })).toBeNull()
+      expect(cleanupFailureMessage({ cleared: [], failed: [{ path: 'a', error: 'x' }], remainingBytes: 5 * 1024 * 1024, ok: false })).toContain('5 MB')
+    })
+    it('treats a purge that threw as a failure, and an unlocatable failure (0 bytes) still reports', () => {
+      expect(cleanupFailureMessage(null)).toMatch(/Couldn't delete/)
+      expect(cleanupFailureMessage({ cleared: [], failed: [{ path: 'a', error: 'x' }], remainingBytes: 0, ok: false })).toMatch(/Couldn't delete/)
     })
   })
 })

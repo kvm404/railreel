@@ -4,7 +4,6 @@ import Animated, {
   cancelAnimation,
   Easing,
   useAnimatedStyle,
-  useReducedMotion,
   useSharedValue,
   withDelay,
   withRepeat,
@@ -12,6 +11,7 @@ import Animated, {
 } from 'react-native-reanimated'
 import { LinearGradient } from 'expo-linear-gradient'
 import Svg, { Defs, RadialGradient, Rect, Stop } from 'react-native-svg'
+import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { useTheme } from '@/theme/ThemeProvider'
 
 /**
@@ -70,7 +70,7 @@ export function WindowAtmosphere({ intensity = 1 }: { intensity?: number }) {
 function StreakBar({ streak, intensity }: { streak: Streak; intensity: number }) {
   const t = useTheme()
   const { width } = useWindowDimensions()
-  const reduced = useReducedMotion()
+  const reduced = useReduceMotion()
   const travel = width * 1.7
   const x = useSharedValue(-travel)
 

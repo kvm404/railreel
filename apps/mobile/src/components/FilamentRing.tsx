@@ -3,13 +3,13 @@ import { View } from 'react-native'
 import Svg, { Circle, Defs, LinearGradient, Stop } from 'react-native-svg'
 import Animated, {
   useAnimatedProps,
-  useReducedMotion,
   useSharedValue,
   withTiming,
   Easing,
 } from 'react-native-reanimated'
 import { Check } from 'lucide-react-native'
 import { Text } from '@/ui'
+import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { useTheme } from '@/theme/ThemeProvider'
 
 /**
@@ -32,7 +32,7 @@ export function FilamentRing({
   children?: ReactNode
 }) {
   const t = useTheme()
-  const reduced = useReducedMotion()
+  const reduced = useReduceMotion()
   const p = useSharedValue(0)
   const r = (size - stroke * 2) / 2
   const c = 2 * Math.PI * r
