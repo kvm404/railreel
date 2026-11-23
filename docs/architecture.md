@@ -1,6 +1,12 @@
 # RailReel — Technical Architecture
 
-This document captures the *how*. For the *what/why* see [`docs/prd/railreel-v1.md`](prd/railreel-v1.md).
+This document describes the *how*, as implemented. For the *what/why* see
+[`docs/prd/railreel-v1.md`](prd/railreel-v1.md).
+
+> **The one rule: sync clocks, not pixels.** RailReel never live-streams video between phones.
+> The host *distributes the file once* per guest (HTTP, byte ranges, resumable) and then keeps
+> everyone together by *aligning clocks* over a WebSocket — each phone plays its **own local
+> copy**. Anything that starts pushing real-time frames between phones is the wrong direction.
 
 ## 1. Roles
 
@@ -16,49 +22,65 @@ There is no server beyond the host's phone. Everything is on the LAN.
 ```
 ┌─────────────────────────── Host phone ───────────────────────────┐
 │  WiFi hotspot (enabled manually by the user)                       │
-│  mDNS advertiser (Android NSD) → service "_railreel._tcp"          │
-│  HTTP server (range)       → serves the movie file                 │
-│  WebSocket server          → control, sync clock, chat, reactions  │
+│  NsdHelper (Android NSD) → service "_railreel._tcp" + TXT record   │
+│  Data plane  (NanoHTTPD)   → serves the movie file, HTTP Range     │
+│  CtrlServer  (NanoWSD)     → control, sync clock, chat, reactions  │
+│  Foreground service        → keeps the process + WiFi/CPU awake    │
 └───────────────────────────────────────────────────────────────────┘
         ▲ join hotspot              ▲ discover + connect
-┌───────┴───────┐           ┌───────┴───────┐
-│  Client phone │   ...      │  Client phone │   (×3–5)
-│  mDNS browser │           │  HTTP download│
-│  WS client    │           │  local player │
-└───────────────┘           └───────────────┘
+┌───────┴────────┐          ┌───────┴────────┐
+│  Guest phone   │   ...    │  Guest phone   │   (×3–5)
+│  NSD browser   │          │  HTTP download │
+│  WS client     │          │  ProxyServer → │
+│                │          │  expo-video    │
+└────────────────┘          └────────────────┘
 ```
+
+All native pieces live in one local Expo module, `apps/mobile/modules/railreel-host`
+(Kotlin, Android only): `RailReelHostModule` (data plane + module surface), `CtrlServer`,
+`ProxyServer`, `NsdHelper`, `RailReelHostService`.
 
 - **Transport:** the host's WiFi hotspot puts everyone on one LAN. The OS will not let an app
   toggle the hotspot, so onboarding *guides* the host to enable it manually.
-- **Discovery:** mDNS via Android `NSD` for the tap-to-join *convenience* path. It is
-  **best-effort**: Android NSD is async/lifecycle-sensitive.
-  **Robust fallback = QR code / link** encoding `host-ip`, ports, session id, and the **secret
-  join token**. (A bare 4-digit code can't resolve the host's IP offline — it's only a human
-  confirmation, never transport or auth.)
-- **Control plane:** a WebSocket server on the host. Small JSON messages (see §6). **The
-  session token is required to connect.**
-- **Data plane:** a **native** HTTP server (Kotlin) serving the movie with `Range`
-  support, bounded buffers, per-client throttling, cancellation, and `sendfile`-style reads —
-  *not* a JS-bridge server (multi-GB range reads to 4–5 clients would drown the bridge). Byte
-  serving requires the token and an approved client; supports resume after drops.
+- **Discovery (three ways in):** (1) mDNS via Android `NsdManager` for tap-to-join, (2) a QR code
+  and (3) a `railreel://join?...` invite link (tapped, or pasted). Discovery is **best-effort**
+  because Android NSD is async and lifecycle-sensitive; the QR/link is the guaranteed path. Both
+  carry the host IP, ports, session id and the **session token**. (A bare 4-letter code can't
+  resolve the host's IP offline — it is only a human confirmation, never transport or auth.)
+- **Control plane (`CtrlServer`):** a WebSocket server on the host. Small JSON messages (see §6).
+  A connection must present the session token (`?tk=`). The NTP-style clock handshake
+  (`syncPing`/`syncPong`) is answered **in native code** with `elapsedRealtimeNanos` so it never
+  crosses the JS bridge.
+- **Data plane:** a **native** NanoHTTPD server serving the movie with `Range` support (206/416,
+  `HEAD`, `Accept-Ranges`), bounded buffers and cancellation — *not* a JS-bridge server (the
+  spike measured ~1.8 Mbps through the bridge). It requires the session token **and** a
+  per-guest download grant the host has approved, and answers `HEAD` only to approved grants too.
+- **Client playback proxy (`ProxyServer`):** a localhost-only (`127.0.0.1`) HTTP server on each
+  guest that serves the *still-downloading* file to the player. See §7.
+- **Host liveness:** `RailReelHostService` is a `dataSync` foreground service with WiFi and
+  wake locks and an ongoing notification (capped at 6 h to respect Android 15's budget).
+- **Version gate:** every join payload, mDNS record and invite carries `PROTOCOL_VERSION`
+  (currently **2**). Mismatched phones refuse the join up front with an "update both phones to
+  the same version" message instead of half-working.
+- **Cleartext LAN:** `http://` and `ws://` to a LAN IP are blocked by default on release builds,
+  so the `plugins/withCleartextTraffic` config plugin enables cleartext. There is no TLS (see §10).
 
-> Native modules required (hence Expo **custom dev client**, not Expo Go): mDNS advertise/
-> browse, the embedded HTTP + WebSocket servers (data plane in native code), and likely native
-> timing for sync actuation. Investigate community modules first (e.g. react-native-zeroconf,
-> react-native-tcp-socket); but the data plane and sync timing should be thin native modules we
-> control.
+> Native modules are why RailReel needs an Expo **custom dev client**, not Expo Go. The module
+> is local (no community library fit the data plane), and any change to it needs an APK rebuild;
+> CI compiles its Kotlin on every PR that touches native code.
 
 ## 3. Session lifecycle
 
 ```
-Host: pick movie → validate/probe codec → create event → enable hotspot → advertise mDNS
-Client: join hotspot → discover event → request to join
-Host: approve client
-Client: enter lobby → download begins (HTTP range) → buffer fills
-Host: lobby shows per-client readiness (% / "ready") → start when gate passes (§4)
-All: synchronized playback (§5) with chat/reactions
-Any client: drop → reconnect → resync to host clock + resume download
-Host: end session → cleanup
+Host: pick movie → probe + validate codecs (rejected here, before any server starts)
+      → create session → enable hotspot → start servers → advertise mDNS / show QR
+Guest: join hotspot → discover / scan / open invite → send `join` (requests to join)
+Host: approve (or deny) each person
+Guest: enter lobby → reuse a kept copy (fingerprint match) or download (HTTP range)
+Host: lobby shows per-guest readiness → "Start Show" when the gate passes (§4)
+All: player opens PAUSED → host presses Play → synchronized playback (§5) + chat/reactions
+Any guest: drop → reconnect → resync clock + resume the download where it stopped
+Host: end session → cleanup (guests choose Delete or Keep & Leave)
 ```
 
 ## 4. Buffering & start/stall control
@@ -80,99 +102,136 @@ choose full pre-cache.
   supported bitrate by group size. The lobby explains the wait. No silent over-promise.
 
 **Group buffer floor with hysteresis** (during playback)
-- Clients send `bufferedAheadSec` heartbeats ~3–5×/sec over the WS.
-- If any client `< CRITICAL_LEAD` (≈15s): host broadcasts `pause(reason: waiting, who)`.
-- Resume only when the laggard recovers `≥ RESUME_LEAD` (≈30s, strictly > critical) **and**
-  ACKs ready — the gap prevents pause/resume flapping. Enforce a `MIN_PAUSE` duration too.
-- A persistently slow client → host decision: **keep waiting** or **continue without them**
-  (strike/evict). The evicted client rejoins in **catch-up mode** (downloads/seeks to target +
-  lead, then re-locks). One bad device can't hold the group hostage.
+- Guests send `heartbeat`s (progress, `bufferedAheadSec`, `downloadMbps`, `stalled`) over the WS.
+- If any in-show guest falls under the floor (≈15 s) or reports a sustained player stall, the host
+  broadcasts `pause(reason: waiting, who)`.
+- It resumes only when the laggard recovers to the release mark (≈30 s, strictly above the floor)
+  — the gap prevents pause/resume flapping. The gate only auto-resumes a pause *it* caused, never
+  a manual host pause.
+- A guest that joins late is admitted to a running show only when it has a playable source and
+  enough buffer (`canJoinShow`): a progressive source needs a fast-start file, otherwise the
+  guest waits for 100%. A **host choice to "continue without" a persistently slow guest is not
+  implemented in v1** — the room waits for the laggard; the host can end the session.
 
-Constants (`START_LEAD`, `MARGIN`, `CRITICAL_LEAD`, `RESUME_LEAD`, `MIN_PAUSE`, strike counts)
-live in one config module so they're tunable from real-device testing.
+The decisions are pure functions in `lib/sync/startGate.ts` (start gate: 60 s lead + 60 s finish
+margin; buffer floor: pause below 15 s, release at 30 s; catch-up lead 30 s) so the constants are
+tunable from real-device fixtures. Coverage is judged pessimistically for VBR files, and byte
+progress is capped below 100% until the download's size and fingerprint are validated.
 
 ## 5. Sync protocol (clock alignment)
 
-**Clock offset (NTP-style).** Each client periodically does:
+**Clock offset (NTP-style).** Each guest periodically does:
 ```
-client →  {t1}                    (client send time)
-host   →  {t1, t2, t3}            (host recv, host send)
-client    t4 = now
-offset = ((t2 - t1) + (t3 - t4)) / 2      // = hostTime − clientTime
+guest  →  {t1}                    (guest send time)
+host   →  {t1, t2, t3}            (host recv, host send — stamped natively)
+guest     t4 = now
+offset = ((t2 - t1) + (t3 - t4)) / 2      // = hostTime − guestTime
 rtt    =  (t4 - t1) - (t3 - t2)
 ```
-Keep the offset from the lowest-RTT samples. **All of `t1..t4` must come from a MONOTONIC clock
-(`elapsedRealtimeNanos` on Android) — never
-`Date.now()`**, which jumps with NTP/user changes. Timestamp at the native socket edge, not in
-JS, to avoid bridge jitter. (The pure math in `lib/sync/clock.ts` is clock-source agnostic; the
-*caller* must feed it monotonic values.)
+The offset is taken from the lowest-RTT samples (`lib/sync/clock.ts`). All timestamps come from a
+**monotonic** clock, never `Date.now()`. The host's `t2`/`t3` are taken at the native socket edge
+with `elapsedRealtimeNanos`; the guest's `t1`/`t4` are taken in JS callbacks, so guest-side bridge
+jitter is part of the error budget. (The spike measured RTT ~44 ms over a hotspot.)
 
 **Playback state.** The host is the source of truth:
 ```
-PlaybackState { positionSec, rate, isPlaying, hostTimestamp }
+PlaybackState { positionSec, rate, isPlaying, hostMonotonicMs, ended? }
 ```
-A client computes target as
-`target = positionSec + (isPlaying ? (hostNow - hostTimestamp) : 0)` (converted via offset),
-and corrects:
-- drift `< ~50ms` → hold.
-- `~50ms ≤ drift < ~250ms` → small bounded `playbackRate` nudge (PLL-style, imperceptible).
-- drift `≥ ~250ms` (sustained) or discontinuity → hard `seek` to target.
+A guest computes the target position as
+`target = positionSec + (isPlaying ? (hostNow − hostMonotonicMs) × rate : 0)` (host time derived
+via the offset) and corrects local drift (`lib/sync/playback.ts`):
 
-**Actuation is the hard part (not the math).** `play()`/`seek()`/decoder-ready latencies on
-ExoPlayer can exceed 100ms, so:
-- **Schedule** start/resume for a *future host time* and have each client arm locally → all fire
-  together rather than "resume now" racing the network.
-- Require **"seek-complete / ready" ACKs** from clients before the group resumes after a seek.
-- Keep rate nudges small and bounded to avoid oscillation; hard-seek only on sustained error.
-- This timing likely lives in a **native module**, not JS.
+| Drift | Action |
+| --- | --- |
+| within ~120 ms | hold (rate 1) |
+| 120 ms – 0.5 s | inaudible rate trim, at most **±5%** |
+| 0.5 s – 1.2 s | assertive catch-up rate, at most **±15%** |
+| beyond 1.2 s | hard seek, leading by the device's measured seek latency so it lands on target |
 
-**Target:** tight *perceived* sync (~sub-100ms). Each viewer is on their own headphones, so
-cross-phone lip-sync perfection isn't required — moment-to-moment togetherness (for reactions/
-chat) is.
+**Actuation.** Resume is *scheduled* for a future host time (`resume { atHostMonotonicMs }`) so
+all guests arm locally instead of racing the network, and guests ACK (`ready`) after seeks.
+Guests only hold the room (`stalled`) after their player has been continuously not-ready for a
+grace period (~1.2 s), so brief decoder blips and drift-seeks don't freeze everyone.
+
+**What this achieves.** *Perceived* sync, not frame accuracy. On test devices we measured roughly
+**50–80 ms steady-state drift**; player latencies and JS-side timestamps mean it varies by phone.
+Each viewer is on their own headphones, so moment-to-moment togetherness (for reactions and chat)
+matters more than lip-sync perfection across phones.
 
 ## 6. Control & messaging (WebSocket)
 
-All control/chat/sync share the WS. Indicative message shapes (TS types live in `lib/protocol`):
+Control, chat, reactions and sync share one WS. TS types live in `lib/protocol/messages.ts`
+(`PROTOCOL_VERSION = 2`); every inbound frame is validated by `parseClientMsg` / `parseServerMsg`.
 
 ```ts
-// host → clients
+// host → guests
 type ServerMsg =
+  | { t: 'welcome'; sessionId; media; you }
   | { t: 'state'; state: PlaybackState }
-  | { t: 'pause'; reason: 'host' | 'waiting'; who?: string }
-  | { t: 'resume' }
-  | { t: 'roster'; clients: ClientInfo[] }
-  | { t: 'requestDecision'; id: string; approved: boolean }
-  | { t: 'chat'; from: string; text: string; at: number }
-  | { t: 'reaction'; from: string; emoji: string; at: number }
-  | { t: 'syncPong'; t1: number; t2: number; t3: number }
+  | { t: 'pause'; reason: 'host' | 'waiting'; who? }
+  | { t: 'resume'; atHostMonotonicMs }
+  | { t: 'roster'; participants; media? }          // media.subtitle = { name, sizeBytes, rev }
+  | { t: 'requestDecision'; id; approved }          // join approval / denial
+  | { t: 'chat' | 'reaction'; from; fromId?; …; at }
+  | { t: 'syncPong'; t1; t2; t3 }
+  | { t: 'subtitle'; name; content }
+  | { t: 'playbackRequestDecision'; requestId; requesterId; approved; action; seconds? }
+  | { t: 'ended'; reason: 'host-left' | 'host-ended' }
 
-// client → host
+// guest → host
 type ClientMsg =
-  | { t: 'join'; name: string }
-  | { t: 'heartbeat'; bufferedAheadSec: number; downloadMbps: number; positionSec: number }
-  | { t: 'request'; id: string; action: 'pause' | 'resume' | 'seek'; arg?: number }
-  | { t: 'chat'; text: string }
-  | { t: 'reaction'; emoji: string }
-  | { t: 'syncPing'; t1: number }
+  | { t: 'join'; id; name; token; grant }
+  | { t: 'heartbeat'; id; grant; progress; bufferedAheadSec; downloadMbps; positionSec; stalled?; inShow?; decodeOk? }
+  | { t: 'ready'; id; grant; positionSec }
+  | { t: 'playbackRequest'; id; grant; requestId; action: 'pause' | 'rewind'; seconds? }
+  | { t: 'subtitleRequest'; id; grant; rev }        // pull the subtitle body when `rev` differs
+  | { t: 'chat'; id; grant; text } | { t: 'reaction'; id; grant; emoji }
+  | { t: 'leave'; id; grant } | { t: 'syncPing'; t1 }
 ```
 
-- **Host-only control:** clients never mutate playback directly; they send `request`, the host
-  decides and broadcasts the resulting `state`.
-- **Reactions/chat:** host relays to all (host is the hub; no client-to-client mesh in v1).
+- **Host-only control:** guests never mutate playback. They send a `playbackRequest` (pause or
+  rewind 15 s); the host's prompt decides and the resulting `state` is broadcast. A request
+  expires on the guest after 12 s and is released on reconnect.
+- **Hub topology:** the host relays chat and reactions to everyone (including the sender, so the
+  host's echo is the single ordering). It stamps the sender's *name* and its own clock; there is
+  no guest-to-guest mesh.
+- **Subtitles:** the host attaches a validated `.srt` (≤ 2 M chars) and broadcasts the body once.
+  The roster carries only `{ name, sizeBytes, rev }`; a guest whose revision differs (just
+  approved, reconnected, or the file was replaced) pulls it with `subtitleRequest`, and
+  recomputes the revision from what it received.
+- **Identity is connection-bound** (§10): a participant `id` is only honored on the native
+  connection that proved it.
 
-## 7. Media pipeline (v1)
+## 7. Media pipeline
 
-- On import, **probe** the file. v1 accepts **only already-compatible H.264 + AAC MP4** with a
-  valid `moov`/fragment layout. **Container remux and transcoding are deferred** — "non-MP4 but
-  compatible codecs → remux" sounds simple but breaks on real files: MKV with AC3/DTS, multiple
-  audio tracks / subtitles, H.264 Annex B → AVCC, unsupported profiles/levels, VFR, edit lists,
-  huge files, and 2× temporary storage. Reject non-conforming files with a clear message.
-- **Progressive playback must not point the player at a partially-written file.** A growing
-  file with a changing length/index is unreliable across players. Instead feed playback through
-  a **caching source**: ExoPlayer `CacheDataSource` on Android (or a localhost proxy) — the
-  player requests ranges, the cache layer satisfies them from disk or fetches-and-stores. The
-  fully-downloaded file is persisted separately.
-- For **full pre-cache** mode the file is complete before play, so a plain local file URL is fine.
+- **Validate before hosting.** The native probe reports the *real* container and track mimes.
+  `lib/media/compat.ts` accepts only **H.264 (`video/avc`) + AAC (`audio/mp4a-latm`) in an MP4 or
+  MOV (QuickTime) container**, and rejects everything else *before the servers start*, with the
+  exact sentence the host sees (what was found, plus a HandBrake "Fast 1080p30" hint). Remux and
+  transcoding are out of scope: they break on real files (MKV with AC-3/DTS, multi-audio,
+  Annex B, VFR, edit lists, 2× temporary storage). Guests additionally check *their* decoder
+  against the real codec and frame size and warn when it can't keep up.
+- **Preflight** (`lib/media/preflight.ts`): free space (movie + 200 MB), host battery (< 30% while
+  discharging warns), decoder capability.
+- **Integrity.** The host serves size and a content fingerprint (`media.hash`); guests validate
+  status, size and fingerprint before a download counts as complete.
+- **Distribution.** Guests download with Range requests straight to disk, in the app's cache
+  storage. Transfers **resume**: a hotspot drop continues with `Range: bytes=N-` into the same
+  file (only a 206 with the exact final size is accepted), a per-transfer watchdog aborts a
+  transfer silent for 8 s, and retries back off (6 attempts, 1–15 s) with the budget earned back
+  only by real progress.
+- **Progressive playback never points the player at a partially-written file.** `ProxyServer`
+  binds `127.0.0.1` on the guest and serves the file *while it grows*, declaring the **final size**
+  up front. A read that catches the download edge simply blocks until more bytes land, which
+  `expo-video` (ExoPlayer) treats as a slow network, so normal buffering and our stall reporting
+  apply; if nothing arrives for 30 s the socket errors and player retry takes over. This requires
+  a **fast-start** file (`moov` before `mdat`, detected by the host); otherwise the guest plays a
+  complete local file after a full pre-cache.
+- **Player.** `expo-video` (ExoPlayer on Android) is the player. It provides rate control and
+  seek-ready signals; the Player screen reconciles its native state with the room's.
+- **Kept copies.** A completed download writes a small record (fingerprint, size, title). On a
+  later approval, a kept copy is reused when the size matches and a fresh fingerprint equals the
+  host's `media.hash` — no transfer. A startup sweep removes everything else.
 
 ## 8. App architecture (client app, both roles)
 
@@ -186,8 +245,9 @@ apps/mobile/src/
   screens/      Home, CreateSession, JoinSession, Lobby, Player, …
   hooks/        React hooks bridging UI ↔ services
   lib/          PURE logic — protocol types, clock math, buffer/gate decisions,
-                media probe rules, sync controller (unit-tested with vitest)
-  net/          host server (http+ws+mDNS) and client (discovery+download+ws)
+                drift correction, media compat rules (unit-tested with vitest)
+  net/          client-side network glue (discovery, download, ws); the host servers
+                (http + ws + mDNS) are native, in modules/railreel-host
   data/         any local persistence (recent sessions, settings)
   types/        shared TS types
 apps/mobile/modules/   native modules (mDNS, embedded servers) as needed
@@ -212,30 +272,56 @@ battery or thermal shutdown. Instead:
 
 ## 10. Security model (v1)
 
-- On session create, generate a **high-entropy session secret** (token).
-- The token is distributed *only* via the QR/link or to approved clients — never broadcast.
-- **Both** the WS control plane and the HTTP data plane require the token; the data plane
-  additionally serves bytes only to clients the host has **approved**. Rate-limit pairing.
-- Movie metadata includes **file hash + size** so clients verify integrity of what they got.
-- Rotate the secret per session. Result: being on the hotspot is not enough to pull the movie.
+RailReel is built for **a small, trusted group on a private hotspot**. The model is deliberately
+simple and is stated here as it is, not as a stronger promise.
 
-## 11. Open technical questions (to validate on-device)
+- **The session token is public to the hotspot, by design.** It is generated per session (128-bit,
+  rotated every session) and is published in the mDNS TXT record (`t`) so tap-to-join works
+  without a QR scan. It is also in the QR/link. So **anyone on the hotspot can open a control
+  socket and *request* to join**. The token only means "you may talk to this host".
+- **The host approves each person.** A new `join` stays *pending*. The host sees the request and
+  approves or denies it. Only on approval does the host authorize that guest's **download grant**
+  (a secret the guest mints itself, 128-bit) on the data plane and mark its connection approved.
+- **Bytes go only to approved grants.** The HTTP data plane requires the token **and** an approved
+  grant (`HEAD` included, so an unapproved peer learns nothing, not even the size).
+- **Room traffic goes only to approved, connection-bound guests.** `broadcast` reaches only
+  connections JS marked approved. A pending requester receives only its own `requestDecision`
+  (targeted `sendTo`) and lifecycle notices (`ended`). It never sees roster, chat, reactions,
+  subtitles or playback state.
+- **Identity is bound to the connection, not trusted from frames.** Native assigns every accepted
+  socket an opaque `connId`, and JS binds a participant to the connection that proved it (a valid
+  `join`, or a grant-proven reconnect). A connection speaks for exactly one participant; a frame
+  claiming another `id` is dropped; a `join` for an existing id must present the same grant (no
+  hijack); a close only affects the participant bound to that connection. Approval is handled
+  with tickets that deny/leave/reset invalidate, so a stale async approval cannot re-approve.
+- **The host control plane is bounded.** Frames are capped (64 KiB per frame/message, 64 fragments)
+  and rate-limited *before* NanoWSD allocates the payload; outbound writes go through a bounded
+  per-socket queue with its own writer thread and a watchdog, so a peer that stops reading only
+  stalls itself. Admission is capped per remote IP (3) and overall (24), and when full the oldest
+  *unapproved* socket makes way, so pending requesters can't lock out approved guests.
+- **Integrity.** Movie metadata carries size and a fingerprint; guests verify what they received.
 
-- Best Android libs for mDNS; confirm we own the native data-plane (HTTP range) + sync
-  timing modules rather than relying on JS-bridge servers.
-- Real **aggregate** hotspot throughput with 4–6 clients downloading simultaneously on
-  representative phones; tune §4 constants and the progressive-vs-pre-cache threshold.
-- Android background-audio/networking limits while screen is on.
-- Caching-player-source approach (ExoPlayer `CacheDataSource` / local proxy) and how seek interacts
-  with a partially-cached asset.
-- AP/client isolation on some hotspots (can clients reach the host's server at all?).
-- Real-device **soak testing** (full 2h movie on Android, lock/call/background, reconnect).
+**Limits (accepted for v1).** Both secrets are bearer tokens over plaintext HTTP/WS on the LAN.
+This stops someone merely on the hotspot from pulling the movie or joining the room unapproved. It
+does **not** defend against a LAN sniffer who can observe and replay an approved guest's traffic,
+or against a host who approves the wrong person. Don't run it on a network you don't trust.
 
-## Appendix: design review (codex, 2026-06-27)
+## 11. Known limits & remaining device validation
 
-This architecture was reviewed by codex (principal-engineer role). Key findings folded in:
-aggregate-throughput correction (§4), monotonic clocks + scheduled-resume/ready-ACK actuation
-(§5), caching player source instead of partial-file playback (§7), native data plane + token
-auth (§2, §10), tightened media scope (§7), buffer-floor hysteresis + evict (§4), host-as-SPOF
-constraints (§9). Verdict: the core "distribute bytes once, sync state not pixels" direction is
-sound; the risks are mobile-platform edges and optimistic constants — addressed above.
+- Aggregate hotspot throughput with 4–6 simultaneous downloads varies a lot by phone; the start
+  gate adapts, but the 60 s / 15 s / 30 s constants are still tuned from real-device runs.
+- Some hotspots enable AP/client isolation, so guests can't reach the host at all; the app can
+  only surface a clear "can't reach host" state.
+- The host phone is the infrastructure (§9): screen-off hosting is not supported (with the screen
+  off the SoftAP stops serving clients), so the host must stay on screen.
+- Guest-side timestamps are taken in JS; very slow phones show more drift (see §5).
+- There is no "continue without this guest" host action yet (§4).
+- Long soak testing (full 2 h movie, lock/call/background, reconnect) is ongoing.
+
+## Appendix: design history
+
+An early design review (2026-06) shaped several decisions that remain in force: the
+aggregate-throughput correction (§4), monotonic clocks and scheduled-resume/ready-ACK actuation
+(§5), a caching proxy instead of partial-file playback (§7), a native data plane (§2), and the
+host-as-single-point-of-failure stance (§9). A later pre-release audit corrected the docs on the
+trust model (§10), media validation (§7) and sync claims (§5).

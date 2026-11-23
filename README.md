@@ -5,10 +5,10 @@
 # 🎬 RailReel
 
 **A private movie theater that travels with you.**  
-Watch movies together with friends in perfect frame-accurate sync — with **zero internet**.
+Watch movies together with friends, kept in step by clock sync — with **zero internet**.
 
-[![Latest Release](https://img.shields.io/github/v/release/kvm404/railreel?color=FFB266&label=Latest%20Release)](https://github.com/kvm404/railreel/releases/tag/v0.1.0)
-[![Download APK](https://img.shields.io/badge/Download-Android%20APK-57D2E6?logo=android&logoColor=white)](https://github.com/kvm404/railreel/releases/download/v0.1.0/RailReel-v0.1.0.apk)
+[![Latest Release](https://img.shields.io/github/v/release/kvm404/railreel?color=FFB266&label=Latest%20Release)](https://github.com/kvm404/railreel/releases/latest)
+[![Download APK](https://img.shields.io/badge/Download-Android%20APK-57D2E6?logo=android&logoColor=white)](https://github.com/kvm404/railreel/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-amber.svg)](LICENSE)
 
 </div>
@@ -26,18 +26,20 @@ Crowding 4 people around a single 6-inch screen with the speaker blaring is unco
 1. One person hosts the movie.
 2. Friends connect to the host's portable Wi-Fi hotspot.
 3. The movie transfers directly between phones over the local network.
-4. Everyone puts on their own headphones, watches on their own screen, and stays **locked in sync**.
+4. Everyone puts on their own headphones, watches on their own screen, and stays **in sync** with the host.
 
-When the host pauses, it pauses for everyone. If someone misses a dialogue, they can request a quick rewind. Floating emoji reactions and group chat let you share the moment together — all without a single byte of internet data.
+When the host pauses, it pauses for everyone. If someone misses a line of dialogue, they can ask the host for a quick rewind. Floating emoji reactions and group chat let you share the moment together — all without a single byte of internet data.
 
 ---
 
 ## 📥 Download & Install
 
-RailReel is free, open source, and works on Android devices (Android 10+).
+RailReel is free, open source, and Android-only (Android 10+).
 
-👉 **[Download RailReel v0.1.0 (APK)](https://github.com/kvm404/railreel/releases/download/v0.1.0/RailReel-v0.1.0.apk)**  
-*(You can also find all versions and release notes on the [Releases page](https://github.com/kvm404/railreel/releases).)*
+👉 **[Download the latest RailReel APK](https://github.com/kvm404/railreel/releases/latest)**  
+*(Pick the `RailReel-vX.Y.Z.apk` asset on the release page. Older versions and release notes are on the [Releases page](https://github.com/kvm404/railreel/releases).)*
+
+The APK is **universal**: it contains both `arm64-v8a` and `armeabi-v7a` native libraries, so modern 64-bit phones and older 32-bit ARM phones can both install it. Every phone in a session must run the **same RailReel version**; if versions differ, the join is refused with an "update both phones" message.
 
 ### Quick 3-Step Setup:
 1. **Download** the `.apk` file directly on your Android phone.
@@ -49,24 +51,27 @@ RailReel is free, open source, and works on Android devices (Android 10+).
 ## 🚂 How a Movie Session Works
 
 ### 1. Pick & Host
-The host opens RailReel, chooses a local video file from their phone (MP4), and can optionally attach a `.srt` subtitle file.
+The host opens RailReel and chooses a local video file. RailReel checks it **before** anything is shared: it must be **H.264 video with AAC audio in an MP4 or MOV container**. Anything else (HEVC, AV1, MKV, AC-3/DTS audio, ...) is rejected up front with a message that tells you what was found and suggests converting it (for example with HandBrake's "Fast 1080p30" preset). The host can optionally attach a `.srt` subtitle file.
 
 ### 2. Connect Your Friends
-The host turns on their phone's personal hotspot. Friends connect their Wi-Fi to the hotspot, open RailReel, and scan the host's on-screen QR code (or tap the room name via auto-discovery) to join.
+The host turns on their phone's personal hotspot (Android does not let apps do this, so RailReel guides you). Friends connect their Wi-Fi to the hotspot, open RailReel, and join by tapping the room that shows up automatically, scanning the host's QR code, or opening/pasting the invite link.
 
-### 3. The Departure Lounge
-Everyone enters the lobby where glowing rings show each friend's download progress. Once ready, the host taps **Start Show**.
+### 3. The Host Lets People In
+Anyone on the hotspot can *ask* to join, but nobody gets in on their own: the host sees each request and **approves every person**. The movie file and the room's chat, reactions and playback state only go to approved guests.
 
-### 4. Watch Together in Sync
-The movie starts simultaneously for the whole cabin. When the host plays, pauses, or seeks, every connected phone stays locked to the same second.
+### 4. The Departure Lounge
+Approved guests land in the lobby, where glowing rings show each friend's download progress. When the group is ready, the host taps **Start Show**.
 
-### 5. Reactions, Chat & Playback Requests
-- **Floating Reactions**: Tap emoji reactions that drift across everyone's screen in real time.
+### 5. Press Play, Watch Together
+Start Show opens the player on every phone, **paused**. The host then presses **Play** in the player and the whole cabin rolls together. When the host plays, pauses, or seeks, every connected phone follows. If a guest's download falls too far behind, the show pauses for everyone ("waiting for a friend") and resumes when they catch up.
+
+### 6. Reactions, Chat & Playback Requests
+- **Floating Reactions**: Tap emoji reactions that drift across everyone's screen.
 - **In-Movie Chat**: Chat with your friends without leaving the player.
-- **Playback Requests**: Want a quick snack break? Tap *"Request Pause"* or *"Rewind 15s"*. The host gets a simple on-screen prompt to allow it with one tap.
+- **Playback Requests**: Want a snack break? Ask to pause or rewind 15 seconds. The host gets a prompt to allow it with one tap.
 
-### 6. Clean Up When Done
-Once the credits roll or you leave the session, a single tap deletes the downloaded movie file from your phone so your storage is reclaimed immediately.
+### 7. Clean Up When Done
+When you leave, you choose: **delete** the downloaded movie and reclaim the storage, or **keep** it. A kept copy is reused automatically if you later join a session for the same movie (RailReel checks a fingerprint of the file), so there is no second download.
 
 ---
 
@@ -74,32 +79,48 @@ Once the credits roll or you leave the session, a single tap deletes the downloa
 
 - **Does it use any mobile data or internet?**  
   None. The hotspot is purely a local Wi-Fi link between devices. You can be in airplane mode in the middle of a desert and it will work.
-- **What video formats work best?**  
-  Standard DRM-free MP4 files (H.264 video with AAC audio) work smoothly on virtually all Android phones.
+- **What video formats work?**  
+  DRM-free **H.264 video + AAC audio** in an **MP4 or MOV** container. Other codecs and containers are rejected before the session starts, with a hint on how to convert. A file with the metadata at the start (a "fast-start" MP4) lets guests begin watching before their download finishes; otherwise they wait for the full download.
+- **How tight is the sync?**  
+  Every phone plays its own local copy and follows the host's clock, so it is *perceptually* in sync, not frame-locked. On our test devices we measured roughly **50-80 ms of steady-state drift**, which is not noticeable for watching together with your own headphones, but it is not frame-accurate and varies with the phone. See [how sync works](docs/architecture.md#5-sync-protocol-clock-alignment).
+- **What if a download is interrupted?**  
+  Transfers resume where they stopped after a hotspot drop and retry automatically once the guest reconnects.
 - **Can I bring subtitles?**  
-  Yes! Just select a standard `.srt` subtitle file alongside the video when hosting, and captions will sync across every phone.
+  Yes. Select a `.srt` file when hosting and every guest receives it and can toggle captions.
 - **How many people can watch together?**  
   RailReel is tailored for comfortable small groups of 4 to 6 people traveling together.
+- **Is it secure?**  
+  RailReel is built for a small, trusted group on a private hotspot. The room is open to *requests* from anyone on the hotspot, but only guests the host approves get the file or the room traffic. Traffic is plain HTTP/WebSocket on the local network (no TLS), so don't use it on a hostile shared network. Details in [the security model](docs/architecture.md#10-security-model-v1).
 
 ---
 
 ## 🛠 For Developers
 
-RailReel achieves tight synchronization by aligning **device clocks rather than streaming heavy video pixels**:
-- High-speed local HTTP data plane built in Kotlin with RFC 7233 byte-range support.
-- Microsecond-level NTP clock alignment over a low-latency local WebSocket control channel.
-- Continuous drift compensation using bounded playback-rate nudges (0.95×–1.05×) so audio never clips or stutters.
-- Progressive local streaming proxy allowing playback to begin before the file finishes downloading.
+RailReel keeps phones together by aligning **device clocks rather than streaming video pixels**:
+- Each phone downloads its own copy of the movie from the host over a native Kotlin (NanoHTTPD) HTTP server with RFC 7233 byte-range support, so transfers can resume.
+- An NTP-style clock handshake over a WebSocket control channel (answered natively on the host with a monotonic clock) gives each guest the offset to the host's timeline.
+- Each guest derives the host's target playhead and corrects drift locally: inside a ~120 ms deadband nothing happens, small drift is trimmed with playback-rate nudges (up to +/-5% near, up to +/-15% for larger drift), and drift beyond 1.2 s triggers a hard seek.
+- A localhost playback proxy lets a guest start watching a fast-start file while it is still downloading.
 
-Want to learn more about the architecture or contribute? Read the technical deep dive in [`docs/architecture.md`](docs/architecture.md).
+Read the technical deep dive in [`docs/architecture.md`](docs/architecture.md), and [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a PR.
 
-### Building from Source:
+### Prerequisites
+- [bun](https://bun.sh) **1.3.5** (the package manager and workspace runner; do not use npm/yarn/pnpm)
+- Node.js **20**
+- JDK **17**
+- Android SDK (platform tools + build tools; `ANDROID_HOME` set)
+- A **physical Android device** with USB debugging. Emulators can't do hotspots or mDNS multicast, and a real test needs two phones.
+- RailReel uses native modules, so it runs in a custom **Expo dev client** build. **Expo Go will not work.**
+
+### Building from Source
 ```bash
 bun install
-bun run mobile:start      # start the Expo development server
-bun run mobile:android    # compile and run on a connected Android device
-bun run test              # run full Vitest unit test suite
+bun run mobile:android    # build + install the dev client on a connected device (first run is slow)
+bun run mobile:start      # start the Metro dev server for the dev client
+bun run lint && bun run typecheck && bun run test   # the checks CI runs
 ```
+
+If you change anything under `apps/mobile/modules/`, `apps/mobile/plugins/`, `app.json` or native dependencies, the dev client must be **rebuilt and reinstalled** (`bun run mobile:android` again). Fast Refresh does not reload native code.
 
 ---
 

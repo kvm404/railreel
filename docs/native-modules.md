@@ -1,102 +1,80 @@
-# RailReel — Native Module Strategy (Phase 1 spike)
+# RailReel — Native Module Strategy
 
-The networking layer is the riskiest part of RailReel. This doc records the library
-research and the decision on what we adopt vs. what thin native modules we write. It
-de-risks Phase 1 before we commit to a native build. See `docs/architecture.md` §2.
+> **Status: decisions made and shipped.** This began as the Phase 1 spike note (library research
+> before committing to a native build). The research is kept as **history**; the "Shipped" lines
+> say what RailReel actually uses. See `docs/architecture.md` §2 and `docs/data-plane-module.md`.
 
-> Hard reality up front: **mDNS multicast and a real hotspot don't work on emulators.**
-> The discovery + data-plane paths must be validated on **physical devices** (a host phone
-> with hotspot + 1–2 client phones). Plan device testing accordingly.
+> Hard reality: **mDNS multicast and a real hotspot don't work on emulators.** Discovery and
+> the data plane must be validated on **physical devices** (a host with hotspot + 1-2 guests).
 
 ## 1. Discovery (mDNS / Android NSD)
 
-| Option | Notes |
-| --- | --- |
-| **Android NsdManager** (`railreel-host`) | Embedded directly in the native host module via `NsdHelper.kt`. Zero additional external dependencies, handles single-flight resolution queue, and hooks directly into the host lifecycle. |
-| **react-native-zeroconf** | Alternative mature library; wraps `NsdManager` on Android. Bundles mDNSResponder. |
+Options considered: Android `NsdManager` directly, or `react-native-zeroconf` (wraps `NsdManager`).
 
-**Decision:** use native **Android NSD (`NsdManager`)** inside `railreel-host` (or **react-native-zeroconf** as fallback). Either way mDNS is **best-effort** — the **QR/link join payload** (already built in
-`src/lib/protocol/joinPayload.ts`) is the guaranteed path.
+**Shipped:** `NsdHelper.kt` inside the local `railreel-host` module (Android NSD, no extra
+dependency, single-flight resolve queue). mDNS is **best-effort**; the QR code / `railreel://`
+invite link (`lib/protocol/joinPayload.ts`, `lib/links/invite.ts`) is the guaranteed path. The
+manifest declares `CHANGE_WIFI_MULTICAST_STATE`.
 
-**Platform gotchas already handled in `app.json`:** Android `CHANGE_WIFI_MULTICAST_STATE`
-(needed to receive multicast — acquire a `MulticastLock` at runtime).
+## 2. Data plane: HTTP server with `Range`
 
-## 2. Data plane — HTTP server with `Range` (host serves the movie)
+**Finding (history):** no off-the-shelf RN library serves files with byte ranges, and pumping
+multi-GB to several guests through a JS-bridge server hits backpressure limits. The spike measured
+~1.8 Mbps through the bridge.
 
-**Finding:** there is **no off-the-shelf RN library** that serves files with byte-range support.
-Raw TCP is available via **react-native-tcp-socket** (`Rapsssito`, mature), but building an
-HTTP/1.1 range server in JS and pumping multi-GB to 4–5 clients over the bridge will hit
-backpressure/memory limits (codex P1). 
+**Shipped:** a thin native Expo module with an embedded **NanoHTTPD** server (not Ktor),
+streaming from the picked file with bounded buffers and cancellation, enforcing the session token
+and an approved per-guest grant at the server edge. A throwaway `react-native-tcp-socket`
+prototype was only ever a spike shortcut and is not in the app.
 
-**Decision:** write a **thin native Expo module** for the data plane.
-- **Android (Kotlin):** embed **Ktor** (or NanoHTTPD) — both support `Range`. Stream from a
-  `FileInputStream`/`FileChannel` with bounded buffers; honor cancellation; expose per-client
-  metrics. Ktor can host the WebSocket too (see §3).
-- Enforce the **session token** + approved-client check at the server edge before serving bytes.
+> **Spike result (2026-06-27, two phones on a hotspot).** Client reached the host (no AP
+> isolation); clock sync RTT ~44 ms; `react-native-tcp-socket` runs on the New Architecture via
+> interop; the JS-bridge data plane caps at ~1.8 Mbps; host screen sleep pauses the JS server. These
+> drove the native data plane and the host foreground service.
 
-**Spike shortcut (throwaway):** to validate the end-to-end flow fast, a first prototype *may*
-use react-native-tcp-socket in JS — but it is **not** the production data plane; don't let it
-calcify.
+## 3. Control plane: WebSocket
 
-> **✅ Spike result (2026-06-27, two physical Android phones on a hotspot).** Confirmed
-> empirically — see `docs/data-plane-module.md` for the full write-up:
-> - Client reached host over the hotspot (no AP isolation). Connectivity works.
-> - Clock sync handshake worked through `lib/sync/clock`; **RTT ~44ms** → sub-100ms sync is realistic.
-> - `react-native-tcp-socket` runs on the New Architecture via interop (servers bind fine).
-> - **JS-bridge data plane caps at ~1.8 Mbps** (16 MB took 70s) — far too slow for video. The
->   bottleneck is the JS bridge, not the WiFi. **→ the production data plane MUST be native.**
-> - Host backgrounding (screen sleep) **pauses the JS server** mid-transfer. **→ the host needs a
->   foreground service + keep-awake** (confirms `docs/architecture.md` §9).
+Guests use React Native's built-in WebSocket client.
 
-## 3. Control plane — WebSocket
-
-- **Client side:** React Native ships a **WebSocket client** built in — no module needed.
-- **Host side needs a WebSocket _server_.** Host it inside the **same native module** as the
-  data plane (Ktor/NanoHTTPD serves HTTP + WS on Android). One native server process = one port story,
-  shared token auth, simpler lifecycle.
+**Shipped:** the host side is **`CtrlServer.kt`** (NanoWSD) in the same native module, token-gated,
+with connection-bound identity, bounded frames and per-socket outbound queues
+(`architecture.md` §10). It runs on its own port, separate from the HTTP data plane.
 
 ## 4. Sync timing
 
-- Expose a **monotonic clock** (`elapsedRealtimeNanos`) and the ability
-  to **arm a callback at a future host-time** from native, so scheduled start/resume fires
-  precisely (JS timers are too jittery). Small native module; pure decision math already lives
-  in `src/lib/sync/clock.ts`.
+**Shipped:** the NTP-style `syncPing`/`syncPong` is answered natively in `CtrlServer` with
+`SystemClock.elapsedRealtimeNanos`, so the host-side timestamps never cross the bridge. The pure
+math is in `src/lib/sync/clock.ts` and drift correction in `src/lib/sync/playback.ts`. Guest-side
+timestamps are still taken in JS. There is no separate "arm a native callback" timing module; scheduled
+resume uses a future host-monotonic time that each guest converts locally.
 
-## 5. Video player (open — decide at Phase 2)
+## 5. Video player
 
-Needs: local playback, **playbackRate** control (for drift nudges), precise **seek** + a
-"ready/seek-complete" signal, and a **caching data source** so we never play a partially-written
-file. Candidates: `expo-video` (modern Expo player — verify rate + cache hooks), or
-`react-native-video` (ExoPlayer with more control, `CacheDataSource` on Android). **Action:**
-spike both for rate-change + cached-source support before committing. Tracked, not decided here.
+**Shipped:** **`expo-video`** (ExoPlayer on Android). It provides `playbackRate`, seek, and
+ready/stall signals. For progressive playback the player is pointed at **`ProxyServer.kt`**, a
+localhost proxy that serves the still-downloading file, rather than at a partial file or a custom
+ExoPlayer `CacheDataSource`. `react-native-video` was considered and not needed.
 
-## 6. Spike plan & exit criteria
+## 6. Other native pieces
 
-1. Android NSD (or react-native-zeroconf): host advertises `_railreel._tcp`, a client
-   discovers it on **two physical phones** over the host's hotspot.
-2. Stand up the native HTTP range server; client pulls a byte range of a large file and
-   measures throughput **with multiple clients downloading at once** (validates the aggregate
-   model in architecture §4).
-3. Open a WS between host and client through the native server; round-trip a `syncPing/syncPong`
-   and feed it through `lib/sync/clock.ts`.
-4. Confirm Android `MulticastLock`.
+- **`RailReelHostService.kt`:** `dataSync` foreground service + WiFi/wake locks so the host keeps
+  serving while the screen is on and the app is briefly backgrounded.
+- **`plugins/withCleartextTraffic.js`:** Expo config plugin allowing cleartext HTTP/WS to the LAN.
+- **`expo-camera`:** QR scanning. **`expo-keep-awake`:** keeps the screen on while hosting.
 
-**Exit criteria:** on real devices over a hotspot — discovery works (or QR fallback does), a
-client downloads at usable aggregate throughput, and a token-authenticated WS carries a clock
-sample end-to-end.
+## 7. Spike plan (historical)
 
-## 7. Risks to watch
+1. NSD host advertise / guest discover on two phones.
+2. Native HTTP range server with several simultaneous downloads.
+3. WS round-trip of `syncPing/syncPong` through `lib/sync/clock.ts`.
+4. Android `MulticastLock`.
 
-- **AP/client isolation:** some hotspots block client↔client *and* client↔host traffic. Detect
-  early; surface a clear error.
-- **Background/lock limits** — host must stay foreground (architecture §9).
-- **Emulators can't do this** — physical-device testing is mandatory.
+Exit criteria (met): discovery works or QR does, guests download at usable aggregate throughput,
+and a token-authenticated WS carries a clock sample end to end.
 
----
+## 8. Risks that still apply
 
-### Sources
-- [react-native-zeroconf (npm)](https://www.npmjs.com/package/react-native-zeroconf) ·
-  [GitHub](https://github.com/balthazar/react-native-zeroconf)
-- [@inthepocket/react-native-service-discovery](https://www.npmjs.com/package/@inthepocket/react-native-service-discovery)
-- [react-native-tcp-socket](https://github.com/Rapsssito/react-native-tcp-socket)
-- [React Native networking docs](https://reactnative.dev/docs/network)
+- **AP/client isolation** on some hotspots blocks guest-to-host traffic; the app surfaces a clear error.
+- **Background/lock limits:** the host must stay foreground with the screen on (`architecture.md` §9).
+- **Emulators can't do this:** physical-device testing is mandatory.
+- Any change to `apps/mobile/modules/` needs an APK rebuild and is compiled by CI.
