@@ -3,6 +3,9 @@ package expo.modules.railreelhost
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.os.Build
+import java.net.Inet4Address
+import java.net.InetAddress
 
 /**
  * mDNS (Android NSD) for tap-to-join: the host ADVERTISES its session on `_railreel._tcp` and
@@ -112,7 +115,7 @@ class NsdHelper(
           override fun onServiceResolved(info: NsdServiceInfo) {
             synchronized(lock) {
               if (discovery != null) {
-                val host = info.host?.hostAddress
+                val host = reachableIpv4(info)
                 if (host != null) {
                   val txt = info.attributes.entries.associate { (k, v) -> k to (v?.toString(Charsets.UTF_8) ?: "") }
                   emit(
@@ -136,6 +139,25 @@ class NsdHelper(
         resolving = false
       }
     }
+  }
+
+  /**
+   * The address a guest can actually dial: the first IPv4 that isn't loopback/link-local/any.
+   * The join URL, WS client and host listener are IPv4-only (an IPv6 literal like fe80::1 would
+   * even break `ws://host:port`), so a service that resolves only to IPv6 is skipped. API 34+
+   * reports every address of the service; before that, only the one `host`.
+   */
+  @Suppress("DEPRECATION") // `host`: the only source below API 34
+  private fun reachableIpv4(info: NsdServiceInfo): String? {
+    val addresses: List<InetAddress> =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        info.hostAddresses
+      } else {
+        listOfNotNull(info.host)
+      }
+    return addresses
+      .firstOrNull { it is Inet4Address && !it.isLoopbackAddress && !it.isLinkLocalAddress && !it.isAnyLocalAddress }
+      ?.hostAddress
   }
 
   fun teardown() {
