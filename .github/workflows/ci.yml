@@ -5,15 +5,30 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # Bun version comes from package.json "packageManager" so CI and local dev stay in lockstep.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: package.json
+
+      - name: Cache Bun downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -26,3 +41,87 @@ jobs:
 
       - name: Test
         run: bun run test
+
+  # Detect native-affecting changes so the heavy Android compile only runs when it can break.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      native: ${{ steps.filter.outputs.native }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            native:
+              - 'apps/mobile/modules/**'
+              - 'apps/mobile/app.json'
+              - 'apps/mobile/plugins/**'
+              - 'apps/mobile/package.json'
+              - 'bun.lock'
+              - '.github/workflows/ci.yml'
+
+  # Compiles the Kotlin of the local railreel-host module (and the app) from a fresh
+  # `expo prebuild`, so manifest/plugin/dependency/Kotlin breakage fails the PR instead
+  # of the release build. Cheapest meaningful Gradle task: no JS bundle, no CMake, no APK.
+  native:
+    name: native (Android compile)
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Monorepo hoisting: let Gradle/Expo autolinking resolve root-level node_modules.
+      NODE_PATH: ${{ github.workspace }}/node_modules:${{ github.workspace }}/apps/mobile/node_modules
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Cache Bun downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Expo prebuild (android)
+        run: bun run --cwd apps/mobile prebuild --platform android
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Compile Kotlin (railreel-host module + app)
+        shell: bash # explicit shell enables pipefail so a Gradle failure is not masked by tee
+        working-directory: apps/mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:compileReleaseKotlin \
+            -PreactNativeArchitectures=arm64-v8a \
+            -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m" \
+            --no-daemon --max-workers=2 --stacktrace --console=plain 2>&1 | tee "$RUNNER_TEMP/gradle.log"
+
+      - name: Assert the railreel-host module was compiled
+        run: |
+          if ! grep -Eq ':railreel-host:compile(Release|Debug)Kotlin' "$RUNNER_TEMP/gradle.log"; then
+            echo "::error::railreel-host Kotlin was not compiled (autolinking/project name changed?)"
+            grep -E '^> Task .*compile.*Kotlin' "$RUNNER_TEMP/gradle.log" | head -20 || true
+            exit 1
+          fi

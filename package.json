@@ -2,6 +2,7 @@
   "name": "railreel",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "bun@1.3.5",
   "type": "module",
   "workspaces": [
     "apps/*",
@@ -18,6 +19,7 @@
   "devDependencies": {
     "@eslint/js": "^9.39.4",
     "eslint": "^9.39.4",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.4.0",
     "typescript": "~5.9.2",
     "typescript-eslint": "^8.58.0"

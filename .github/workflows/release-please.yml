@@ -1,0 +1,47 @@
+name: Release Please
+
+# Maintains the release PR (version bump + changelog from Conventional Commits). Merging that PR
+# makes release-please tag the commit and create a DRAFT release; the APK build is then called
+# DIRECTLY (not via `release: published`, which GITHUB_TOKEN-created releases never trigger),
+# attaches the APK to the draft and publishes it.
+#
+# Repo setup needed once: Settings > Actions > General > "Allow GitHub Actions to create and
+# approve pull requests". Optional: a RELEASE_PLEASE_TOKEN PAT secret makes the release PR
+# trigger CI (PRs opened with GITHUB_TOKEN do not).
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build-apk:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-apk.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+      publish: true
+    secrets: inherit
