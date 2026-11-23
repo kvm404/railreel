@@ -140,31 +140,28 @@ class RailReelHostModule : Module() {
       }
     }
 
-    // Probe the media the host picked: duration (start-gate math) and whether the MP4 is
-    // "faststart" (moov before mdat) — a player can only open a PARTIALLY-downloaded file if the
-    // moov atom is at the front, so non-faststart files must fully pre-cache before the show.
-    // Works for both file:// paths and content:// (SAF) documents.
+    // Probe the media the host picked BEFORE any server starts. Two jobs:
+    //  1. Start-gate inputs: duration, frame size, and whether the MP4 is "faststart" (moov before
+    //     mdat) — a player can only open a PARTIALLY-downloaded file if the moov atom is at the
+    //     front, so non-faststart files must fully pre-cache before the show.
+    //  2. Compatibility inputs (PRD §7: H.264 + AAC in MP4 only): the container hint and the real
+    //     track mimes, read by MediaExtractor — the retriever alone happily reports a duration for
+    //     HEVC/AV1/MKV files that guests would download in full and then fail to play.
+    // Works for both file:// paths and content:// (SAF) documents. Throws only when the container
+    // can't be parsed at all (JS treats that as "unreadable"); a missing duration/size degrades to
+    // 0 so an otherwise-valid MP4 still hosts, in pre-cache mode.
     AsyncFunction("probe") { fileUri: String ->
       val ctx = appContext.reactContext ?: throw CodedException("No app context")
-      val retriever = android.media.MediaMetadataRetriever()
       try {
-        if (fileUri.startsWith("content://")) {
-          retriever.setDataSource(ctx, Uri.parse(fileUri))
-        } else {
-          retriever.setDataSource(fileUri.removePrefix("file://"))
-        }
-        val durationMs = retriever
-          .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
-          ?.toLongOrNull()
-          ?: throw CodedException("Media has no readable duration")
-        // Resolution feeds the (future) client decode-capability check — a 4K file plays as a
-        // slideshow on phones whose hardware decoder tops out at 1080p.
-        val width = retriever
-          .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-          ?.toIntOrNull() ?: 0
-        val height = retriever
-          .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-          ?.toIntOrNull() ?: 0
+        val tracks = readTracks(ctx, fileUri)
+        val container = sniffContainer(ctx, fileUri)
+        val (retrieverDurationMs, retrieverWidth, retrieverHeight) = readRetrieverMeta(ctx, fileUri)
+        // Resolution feeds the client decode-capability check — a 4K file plays as a slideshow on
+        // phones whose hardware decoder tops out at 1080p. Fall back to the track format when the
+        // retriever has nothing (it is the less forgiving of the two on odd containers).
+        val durationMs = if (retrieverDurationMs > 0) retrieverDurationMs else tracks.durationMs
+        val width = if (retrieverWidth > 0) retrieverWidth else tracks.width
+        val height = if (retrieverHeight > 0) retrieverHeight else tracks.height
         val fastStart = runCatching {
           openMediaStream(ctx.contentResolver, fileUri).use { isFastStart(it) }
         }.getOrNull()
@@ -175,13 +172,16 @@ class RailReelHostModule : Module() {
           "fastStart" to (fastStart ?: false),
           "width" to width,
           "height" to height,
+          "videoMime" to tracks.videoMime,
+          "audioMime" to tracks.audioMime,
+          "trackCount" to tracks.trackCount,
+          "audioTrackCount" to tracks.audioTrackCount,
+          "container" to container,
         )
       } catch (e: CodedException) {
         throw e
       } catch (e: Exception) {
         throw CodedException("Cannot probe media: ${e.message}")
-      } finally {
-        runCatching { retriever.release() }
       }
     }
 
@@ -405,6 +405,111 @@ class RailReelHostModule : Module() {
       walked += size
     }
     return null
+  }
+
+  /** What MediaExtractor found inside the file: first video/audio mime ("" if none) + counts. */
+  private class TrackSummary(
+    val videoMime: String,
+    val audioMime: String,
+    val trackCount: Int,
+    val audioTrackCount: Int,
+    val width: Int,
+    val height: Int,
+    val durationMs: Long,
+  )
+
+  /**
+   * Enumerate the container's tracks. MediaExtractor only PARSES (it never instantiates a
+   * decoder), so HEVC/AV1 report their real mime even on phones that can't decode them. Throws if
+   * the file can't be parsed; the extractor is always released.
+   */
+  private fun readTracks(ctx: android.content.Context, fileUri: String): TrackSummary {
+    val extractor = android.media.MediaExtractor()
+    try {
+      if (fileUri.startsWith("content://")) {
+        extractor.setDataSource(ctx, Uri.parse(fileUri), null)
+      } else {
+        extractor.setDataSource(fileUri.removePrefix("file://"))
+      }
+      var videoMime = ""
+      var audioMime = ""
+      var audioTracks = 0
+      var width = 0
+      var height = 0
+      var durationUs = 0L
+      for (i in 0 until extractor.trackCount) {
+        val format = extractor.getTrackFormat(i)
+        val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: continue
+        if (mime.startsWith("video/")) {
+          if (videoMime.isEmpty()) {
+            videoMime = mime
+            if (format.containsKey(android.media.MediaFormat.KEY_WIDTH)) {
+              width = format.getInteger(android.media.MediaFormat.KEY_WIDTH)
+            }
+            if (format.containsKey(android.media.MediaFormat.KEY_HEIGHT)) {
+              height = format.getInteger(android.media.MediaFormat.KEY_HEIGHT)
+            }
+          }
+        } else if (mime.startsWith("audio/")) {
+          audioTracks++
+          if (audioMime.isEmpty()) audioMime = mime
+        }
+        if (format.containsKey(android.media.MediaFormat.KEY_DURATION)) {
+          val d = runCatching { format.getLong(android.media.MediaFormat.KEY_DURATION) }.getOrDefault(0L)
+          if (d > durationUs) durationUs = d
+        }
+      }
+      return TrackSummary(videoMime, audioMime, extractor.trackCount, audioTracks, width, height, durationUs / 1000)
+    } finally {
+      runCatching { extractor.release() }
+    }
+  }
+
+  /** Duration (ms) + frame size from MediaMetadataRetriever; zeros for anything it can't read. */
+  private fun readRetrieverMeta(ctx: android.content.Context, fileUri: String): Triple<Long, Int, Int> {
+    val retriever = android.media.MediaMetadataRetriever()
+    try {
+      if (fileUri.startsWith("content://")) {
+        retriever.setDataSource(ctx, Uri.parse(fileUri))
+      } else {
+        retriever.setDataSource(fileUri.removePrefix("file://"))
+      }
+      val durationMs = retriever
+        .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+        ?.toLongOrNull() ?: 0L
+      val width = retriever
+        .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+        ?.toIntOrNull() ?: 0
+      val height = retriever
+        .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+        ?.toIntOrNull() ?: 0
+      return Triple(durationMs, width, height)
+    } catch (e: Exception) {
+      return Triple(0L, 0, 0)
+    } finally {
+      runCatching { retriever.release() }
+    }
+  }
+
+  /**
+   * Cheap container hint from the first 12 bytes: "mp4" (ISO `ftyp`), "quicktime" (`qt  ` brand,
+   * or a legacy file opening straight on a QuickTime atom), "matroska" (EBML magic — MKV and
+   * WebM), else "unknown".
+   */
+  private fun sniffContainer(ctx: android.content.Context, fileUri: String): String {
+    val head = ByteArray(12)
+    val read = runCatching {
+      openMediaStream(ctx.contentResolver, fileUri).use { readFully(it, head, 12) }
+    }.getOrDefault(false)
+    if (!read) return "unknown"
+    if (head[0] == 0x1A.toByte() && head[1] == 0x45.toByte() && head[2] == 0xDF.toByte() && head[3] == 0xA3.toByte()) {
+      return "matroska"
+    }
+    return when (String(head, 4, 4, Charsets.US_ASCII)) {
+      "ftyp" -> if (String(head, 8, 4, Charsets.US_ASCII) == "qt  ") "quicktime" else "mp4"
+      "moov", "mdat", "free", "wide", "skip", "pnot" -> "quicktime"
+      else -> "unknown"
+    }
   }
 
   private fun be32(b: ByteArray, off: Int): Long =
