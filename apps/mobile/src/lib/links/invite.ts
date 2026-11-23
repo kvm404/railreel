@@ -5,7 +5,7 @@
  * malformed or hostile link is dropped here, never half-handled later. Pure + unit-tested.
  */
 
-import { decodeJoinUrl, JOIN_URL_HOST, JOIN_URL_SCHEME, type JoinPayload } from '../protocol'
+import { decodeJoinUrl, isVersionMismatch, JOIN_URL_HOST, JOIN_URL_SCHEME, type JoinPayload } from '../protocol'
 
 export type Invite = {
   /** The validated link, trimmed — hand this to `connect()`. */
@@ -33,5 +33,17 @@ export function parseInvite(raw: string | null | undefined): Invite | null {
     return { url: candidate, host: payload.host, payload }
   } catch {
     return null
+  }
+}
+
+/** `raw` holds a real RailReel invite, just from another protocol version ("update both phones"). */
+export function isOtherVersionInvite(raw: string | null | undefined): boolean {
+  const candidate = findInviteUrl(raw)
+  if (!candidate) return false
+  try {
+    decodeJoinUrl(candidate)
+    return false
+  } catch (e) {
+    return isVersionMismatch(e)
   }
 }

@@ -101,4 +101,13 @@ export interface ParticipantInfo {
   decodeOk?: boolean
 }
 
-export const PROTOCOL_VERSION = 1
+/**
+ * Wire protocol version, carried in every join link / QR / mDNS advert and checked on decode.
+ * Bump it for any change an older peer would misread — the mismatched side then refuses the
+ * join up front with a clear "update both phones" message instead of half-working.
+ *  - 1: v0.1.0.
+ *  - 2: subtitles distributed by revision — the roster carries only {name, sizeBytes, rev}, and
+ *    the body is pushed once / pulled via `subtitleRequest`. A v1 guest would never pull it;
+ *    a v2 guest would read a v1 roster (no `rev`) as "no subtitle".
+ */
+export const PROTOCOL_VERSION = 2

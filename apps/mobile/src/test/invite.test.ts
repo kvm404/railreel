@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { encodeJoinUrl, PROTOCOL_VERSION } from '@/lib/protocol'
-import { findInviteUrl, parseInvite } from '@/lib/links/invite'
+import { findInviteUrl, isOtherVersionInvite, parseInvite } from '@/lib/links/invite'
 import { isValidGuestName, MAX_GUEST_NAME_LENGTH, normalizeGuestName } from '@/lib/social/name'
 import { MAX_SRT_CHARS, validateSrtFile } from '@/lib/subtitles/validate'
 import { DISCOVERY_EMPTY_AFTER_MS, discoveryState } from '@/lib/net/discovery'
@@ -26,6 +26,15 @@ describe('invite links', () => {
     expect(parseInvite('railreel://join?v=1')).toBeNull()
     expect(parseInvite(link.replace(`v=${PROTOCOL_VERSION}`, 'v=999'))).toBeNull()
     expect(parseInvite('railreel://other?x=1')).toBeNull()
+  })
+
+  it('tells an other-version invite apart from a broken one', () => {
+    const v1 = link.replace(`v=${PROTOCOL_VERSION}`, 'v=1')
+    expect(isOtherVersionInvite(v1)).toBe(true)
+    expect(isOtherVersionInvite(`join me: ${v1}`)).toBe(true)
+    expect(isOtherVersionInvite(link)).toBe(false) // valid
+    expect(isOtherVersionInvite('railreel://join?v=2')).toBe(false) // same version, just broken
+    expect(isOtherVersionInvite('hello')).toBe(false)
   })
 })
 

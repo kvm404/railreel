@@ -14,6 +14,21 @@ export const JOIN_URL_HOST = 'join'
 
 export class JoinPayloadError extends Error {}
 
+/** The link is fine but from an app speaking another protocol version — "update both phones". */
+export class VersionMismatchError extends JoinPayloadError {
+  constructor(readonly peerVersion: number) {
+    super(`unsupported protocol version ${peerVersion} (this app speaks ${PROTOCOL_VERSION})`)
+  }
+}
+
+export function isVersionMismatch(e: unknown): e is VersionMismatchError {
+  return e instanceof VersionMismatchError
+}
+
+/** What the guest sees when the cabin runs another RailReel version. */
+export const VERSION_MISMATCH_MESSAGE =
+  'This cabin runs a different version of RailReel. Update both phones to the same version, then join again.'
+
 /** Build a `railreel://join?...` link from a payload. */
 export function encodeJoinUrl(p: JoinPayload): string {
   const q = new URLSearchParams({
@@ -60,7 +75,7 @@ export function decodeJoinUrl(url: string): JoinPayload {
   const q = parsed.searchParams
   const v = Number(requireStr(q, 'v'))
   if (v !== PROTOCOL_VERSION) {
-    throw new JoinPayloadError(`unsupported protocol version ${v}`)
+    throw new VersionMismatchError(v)
   }
 
   return {

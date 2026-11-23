@@ -7,6 +7,8 @@ import {
   parseServerMsg,
   encodeMsg,
   PROTOCOL_VERSION,
+  VersionMismatchError,
+  isVersionMismatch,
   isMediaInfo,
   subtitleMeta,
   type JoinPayload,
@@ -34,8 +36,16 @@ describe('join payload codec', () => {
   })
 
   it('rejects a mismatched protocol version', () => {
-    const url = encodeJoinUrl(payload).replace('v=1', 'v=999')
+    const url = encodeJoinUrl(payload).replace(`v=${PROTOCOL_VERSION}`, 'v=999')
     expect(() => decodeJoinUrl(url)).toThrow(/unsupported protocol/)
+  })
+
+  it('refuses a v0.1.0 (protocol 1) link explicitly — subtitles would silently break', () => {
+    expect(PROTOCOL_VERSION).toBe(2)
+    const url = encodeJoinUrl(payload).replace(`v=${PROTOCOL_VERSION}`, 'v=1')
+    expect(() => decodeJoinUrl(url)).toThrow(VersionMismatchError)
+    expect(isVersionMismatch(new VersionMismatchError(1))).toBe(true)
+    expect(isVersionMismatch(new Error('x'))).toBe(false)
   })
 
   it('rejects an out-of-range port', () => {
