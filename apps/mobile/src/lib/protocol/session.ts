@@ -40,11 +40,16 @@ export interface MediaInfo {
   /** Android mime of the first video / audio track (e.g. "video/avc"). Guests check THEIR decoder against the real codec; absent from older hosts → assume H.264. */
   videoMime?: string
   audioMime?: string
-  /** Sidecar subtitle metadata attached by the host. */
+  /**
+   * Sidecar subtitle METADATA attached by the host — never the body (the roster is re-broadcast
+   * constantly; the SRT goes once per revision in a `subtitle` message). See ./subtitle.ts.
+   */
   subtitle?: {
     name: string
+    /** Real UTF-8 bytes of the SRT body. */
     sizeBytes: number
-    content?: string
+    /** Content revision (subtitleRev) — a guest reloads when this changes, not when the name does. */
+    rev: string
   }
 }
 
