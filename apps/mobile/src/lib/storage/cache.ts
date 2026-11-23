@@ -47,6 +47,17 @@ export interface ClearCacheOptions {
   hooks?: DeletionLifecycleHooks
 }
 
+export interface ClearCacheResult {
+  /** Targeted files that no longer exist after the attempt. */
+  cleared: string[]
+  /** Targeted files that could not be removed (a locked/in-use file, a permissions error…). */
+  failed: { path: string; error: string }[]
+  /** Bytes still on disk for the targeted files — what the person did NOT get back. */
+  remainingBytes: number
+  /** Everything targeted is gone. */
+  ok: boolean
+}
+
 export interface OrphanSweepResult {
   sweptFiles: string[]
   reclaimedBytes: number
@@ -109,10 +120,10 @@ export function formatBytes(bytes: number): string {
  * 2. Cancel any running download jobs (halt active disk writes)
  * 3. Unlink files with idempotent error-handling
  */
-export async function executePureDeletionSequencing(
+export async function executePureDeletionSequencing<T = void>(
   hooks: DeletionLifecycleHooks | undefined,
-  unlinkFn: () => Promise<void> | void,
-): Promise<void> {
+  unlinkFn: () => Promise<T> | T,
+): Promise<T | undefined> {
   hooks?.onStep?.('detach-media')
   if (hooks?.detachMedia) {
     try {
@@ -133,9 +144,11 @@ export async function executePureDeletionSequencing(
 
   hooks?.onStep?.('unlink-files')
   try {
-    await unlinkFn()
+    return await unlinkFn()
   } catch {
-    // Idempotent: ignore unlink errors
+    // The caller's unlink step reports its own per-file failures; a throw here is unexpected,
+    // and surfacing it as `undefined` lets the caller treat the deletion as unverified.
+    return undefined
   }
 }
 
@@ -205,31 +218,69 @@ export async function getCacheStatus(
 /**
  * Clears session cache files with optional selective filtering (movie vs subtitles)
  * and pure deletion lifecycle sequencing.
+ *
+ * Never throws, but REPORTS what happened: each target is re-inspected after the delete, so a
+ * file that is still on disk (locked by the player, permission error) shows up in `failed` and
+ * `remainingBytes` instead of being silently left behind. "Already gone" is success (idempotent).
  */
-export async function clearSessionCache(options?: ClearCacheOptions): Promise<void> {
+export async function clearSessionCache(options?: ClearCacheOptions): Promise<ClearCacheResult> {
   const dir = options?.cacheDir ?? defaultCacheDir
   const adapter = options?.fs ?? defaultFsAdapter
-  if (!adapter) return
+  const empty: ClearCacheResult = { cleared: [], failed: [], remainingBytes: 0, ok: true }
+  if (!adapter) return empty
 
   const deleteMovie = options?.movie !== false
   const deleteSubtitles = options?.subtitles !== false
+  const targets: string[] = []
+  if (deleteMovie) targets.push(getMovieCachePath(dir))
+  if (deleteSubtitles) targets.push(getSubtitleCachePath(dir))
 
-  const unlinkAction = async () => {
-    if (deleteMovie) {
-      const moviePath = getMovieCachePath(dir)
-      await adapter.deleteAsync(moviePath, { idempotent: true }).catch(() => {})
+  const unlinkAction = async (): Promise<ClearCacheResult> => {
+    const result: ClearCacheResult = { cleared: [], failed: [], remainingBytes: 0, ok: true }
+    for (const path of targets) {
+      let deleteError: string | null = null
+      try {
+        await adapter.deleteAsync(path, { idempotent: true })
+      } catch (e) {
+        deleteError = e instanceof Error ? e.message : String(e)
+      }
+      let stillThere = false
+      let size = 0
+      try {
+        const info = await adapter.getInfoAsync(path)
+        stillThere = info.exists
+        size = info.exists && typeof info.size === 'number' && Number.isFinite(info.size) ? info.size : 0
+      } catch {
+        // Can't verify: trust the delete call's own outcome.
+        stillThere = deleteError !== null
+      }
+      if (stillThere) {
+        result.failed.push({ path, error: deleteError ?? 'file is still present after delete' })
+        result.remainingBytes += size
+      } else {
+        result.cleared.push(path)
+      }
     }
-    if (deleteSubtitles) {
-      const subPath = getSubtitleCachePath(dir)
-      await adapter.deleteAsync(subPath, { idempotent: true }).catch(() => {})
-    }
+    result.ok = result.failed.length === 0
+    return result
   }
 
-  if (options?.hooks) {
-    await executePureDeletionSequencing(options.hooks, unlinkAction)
-  } else {
-    await unlinkAction()
-  }
+  const outcome = options?.hooks
+    ? await executePureDeletionSequencing(options.hooks, unlinkAction)
+    : await unlinkAction()
+  // The sequencing wrapper returns undefined only if the unlink step itself blew up — unverified.
+  return outcome ?? { cleared: [], failed: targets.map((path) => ({ path, error: 'deletion did not complete' })), remainingBytes: 0, ok: false }
+}
+
+/**
+ * A person-facing explanation for a cleanup that did not free everything, or null when it did.
+ * `remainingBytes` is what is still on disk after the attempt (verify with getCacheStatus).
+ */
+export function describeCleanupFailure(remainingBytes: number, failed = remainingBytes > 0): string | null {
+  if (!failed && !(remainingBytes > 0)) return null
+  return remainingBytes > 0
+    ? `Couldn't free ${formatBytes(remainingBytes)} — the file may still be in use. Try again, or keep it and leave.`
+    : "Couldn't delete the downloaded files. Try again, or keep them and leave."
 }
 
 /**
