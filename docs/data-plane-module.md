@@ -26,8 +26,8 @@ The module lives at `apps/mobile/modules/railreel-host` (local Expo module, Kotl
 | --- | --- | --- |
 | Data plane | `RailReelHostModule.kt` (NanoHTTPD 2.3.1) | Serves the movie with `Range` (206/416, `HEAD`, `Accept-Ranges`), from a `content://` or file source. Requires the session token **and** an approved per-guest grant. Also probes media (container, codecs, fast-start layout) and fingerprints the file. |
 | Control plane | `CtrlServer.kt` (NanoWSD) | WebSocket on its own port. Answers the NTP-style `syncPing` natively with a monotonic clock, binds every connection to an opaque `connId`, bounds and rate-limits frames, queues outbound writes per socket, and only broadcasts to connections JS marked approved. |
-| Discovery | `NsdHelper.kt` | Android `NsdManager`: advertises `_railreel._tcp` with a TXT record (`v`, `t` token, `s`, `h`, `c`, `n`) and browses for it, with a single-flight resolve queue. |
-| Keep-alive | `RailReelHostService.kt` | `dataSync` foreground service, WiFi + wake locks, ongoing notification, 6 h safety cap. |
+| Discovery | `NsdHelper.kt` | Android `NsdManager`: advertises `_railreel._tcp` with a TXT record (`v` protocol version, `t` token, `s` session id, `h` HTTP port, `c` human code, `n` title). The WebSocket port is the service's SRV port, not a TXT field and browses for it, with a single-flight resolve queue. |
+| Keep-alive | `RailReelHostService.kt` | `dataSync` foreground service, WiFi + wake locks, ongoing notification. The wake lock is bounded at 6 h, and Android 15's `dataSync` foreground-service timeout stops the service when it fires. |
 | Guest proxy | `ProxyServer.kt` | Localhost-only server on each guest that serves the still-growing download to the player (see `architecture.md` §7). |
 
 The TS wrapper is `modules/railreel-host/src/RailReelHostModule.ts`. The HTTP and WS servers use
@@ -45,8 +45,10 @@ separate ports; both are returned by the module and encoded in the QR/link/TXT r
 - **Engine:** NanoHTTPD (not Ktor), plus NanoWSD for the WebSocket server. It was kept behind
   the module surface so it could be swapped, but there has been no need.
 - **Ports:** HTTP and WS are separate (the "one port" idea was dropped; NanoWSD is a distinct server).
-- **Integrity:** a content fingerprint (`media.hash`) computed natively in 1 MiB chunks, plus
-  size, validated by the guest before a download counts as complete.
+- **Integrity:** a content fingerprint (`media.hash`) computed natively from the first and last 1 MiB
+  plus the file size (not a hash of the whole movie). Guests verify size, and compare the
+  fingerprint when one is available and the download is complete (it is skipped during
+  progressive playback or when the host supplies none).
 - **Security:** token + approved grant on the data plane; connection-bound identity and
   approved-only broadcasts on the control plane (`architecture.md` §10).
 - **Cleartext** LAN traffic is enabled by the `plugins/withCleartextTraffic` config plugin.

@@ -45,8 +45,8 @@ with connection-bound identity, bounded frames and per-socket outbound queues
 **Shipped:** the NTP-style `syncPing`/`syncPong` is answered natively in `CtrlServer` with
 `SystemClock.elapsedRealtimeNanos`, so the host-side timestamps never cross the bridge. The pure
 math is in `src/lib/sync/clock.ts` and drift correction in `src/lib/sync/playback.ts`. Guest-side
-timestamps are still taken in JS. There is no separate "arm a native callback" timing module; scheduled
-resume uses a future host-monotonic time that each guest converts locally.
+timestamps are still taken in JS. There is no separate "arm a native callback" timing module, and no scheduled resume: the host
+plays and broadcasts `state` immediately and each guest drift-corrects toward it.
 
 ## 5. Video player
 

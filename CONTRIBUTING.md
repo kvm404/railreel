@@ -10,7 +10,7 @@ out of scope.
 You need:
 
 - [bun](https://bun.sh) **1.3.5** (package manager and workspace runner; no npm/yarn/pnpm)
-- Node.js **20**, JDK **17**, the Android SDK (`ANDROID_HOME` set)
+- Node.js **20.19.4 or newer** in the 20 line, JDK **17**, the Android SDK (`ANDROID_HOME` set)
 - A **physical Android device** (USB debugging). Hotspots and mDNS don't work on emulators.
 
 RailReel uses native modules, so it runs in a custom **Expo dev client**. Expo Go won't work.
@@ -60,7 +60,7 @@ Unit tests can't cover hotspots, decoders or the Android lifecycle. For anything
 networking, sync, playback or the host module, test on **two physical phones** (one host, one guest):
 
 1. Install the same build on both. Host: enable the hotspot. Guest: join its Wi-Fi.
-2. Host picks an H.264 + AAC MP4 (also try an HEVC or MKV file: it must be rejected with a hint).
+2. Host picks an H.264 + AAC MP4 (a silent H.264 file is also accepted) (also try an HEVC or MKV file: it must be rejected with a hint).
 3. Guest joins by mDNS tap, QR scan and the invite link. Confirm the host sees a **request** and the
    guest gets nothing until the host **approves** (deny once to check the dead-end screen).
 4. Lobby: download progress shows and reaches ready. Try a fast-start and a non-fast-start file.
@@ -71,7 +71,7 @@ networking, sync, playback or the host module, test on **two physical phones** (
 8. Resilience: turn the hotspot off for ~10 s mid-download, then on (the download resumes, not
    restarts); background and return to the app; leave with **Keep & Leave** and rejoin the same movie
    (no re-download).
-9. Version gate: a phone on a different build refuses to join with the "update both phones" message.
+9. Version gate: a phone speaking a different protocol version (`PROTOCOL_VERSION`) refuses to join with the "update both phones" message.
 10. Add a third phone and check that late-join and the buffer-floor "waiting for a friend" pause work.
 
 Note the phone models and Android versions you tested in the PR.

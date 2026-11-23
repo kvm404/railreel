@@ -58,7 +58,7 @@ All native pieces live in one local Expo module, `apps/mobile/modules/railreel-h
 - **Client playback proxy (`ProxyServer`):** a localhost-only (`127.0.0.1`) HTTP server on each
   guest that serves the *still-downloading* file to the player. See §7.
 - **Host liveness:** `RailReelHostService` is a `dataSync` foreground service with WiFi and
-  wake locks and an ongoing notification (capped at 6 h to respect Android 15's budget).
+  wake locks and an ongoing notification (the wake lock is bounded at 6 h; Android 15's `dataSync` foreground-service timeout stops the service when it fires).
 - **Version gate:** every join payload, mDNS record and invite carries `PROTOCOL_VERSION`
   (currently **2**). Mismatched phones refuse the join up front with an "update both phones to
   the same version" message instead of half-working.
@@ -104,19 +104,19 @@ choose full pre-cache.
 **Group buffer floor with hysteresis** (during playback)
 - Guests send `heartbeat`s (progress, `bufferedAheadSec`, `downloadMbps`, `stalled`) over the WS.
 - If any in-show guest falls under the floor (≈15 s) or reports a sustained player stall, the host
-  broadcasts `pause(reason: waiting, who)`.
+  broadcasts `state` with `isPlaying: false` (the UI shows who the room is waiting on).
 - It resumes only when the laggard recovers to the release mark (≈30 s, strictly above the floor)
   — the gap prevents pause/resume flapping. The gate only auto-resumes a pause *it* caused, never
   a manual host pause.
 - A guest that joins late is admitted to a running show only when it has a playable source and
   enough buffer (`canJoinShow`): a progressive source needs a fast-start file, otherwise the
-  guest waits for 100%. A **host choice to "continue without" a persistently slow guest is not
-  implemented in v1** — the room waits for the laggard; the host can end the session.
+  guest waits for 100%. While the room is held, the host can tap **"Play without {name}"**
+  (`playWithout()` in the Player) to override the hold until that guest recovers.
 
 The decisions are pure functions in `lib/sync/startGate.ts` (start gate: 60 s lead + 60 s finish
 margin; buffer floor: pause below 15 s, release at 30 s; catch-up lead 30 s) so the constants are
 tunable from real-device fixtures. Coverage is judged pessimistically for VBR files, and byte
-progress is capped below 100% until the download's size and fingerprint are validated.
+progress is capped below 100% until the download's size (and, when available, fingerprint) are validated.
 
 ## 5. Sync protocol (clock alignment)
 
@@ -138,7 +138,7 @@ jitter is part of the error budget. (The spike measured RTT ~44 ms over a hotspo
 PlaybackState { positionSec, rate, isPlaying, hostMonotonicMs, ended? }
 ```
 A guest computes the target position as
-`target = positionSec + (isPlaying ? (hostNow − hostMonotonicMs) × rate : 0)` (host time derived
+`target = positionSec + (isPlaying ? (hostNowMs − hostMonotonicMs) / 1000 × rate : 0)` (host time derived
 via the offset) and corrects local drift (`lib/sync/playback.ts`):
 
 | Drift | Action |
@@ -148,9 +148,11 @@ via the offset) and corrects local drift (`lib/sync/playback.ts`):
 | 0.5 s – 1.2 s | assertive catch-up rate, at most **±15%** |
 | beyond 1.2 s | hard seek, leading by the device's measured seek latency so it lands on target |
 
-**Actuation.** Resume is *scheduled* for a future host time (`resume { atHostMonotonicMs }`) so
-all guests arm locally instead of racing the network, and guests ACK (`ready`) after seeks.
-Guests only hold the room (`stalled`) after their player has been continuously not-ready for a
+**Actuation.** The host plays, pauses and seeks immediately and broadcasts the new `state`; each
+guest drift-corrects toward it. There is **no scheduled (future-timestamp) resume and no
+seek-complete ACK** today: the `resume { atHostMonotonicMs }` message exists in the protocol but
+is unused, and `ready` is sent when a guest's download completes, not after seeks. Scheduled
+resume with ready-ACKs is future work and would tighten the start. Guests only hold the room (`stalled`) after their player has been continuously not-ready for a
 grace period (~1.2 s), so brief decoder blips and drift-seeks don't freeze everyone.
 
 **What this achieves.** *Perceived* sync, not frame accuracy. On test devices we measured roughly
@@ -161,15 +163,15 @@ matters more than lip-sync perfection across phones.
 ## 6. Control & messaging (WebSocket)
 
 Control, chat, reactions and sync share one WS. TS types live in `lib/protocol/messages.ts`
-(`PROTOCOL_VERSION = 2`); every inbound frame is validated by `parseClientMsg` / `parseServerMsg`.
+(`PROTOCOL_VERSION = 2`); `parseClientMsg` / `parseServerMsg` check the JSON structure and message discriminants, and handlers validate the payload fields they use. `syncPing` is answered natively and `syncPong` is handled directly in `syncClient.ts`, outside those parsers.
 
 ```ts
 // host → guests
 type ServerMsg =
   | { t: 'welcome'; sessionId; media; you }
   | { t: 'state'; state: PlaybackState }
-  | { t: 'pause'; reason: 'host' | 'waiting'; who? }
-  | { t: 'resume'; atHostMonotonicMs }
+  | { t: 'pause'; reason: 'host' | 'waiting'; who? }   // defined, currently unused
+  | { t: 'resume'; atHostMonotonicMs }           // defined, currently unused
   | { t: 'roster'; participants; media? }          // media.subtitle = { name, sizeBytes, rev }
   | { t: 'requestDecision'; id; approved }          // join approval / denial
   | { t: 'chat' | 'reaction'; from; fromId?; …; at }
@@ -195,7 +197,7 @@ type ClientMsg =
 - **Hub topology:** the host relays chat and reactions to everyone (including the sender, so the
   host's echo is the single ordering). It stamps the sender's *name* and its own clock; there is
   no guest-to-guest mesh.
-- **Subtitles:** the host attaches a validated `.srt` (≤ 2 M chars) and broadcasts the body once.
+- **Subtitles:** the host attaches a validated `.srt` and broadcasts the body once. The limit is 2,000,000 UTF-8 bytes for the body and 120 characters for the name, enforced on both host and guest.
   The roster carries only `{ name, sizeBytes, rev }`; a guest whose revision differs (just
   approved, reconnected, or the file was replaced) pulls it with `subtitleRequest`, and
   recomputes the revision from what it received.
@@ -205,21 +207,25 @@ type ClientMsg =
 ## 7. Media pipeline
 
 - **Validate before hosting.** The native probe reports the *real* container and track mimes.
-  `lib/media/compat.ts` accepts only **H.264 (`video/avc`) + AAC (`audio/mp4a-latm`) in an MP4 or
-  MOV (QuickTime) container**, and rejects everything else *before the servers start*, with the
+  `lib/media/compat.ts` accepts only **H.264 (`video/avc`) video, with AAC (`audio/mp4a-latm`)
+  audio or no audio at all, in an MP4 or MOV (QuickTime) container**. It inspects the first video
+  and first audio track, and rejects everything else *before the servers start*, with the
   exact sentence the host sees (what was found, plus a HandBrake "Fast 1080p30" hint). Remux and
   transcoding are out of scope: they break on real files (MKV with AC-3/DTS, multi-audio,
   Annex B, VFR, edit lists, 2× temporary storage). Guests additionally check *their* decoder
   against the real codec and frame size and warn when it can't keep up.
-- **Preflight** (`lib/media/preflight.ts`): free space (movie + 200 MB), host battery (< 30% while
-  discharging warns), decoder capability.
-- **Integrity.** The host serves size and a content fingerprint (`media.hash`); guests validate
-  status, size and fingerprint before a download counts as complete.
+- **Preflight** (`lib/media/preflight.ts`): guests check free space (movie + 200 MB) before
+  downloading, the host sees a battery warning (< 30% while discharging) *while hosting*, and
+  guests warn when their decoder can't handle the frame size. None of these block server startup.
+- **Integrity.** The host serves the size and a content fingerprint (`media.hash`: the first and
+  last 1 MiB plus the size, not a full-file hash). Guests validate status and size, and compare
+  the fingerprint when one is available and the download is complete (skipped during progressive
+  playback or when the host supplies none).
 - **Distribution.** Guests download with Range requests straight to disk, in the app's cache
   storage. Transfers **resume**: a hotspot drop continues with `Range: bytes=N-` into the same
   file (only a 206 with the exact final size is accepted), a per-transfer watchdog aborts a
-  transfer silent for 8 s, and retries back off (6 attempts, 1–15 s) with the budget earned back
-  only by real progress.
+  transfer silent for 8 s, and retries back off (1–15 s) for up to **six automatic retries per failure streak**, after the initial
+  attempt. The budget resets on success, a manual retry, or once at least 4 MiB has been retained.
 - **Progressive playback never points the player at a partially-written file.** `ProxyServer`
   binds `127.0.0.1` on the guest and serves the file *while it grows*, declaring the **final size**
   up front. A read that catches the download edge simply blocks until more bytes land, which
@@ -263,8 +269,8 @@ The host phone *is* the infrastructure. v1 does **not** try to survive the host
 backgrounding / locking / getting a call / OS-killing the app / hotspot toggling off /
 battery or thermal shutdown. Instead:
 
-- **Preflight:** check battery %, thermal state, and free storage before allowing hosting;
-  warn/refuse if marginal.
+- **Warnings:** the host sees a battery warning while hosting, and guests check free storage
+  before downloading; nothing blocks startup, so the UX is honest rather than gated.
 - **Keep-awake** on while hosting; encourage the host to stay plugged in.
 - **Honest UX:** "Your session ends if you leave the app or turn off the hotspot." No
   background-hosting reliability promise.
@@ -285,8 +291,8 @@ simple and is stated here as it is, not as a stronger promise.
 - **Bytes go only to approved grants.** The HTTP data plane requires the token **and** an approved
   grant (`HEAD` included, so an unapproved peer learns nothing, not even the size).
 - **Room traffic goes only to approved, connection-bound guests.** `broadcast` reaches only
-  connections JS marked approved. A pending requester receives only its own `requestDecision`
-  (targeted `sendTo`) and lifecycle notices (`ended`). It never sees roster, chat, reactions,
+  connections JS marked approved. A pending requester receives only direct replies (its own `requestDecision`, and `syncPong`
+  answers to its clock pings) and lifecycle notices (`ended`). It never sees roster, chat, reactions,
   subtitles or playback state.
 - **Identity is bound to the connection, not trusted from frames.** Native assigns every accepted
   socket an opaque `connId`, and JS binds a participant to the connection that proved it (a valid
@@ -294,7 +300,7 @@ simple and is stated here as it is, not as a stronger promise.
   claiming another `id` is dropped; a `join` for an existing id must present the same grant (no
   hijack); a close only affects the participant bound to that connection. Approval is handled
   with tickets that deny/leave/reset invalidate, so a stale async approval cannot re-approve.
-- **The host control plane is bounded.** Frames are capped (64 KiB per frame/message, 64 fragments)
+- **The host control plane is bounded.** Inbound guest-to-host frames are capped (64 KiB per frame/message, 64 fragments)
   and rate-limited *before* NanoWSD allocates the payload; outbound writes go through a bounded
   per-socket queue with its own writer thread and a watchdog, so a peer that stops reading only
   stalls itself. Admission is capped per remote IP (3) and overall (24), and when full the oldest
@@ -315,13 +321,12 @@ or against a host who approves the wrong person. Don't run it on a network you d
 - The host phone is the infrastructure (§9): screen-off hosting is not supported (with the screen
   off the SoftAP stops serving clients), so the host must stay on screen.
 - Guest-side timestamps are taken in JS; very slow phones show more drift (see §5).
-- There is no "continue without this guest" host action yet (§4).
+- There is no scheduled resume / seek-complete ACK yet (§5); sync relies on drift correction.
 - Long soak testing (full 2 h movie, lock/call/background, reconnect) is ongoing.
 
 ## Appendix: design history
 
 An early design review (2026-06) shaped several decisions that remain in force: the
-aggregate-throughput correction (§4), monotonic clocks and scheduled-resume/ready-ACK actuation
-(§5), a caching proxy instead of partial-file playback (§7), a native data plane (§2), and the
+aggregate-throughput correction (§4), monotonic clocks (§5), a caching proxy instead of partial-file playback (§7), a native data plane (§2), and the
 host-as-single-point-of-failure stance (§9). A later pre-release audit corrected the docs on the
 trust model (§10), media validation (§7) and sync claims (§5).

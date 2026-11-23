@@ -39,7 +39,7 @@ RailReel is free, open source, and Android-only (Android 10+).
 👉 **[Download the latest RailReel APK](https://github.com/kvm404/railreel/releases/latest)**  
 *(Pick the `RailReel-vX.Y.Z.apk` asset on the release page. Older versions and release notes are on the [Releases page](https://github.com/kvm404/railreel/releases).)*
 
-The APK is **universal**: it contains both `arm64-v8a` and `armeabi-v7a` native libraries, so modern 64-bit phones and older 32-bit ARM phones can both install it. Every phone in a session must run the **same RailReel version**; if versions differ, the join is refused with an "update both phones" message.
+The APK is **universal**: it contains both `arm64-v8a` and `armeabi-v7a` native libraries, so modern 64-bit phones and older 32-bit ARM phones can both install it. Phones must speak the same **protocol version** to join each other; if they don't, the join is refused with an "update both phones to the same version" message.
 
 ### Quick 3-Step Setup:
 1. **Download** the `.apk` file directly on your Android phone.
@@ -51,7 +51,7 @@ The APK is **universal**: it contains both `arm64-v8a` and `armeabi-v7a` native 
 ## 🚂 How a Movie Session Works
 
 ### 1. Pick & Host
-The host opens RailReel and chooses a local video file. RailReel checks it **before** anything is shared: it must be **H.264 video with AAC audio in an MP4 or MOV container**. Anything else (HEVC, AV1, MKV, AC-3/DTS audio, ...) is rejected up front with a message that tells you what was found and suggests converting it (for example with HandBrake's "Fast 1080p30" preset). The host can optionally attach a `.srt` subtitle file.
+The host opens RailReel and chooses a local video file. RailReel checks it **before** anything is shared: it must be **H.264 video in an MP4 or MOV container**, and its audio, if it has any, must be **AAC**. Anything else (HEVC, AV1, MKV, AC-3/DTS audio, ...) is rejected up front with a message that tells you what was found and suggests converting it (for example with HandBrake's "Fast 1080p30" preset). The host can optionally attach a `.srt` subtitle file.
 
 ### 2. Connect Your Friends
 The host turns on their phone's personal hotspot (Android does not let apps do this, so RailReel guides you). Friends connect their Wi-Fi to the hotspot, open RailReel, and join by tapping the room that shows up automatically, scanning the host's QR code, or opening/pasting the invite link.
@@ -80,7 +80,7 @@ When you leave, you choose: **delete** the downloaded movie and reclaim the stor
 - **Does it use any mobile data or internet?**  
   None. The hotspot is purely a local Wi-Fi link between devices. You can be in airplane mode in the middle of a desert and it will work.
 - **What video formats work?**  
-  DRM-free **H.264 video + AAC audio** in an **MP4 or MOV** container. Other codecs and containers are rejected before the session starts, with a hint on how to convert. A file with the metadata at the start (a "fast-start" MP4) lets guests begin watching before their download finishes; otherwise they wait for the full download.
+  DRM-free **H.264 video** with **AAC audio** (or no audio) in an **MP4 or MOV** container. The first video and first audio track are checked. Other codecs and containers are rejected before the session starts, with a hint on how to convert. A file with the metadata at the start (a "fast-start" MP4) lets guests begin watching before their download finishes; otherwise they wait for the full download.
 - **How tight is the sync?**  
   Every phone plays its own local copy and follows the host's clock, so it is *perceptually* in sync, not frame-locked. On our test devices we measured roughly **50-80 ms of steady-state drift**, which is not noticeable for watching together with your own headphones, but it is not frame-accurate and varies with the phone. See [how sync works](docs/architecture.md#5-sync-protocol-clock-alignment).
 - **What if a download is interrupted?**  
@@ -106,7 +106,7 @@ Read the technical deep dive in [`docs/architecture.md`](docs/architecture.md), 
 
 ### Prerequisites
 - [bun](https://bun.sh) **1.3.5** (the package manager and workspace runner; do not use npm/yarn/pnpm)
-- Node.js **20**
+- Node.js **20.19.4 or newer** (within Node 20, as React Native 0.85 requires)
 - JDK **17**
 - Android SDK (platform tools + build tools; `ANDROID_HOME` set)
 - A **physical Android device** with USB debugging. Emulators can't do hotspots or mDNS multicast, and a real test needs two phones.

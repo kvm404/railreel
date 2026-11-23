@@ -65,7 +65,7 @@ This still fixes the real-world risks, with honest framing:
 | --- | --- |
 | Hotspot bandwidth | Transfer is decoupled from frame timing; for high bitrate × big groups we pre-cache before play and surface an ETA rather than promising real-time. |
 | Host battery/heat | Host isn't transcoding or re-encoding; it serves bytes (native data plane) + sends clock pings. Host must stay foreground/awake/charged (see §8). |
-| Sync precision | Sync is clock alignment, not pixel delivery → tight *perceived* sync (target ~sub-100ms), actuated with scheduled start + ready-ACKs (see architecture §5). |
+| Sync precision | Sync is clock alignment, not pixel delivery → tight *perceived* sync (target ~sub-100ms), kept together by the host's authoritative state plus guest-side drift correction (see architecture §5). |
 
 See [`docs/architecture.md`](../architecture.md) for the full networking, sync, and buffering design.
 
@@ -84,9 +84,9 @@ See [`docs/architecture.md`](../architecture.md) for the full networking, sync, 
 - Local playback fed through a **localhost playback proxy** (`ProxyServer`) so the player never
   opens a partially-written file; `expo-video` is the player.
 - **Adaptive start gate** (aggregate-throughput aware) + **group buffer floor with hysteresis
-  & a host "continue without client" / evict option** (§7).
-- Clock sync from **monotonic** clocks (host side answered natively); resume actuated by
-  **scheduling a future host time + ready-ACKs**; tight *perceived* sync (measured ~50-80 ms
+  & a host "Play without {name}" override** (§7).
+- Clock sync from **monotonic** clocks (host side answered natively); the host plays and
+  broadcasts state immediately and each guest drift-corrects toward it; tight *perceived* sync (measured ~50-80 ms
   steady-state drift on test devices; not frame-accurate).
 - **Host-only controls**; participants send **playback requests** (pause, rewind 15 s) that the
   host allows with one tap (no delegation in v1). The host starts the show, then presses Play.
@@ -96,20 +96,20 @@ See [`docs/architecture.md`](../architecture.md) for the full networking, sync, 
   after reconnect; "Keep & Leave" keeps the movie and reuses it later via a content fingerprint.
 - **Protocol version gate**: phones on different versions refuse to join with a clear message.
 - **Floating emoji reactions** over the video + group chat.
-- Media: **H.264 (AVC) + AAC in MP4/MOV only**, validated against the real container and track
+- Media: **H.264 (AVC) video in MP4/MOV, with AAC audio or none**, validated against the real container and track
   codecs **before** any server starts. Container remux and any transcoding are **deferred** (too
   many edge cases for v1: MKV+AC3/DTS, multi-track, Annex B, VFR, edit lists, storage). Others
   are rejected with a clear message and a conversion hint. A fast-start layout enables
   progressive start; otherwise guests pre-cache fully.
 - **Preflight checks:** the start gate uses each guest's measured throughput to pick
-  progressive-start vs. full pre-cache; host battery and free-storage checks run before hosting.
+  progressive-start vs. full pre-cache; the host sees battery warnings while hosting, and each guest checks free space before downloading (neither blocks startup).
 - Reconnection: a dropped client rejoins and resyncs to the host's timestamp.
 - Android 10+; universal APK (arm64-v8a + armeabi-v7a).
 
 **Out of scope (later versions)**
 
 - Subtitle formats other than SRT; styling/positioning.
-- A host action to "continue without" a persistently slow guest (the room waits instead).
+- Scheduled (future-timestamp) resume and seek-complete ACKs; today the host plays immediately and guests drift-correct.
 - On-device transcoding / companion pre-trip converter.
 - Control delegation (host handing the remote to a friend).
 - More than ~6 participants.
@@ -127,9 +127,9 @@ Not a flat preload. Two mechanisms:
 2. **Group buffer floor (with hysteresis)** — each guest reports its "seconds buffered ahead"
    to the host in regular heartbeats. If any client drops below ~15s, the host **auto-pauses
    everyone** ("Waiting for {name}…"); it **auto-resumes** only after the laggard recovers to a
-   higher mark (~30s) and ACKs ready — hysteresis prevents pause/resume flapping. A persistently
-   slow client keeps the room waiting; guests that join late enter the running show only once
-   they have enough buffer. (A host "continue without them" choice is not in v1.)
+   higher mark (~30s) — hysteresis prevents pause/resume flapping. While the room is held, the host can tap **"Play without {name}"** to override the hold
+   until that guest recovers. Guests that join late enter the running show only once they have
+   enough buffer.
 
 ## 8. Constraints & non-functional requirements
 
@@ -139,7 +139,7 @@ Not a flat preload. Two mechanisms:
 - **Android focus.** Both host and client roles work on Android.
 - **Host is the session's lifeline (explicit v1 constraint).** While hosting, the host phone
   must stay **foreground, awake (keep-awake on), powered enough, and on the hotspot**. The app
-  does a battery/thermal/storage preflight and states clearly: *if the host leaves/locks/kills
+  shows battery warnings while hosting (and guests check free storage before downloading), and states clearly: *if the host leaves/locks/kills
   the app or the hotspot drops, the session ends.* No background-hosting reliability promise.
 - **Security.** Each session has a high-entropy token that is published on the hotspot (mDNS
   and QR) so tap-to-join works: anyone on the hotspot can *request* to join. The host approves
