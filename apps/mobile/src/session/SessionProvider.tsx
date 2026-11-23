@@ -26,7 +26,7 @@ import {
 } from '@/lib/storage'
 
 import RailReelHost from '../../modules/railreel-host'
-import { openSyncSession, type SyncSession } from '@/net/syncClient'
+import { openSyncSession, SyncCancelledError, type SyncSession } from '@/net/syncClient'
 import { reconnectDelayMs } from '@/lib/net/backoff'
 import {
   isTransferStalled,
@@ -382,6 +382,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const reconnectRef = useRef<() => void>(() => {})
   const approvedRef = useRef(false) // host has approved us — a reconnect must NOT re-join (that would reset us to 'requested')
   const epochRef = useRef(0) // bumps on every connect()/leave() so an in-flight reconnect loop can detect it's stale and bail
+  // Client control channel ownership: every openClient() takes a fresh generation and claims
+  // the channel (liveConnRef). A socket's callbacks act only while its epoch AND generation are
+  // still current, so a handshake abandoned by Back can never drive a newer session.
+  const connGenRef = useRef(0)
+  const liveConnRef = useRef(0)
+  const handshakeAbortRef = useRef<AbortController | null>(null) // the handshake in flight, if any
   // Epoch of the startHost() attempt still in flight (null when none). During startup the native
   // servers can be up while roleRef is still 'none', so leave() needs this to know to stop them.
   const hostStartRef = useRef<number | null>(null)
@@ -451,6 +457,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       disposedRef.current = true
       leavingRef.current = true // no reconnect loop may start (or continue) from a dead provider
       reconnectingRef.current = false
+      handshakeAbortRef.current?.abort()
+      handshakeAbortRef.current = null
       if (clientRef.current) {
         clientRef.current.session.close()
         clientRef.current = null
@@ -1936,121 +1944,143 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Open a client WS session (clock handshake + handlers). On the FIRST connect we send `join`;
   // on a reconnect we don't — the host still has our approved grant and our cached file, so we just
   // resume the same `id` (a fresh join would reset us to "requested" and force re-approval).
+  //
+  // Ownership: the session belongs to `epoch` and a fresh connection generation. Starting it
+  // cancels any handshake still in flight; leave()/connect() cancel this one. Every callback
+  // (message, drop) re-checks both, and a handshake that resolves after its session moved on
+  // is closed and rejected with SyncCancelledError — it never reaches the newer session.
   type ClientParams = { payload: JoinPayload; myId: string; grant: string; name: string }
   const openClient = useCallback(
-    async (p: ClientParams, initial: boolean): Promise<SyncSession> => {
+    async (p: ClientParams, initial: boolean, epoch: number): Promise<SyncSession> => {
       const { payload, myId, grant, name } = p
-      const session = await openSyncSession(
-        payload.host,
-        payload.wsPort,
-        payload.token,
-        (raw) => {
-          if (disposedRef.current) return // a dead provider's socket must not restart anything
-          const r = parseServerMsg(JSON.stringify(raw))
-          if (!r.ok) return
-          const m = r.msg
-          if (m.t === 'requestDecision' && m.id === myId) {
-            if (m.approved) {
-              // A re-delivered approval (reconnect, host double-tap) while we're already
-              // transferring or done must not restart: a fresh start would delete a good file.
-              if (approvedRef.current && (downloadingRef.current || completeRef.current)) return
-              approvedRef.current = true // from now on, reconnects resume silently (no re-join)
-              setClientPhase('approved')
-              clientPhaseRef.current = 'approved'
-              startDownload()
-              maybeFetchSubtitle() // the roster may already have named a subtitle revision
-            } else {
-              approvedRef.current = false
-              setClientPhase('denied')
-              resetTransfer()
-              clientRef.current?.session.close()
-              clientRef.current = null
-            }
-          } else if (m.t === 'roster' && Array.isArray(m.participants)) {
-            // The roster carries the movie's metadata — what our own buffer math needs.
-            if (isMediaInfo(m.media)) {
-              mediaRef.current = m.media
-              setMovie({
-                title: m.media.title,
-                sizeBytes: m.media.sizeBytes,
-                durationSec: m.media.durationSec,
-                fastStart: m.media.fastStart === true,
+      handshakeAbortRef.current?.abort()
+      const abort = new AbortController()
+      handshakeAbortRef.current = abort
+      const gen = ++connGenRef.current
+      liveConnRef.current = gen
+      const current = (): boolean => !disposedRef.current && epochRef.current === epoch && liveConnRef.current === gen
+      let session: SyncSession
+      try {
+        session = await openSyncSession(
+          payload.host,
+          payload.wsPort,
+          payload.token,
+          (raw) => {
+            if (!current()) return // an abandoned / superseded socket (or a dead provider) must not act
+            const r = parseServerMsg(JSON.stringify(raw))
+            if (!r.ok) return
+            const m = r.msg
+            if (m.t === 'requestDecision' && m.id === myId) {
+              if (m.approved) {
+                // A re-delivered approval (reconnect, host double-tap) while we're already
+                // transferring or done must not restart: a fresh start would delete a good file.
+                if (approvedRef.current && (downloadingRef.current || completeRef.current)) return
+                approvedRef.current = true // from now on, reconnects resume silently (no re-join)
+                setClientPhase('approved')
+                clientPhaseRef.current = 'approved'
+                startDownload()
+                maybeFetchSubtitle() // the roster may already have named a subtitle revision
+              } else {
+                approvedRef.current = false
+                setClientPhase('denied')
+                resetTransfer()
+                clientRef.current?.session.close()
+                clientRef.current = null
+              }
+            } else if (m.t === 'roster' && Array.isArray(m.participants)) {
+              // The roster carries the movie's metadata — what our own buffer math needs.
+              if (isMediaInfo(m.media)) {
+                mediaRef.current = m.media
+                setMovie({
+                  title: m.media.title,
+                  sizeBytes: m.media.sizeBytes,
+                  durationSec: m.media.durationSec,
+                  fastStart: m.media.fastStart === true,
+                })
+                // Decode preflight: can THIS phone's hardware handle the movie's frame size?
+                // (PRD accepts H.264 only, so video/avc.) Warn here, and flag the host via beats.
+                const w = m.media.width ?? 0
+                const h = m.media.height ?? 0
+                const ok = w > 0 && h > 0 ? RailReelHost.canDecode(m.media.videoMime || 'video/avc', w, h) : true
+                decodeOkRef.current = ok
+                setDecodeCaution(decodeWarning(ok, h))
+              }
+              // Subtitles: the roster names the current revision; the body is pulled when ours
+              // differs (identity is the content revision, so a same-name replacement reloads).
+              if (isMediaInfo(m.media)) {
+                const meta = isSubtitleMeta(m.media.subtitle) ? m.media.subtitle : null
+                rosterSubtitleRef.current = meta
+                if (meta) maybeFetchSubtitle()
+                else if (subtitleRef.current) clearSubtitle()
+              }
+              const list: Participant[] = m.participants
+                .filter(isParticipantInfo)
+                .map((q) => ({
+                  id: q.id,
+                  name: q.id === myId ? 'You' : q.name,
+                  status: q.status,
+                  progress: clamp01(q.progress),
+                  downloadMbps: Number.isFinite(q.downloadMbps) ? q.downloadMbps : 0,
+                  bufferedAheadSec: Number.isFinite(q.bufferedAheadSec) ? q.bufferedAheadSec : 0,
+                  stalled: false, // roster is a lobby-phase view; stall is host-tracked during playback
+                  inShow: false,
+                  decodeOk: q.decodeOk !== false,
+                  lastBeatAt: Date.now(),
+                }))
+              participantsRef.current = list
+              setParticipants(list)
+            } else if (m.t === 'state') {
+              setPlayback(m.state) // host's authoritative playback; the Player drift-corrects to it
+            } else if (m.t === 'chat') {
+              // The host's echo is the single source of ordering — we never append optimistically,
+              // so our own line arrives here too and gets relabelled.
+              if (typeof m.from === 'string' && typeof m.text === 'string' && Number.isFinite(m.at)) {
+                const displayName = (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
+                ingestChat(displayName, m.text.slice(0, 280), m.at)
+              }
+            } else if (m.t === 'reaction') {
+              if (typeof m.from === 'string' && isValidReaction(m.emoji)) {
+                const displayName = (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
+                ingestReaction(displayName, m.emoji)
+              }
+            } else if (m.t === 'subtitle') {
+              const sub = parseSubtitlePayload(m)
+              if (sub?.kind === 'load') {
+                if (subtitleRef.current?.rev !== sub.rev) loadSubtitle(sub.name, sub.content, sub.rev)
+              } else if (sub?.kind === 'clear') {
+                clearSubtitle()
+              }
+            } else if (m.t === 'playbackRequestDecision') {
+              // Only the decision for OUR live request: a late one for an expired request is moot.
+              if (m.requesterId === myId && m.requestId === activeRequestIdRef.current) {
+                showRequestOutcome(m.approved ? 'approved' : 'dismissed')
+              }
+            } else if (m.t === 'ended') {
+              // The host wrapped the show / left. leave() clears everything (incl. sessionEnd), so
+              // set the designed end-state right after — Home surfaces it.
+              leave()
+              setSessionEnd({
+                kind: 'host-ended',
+                eyebrow: 'THE SHOW HAS ENDED',
+                headline: 'The cabin went dark',
+                body: 'The host ended the session. Thanks for riding along.',
               })
-              // Decode preflight: can THIS phone's hardware handle the movie's frame size?
-              // (PRD accepts H.264 only, so video/avc.) Warn here, and flag the host via beats.
-              const w = m.media.width ?? 0
-              const h = m.media.height ?? 0
-              const ok = w > 0 && h > 0 ? RailReelHost.canDecode(m.media.videoMime || 'video/avc', w, h) : true
-              decodeOkRef.current = ok
-              setDecodeCaution(decodeWarning(ok, h))
             }
-            // Subtitles: the roster names the current revision; the body is pulled when ours
-            // differs (identity is the content revision, so a same-name replacement reloads).
-            if (isMediaInfo(m.media)) {
-              const meta = isSubtitleMeta(m.media.subtitle) ? m.media.subtitle : null
-              rosterSubtitleRef.current = meta
-              if (meta) maybeFetchSubtitle()
-              else if (subtitleRef.current) clearSubtitle()
-            }
-            const list: Participant[] = m.participants
-              .filter(isParticipantInfo)
-              .map((q) => ({
-                id: q.id,
-                name: q.id === myId ? 'You' : q.name,
-                status: q.status,
-                progress: clamp01(q.progress),
-                downloadMbps: Number.isFinite(q.downloadMbps) ? q.downloadMbps : 0,
-                bufferedAheadSec: Number.isFinite(q.bufferedAheadSec) ? q.bufferedAheadSec : 0,
-                stalled: false, // roster is a lobby-phase view; stall is host-tracked during playback
-                inShow: false,
-                decodeOk: q.decodeOk !== false,
-                lastBeatAt: Date.now(),
-              }))
-            participantsRef.current = list
-            setParticipants(list)
-          } else if (m.t === 'state') {
-            setPlayback(m.state) // host's authoritative playback; the Player drift-corrects to it
-          } else if (m.t === 'chat') {
-            // The host's echo is the single source of ordering — we never append optimistically,
-            // so our own line arrives here too and gets relabelled.
-            if (typeof m.from === 'string' && typeof m.text === 'string' && Number.isFinite(m.at)) {
-              const displayName = (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
-              ingestChat(displayName, m.text.slice(0, 280), m.at)
-            }
-          } else if (m.t === 'reaction') {
-            if (typeof m.from === 'string' && isValidReaction(m.emoji)) {
-              const displayName = (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
-              ingestReaction(displayName, m.emoji)
-            }
-          } else if (m.t === 'subtitle') {
-            const sub = parseSubtitlePayload(m)
-            if (sub?.kind === 'load') {
-              if (subtitleRef.current?.rev !== sub.rev) loadSubtitle(sub.name, sub.content, sub.rev)
-            } else if (sub?.kind === 'clear') {
-              clearSubtitle()
-            }
-          } else if (m.t === 'playbackRequestDecision') {
-            // Only the decision for OUR live request: a late one for an expired request is moot.
-            if (m.requesterId === myId && m.requestId === activeRequestIdRef.current) {
-              showRequestOutcome(m.approved ? 'approved' : 'dismissed')
-            }
-          } else if (m.t === 'ended') {
-            // The host wrapped the show / left. leave() clears everything (incl. sessionEnd), so
-            // set the designed end-state right after — Home surfaces it.
-            leave()
-            setSessionEnd({
-              kind: 'host-ended',
-              eyebrow: 'THE SHOW HAS ENDED',
-              headline: 'The cabin went dark',
-              body: 'The host ended the session. Thanks for riding along.',
-            })
-          }
-        },
-        // Socket dropped after we were live: kick off a reconnect (unless we're deliberately leaving).
-        () => {
-          if (!disposedRef.current && !leavingRef.current && roleRef.current === 'client') reconnectRef.current()
-        },
-      )
+          },
+          // Socket dropped after we were live: kick off a reconnect (unless we're deliberately leaving).
+          () => {
+            if (current() && !leavingRef.current && roleRef.current === 'client') reconnectRef.current()
+          },
+          undefined,
+          abort.signal,
+        )
+      } finally {
+        if (handshakeAbortRef.current === abort) handshakeAbortRef.current = null
+      }
+      if (!current()) {
+        session.close() // resolved after its session moved on — never let it speak for the new one
+        throw new SyncCancelledError()
+      }
       if (initial) session.send({ t: 'join', id: myId, name, token: payload.token, grant })
       return session
     },
@@ -2069,19 +2099,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const rejoin = !approvedRef.current
     reconnectingRef.current = true
     setReconnecting(true)
+    // Release the reconnecting flag only while it is still OURS: leave()/connect() reset it
+    // themselves, and a newer session's loop may own it by the time a stale one notices.
+    const release = () => {
+      if (epochRef.current !== myEpoch) return
+      reconnectingRef.current = false
+      setReconnecting(false)
+    }
     for (let attempt = 0; attempt < MAX_RECONNECT_ATTEMPTS; attempt++) {
       await sleep(reconnectDelayMs(attempt))
       if (stale()) {
-        reconnectingRef.current = false
-        setReconnecting(false)
+        release()
         return
       }
       try {
-        const session = await openClient({ payload: c.payload, myId: c.myId, grant: c.grant, name: c.name }, rejoin)
+        const session = await openClient({ payload: c.payload, myId: c.myId, grant: c.grant, name: c.name }, rejoin, myEpoch)
         if (stale()) {
           session.close() // we were torn down / re-connected while handshaking — drop this socket
-          reconnectingRef.current = false
-          setReconnecting(false)
+          release()
           return
         }
         clientRef.current = { ...c, session }
@@ -2098,12 +2133,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         // The HTTP transfer died with the hotspot too — bring it back (no retry UI mid-show).
         recoverTransfer()
         return
-      } catch {
-        // keep retrying until the attempt budget runs out
+      } catch (e) {
+        // Cancelled = this loop's session is over (leave / a newer connect): stop, quietly.
+        if (e instanceof SyncCancelledError || stale()) {
+          release()
+          return
+        }
+        // otherwise keep retrying until the attempt budget runs out
       }
     }
-    reconnectingRef.current = false
-    setReconnecting(false)
+    release()
     if (!stale()) {
       leave() // tear down first — leave() clears state, so surface the end-state afterwards
       setSessionEnd({
@@ -2140,6 +2179,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       approvedRef.current = false
       epochRef.current++ // a fresh session — invalidate any reconnect loop left over from a prior one
       const myEpoch = epochRef.current
+      reconnectingRef.current = false // the old session's loop (now stale) no longer owns the flag
+      setReconnecting(false)
       // A fresh join must not inherit ANYTHING from a previous session: no zombie download feeding
       // the gate a dying transfer rate, no stale playback state yanking us straight into the
       // Player, no leftover roster/media.
@@ -2158,7 +2199,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setDecodeCaution(null)
       decodeOkRef.current = true
       try {
-        const session = await openClient({ payload, myId, grant, name }, true)
+        const session = await openClient({ payload, myId, grant, name }, true, myEpoch)
         if (epochRef.current !== myEpoch || leavingRef.current) {
           session.close()
           return
@@ -2169,6 +2210,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         roleRef.current = 'client'
         setClientPhase('requested')
       } catch (e) {
+        // A cancelled / superseded attempt must not touch the session that replaced it.
+        if (e instanceof SyncCancelledError || epochRef.current !== myEpoch || disposedRef.current) return
         setError(String(e))
         setClientPhase('idle')
       }
@@ -2181,6 +2224,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     reconnectingRef.current = false
     approvedRef.current = false
     epochRef.current++ // invalidate any in-flight reconnect loop so it can't resurrect this session
+    handshakeAbortRef.current?.abort() // a join still clock-handshaking is abandoned, socket and all
+    handshakeAbortRef.current = null
     setUserLeftShow(false)
     inShowRef.current = false
     downloadingRef.current = false

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { openSyncSession } from '@/net/syncClient'
+import { openSyncSession, SyncCancelledError } from '@/net/syncClient'
 
 class MockWebSocket {
   url: string
@@ -108,5 +108,53 @@ describe('openSyncSession and rolling NTP drift compensation', () => {
     activeSocket!.close()
 
     await expect(sessionPromise).rejects.toThrow('WebSocket closed')
+  })
+
+  it('an aborted handshake rejects as cancelled and never reaches the callbacks', async () => {
+    const onMessage = vi.fn()
+    const onClose = vi.fn()
+    const ctl = new AbortController()
+    const sessionPromise = openSyncSession('127.0.0.1', 8081, 'token123', onMessage, onClose, 5, ctl.signal)
+    await new Promise((r) => setTimeout(r, 20))
+    const sock = activeSocket!
+    ctl.abort()
+    await expect(sessionPromise).rejects.toBeInstanceOf(SyncCancelledError)
+    // A late frame (e.g. the old host's `ended`) on the abandoned socket goes nowhere.
+    sock.receive({ t: 'ended', reason: 'host-left' })
+    sock.close()
+    expect(onMessage).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('an already-aborted signal rejects without opening a socket', async () => {
+    const ctl = new AbortController()
+    ctl.abort()
+    await expect(openSyncSession('127.0.0.1', 8081, 't', vi.fn(), undefined, 3, ctl.signal)).rejects.toBeInstanceOf(
+      SyncCancelledError,
+    )
+    expect(activeSocket).toBeNull()
+  })
+
+  it('aborting after the session resolved is a no-op (the caller owns close)', async () => {
+    const onMessage = vi.fn()
+    const ctl = new AbortController()
+    const session = await openSyncSession('127.0.0.1', 8081, 't', onMessage, undefined, 3, ctl.signal)
+    ctl.abort()
+    activeSocket!.receive({ t: 'chat', from: 'a', text: 'hi', at: 1 })
+    expect(onMessage).toHaveBeenCalledTimes(1)
+    session.close()
+  })
+
+  it('a deliberate close is silent; a drop calls onClose exactly once', async () => {
+    const onClose = vi.fn()
+    const s1 = await openSyncSession('127.0.0.1', 8081, 't', vi.fn(), onClose, 3)
+    s1.close()
+    expect(onClose).not.toHaveBeenCalled()
+
+    const onClose2 = vi.fn()
+    await openSyncSession('127.0.0.1', 8081, 't', vi.fn(), onClose2, 3)
+    activeSocket!.close() // the host went away
+    activeSocket!.close()
+    expect(onClose2).toHaveBeenCalledTimes(1)
   })
 })
