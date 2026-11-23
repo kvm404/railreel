@@ -8,11 +8,13 @@ import { IconButton } from '@/ui/IconButton'
 import { withAlpha } from '@/ui/alpha'
 import { useTheme } from '@/theme/ThemeProvider'
 import { RAIL_KEY_MIN } from '@/lib/player/layout'
+import { RAIL_BACKING_ALPHA, RAIL_IDLE_MS, RAIL_IDLE_OPACITY } from '@/lib/player/rail'
 
 /**
- * The micro rail: five reactions + chat, riding in the bottom curtain. A translucent pill that
- * dims to a whisper when idle and wakes on touch, so it never competes with the film. See
- * docs/design-language.md (warm = human = interactive).
+ * The micro rail: five reactions + chat, riding in the bottom curtain. A dark pill whose glyphs
+ * soften when idle and wake on touch, so it never competes with the film — but only the glyphs
+ * dim: the backing stays strong and the unread badge stays lit, so the controls keep ≥ 4.5:1 even
+ * over a white frame (lib/player/rail). See docs/design-language.md (warm = human = interactive).
  *
  * Every key is a real `keySize` × `keySize` target (≥44dp, laid edge to edge with no hitSlop, so
  * neighbouring targets never overlap); the Player sizes it to fit the screen. The haptic accent
@@ -29,8 +31,6 @@ const EMOJI_NAMES: Record<(typeof RAIL_EMOJI)[number], string> = {
   '😢': 'crying',
 }
 
-const IDLE_DIM_MS = 4000
-const DIM_OPACITY = 0.45
 
 export const ReactionRail = memo(function ReactionRail({
   onReact,
@@ -55,8 +55,8 @@ export const ReactionRail = memo(function ReactionRail({
     opacity.value = withTiming(1, { duration: 120 })
     if (dimTimer.current) clearTimeout(dimTimer.current)
     dimTimer.current = setTimeout(() => {
-      opacity.value = withTiming(DIM_OPACITY, { duration: 600 })
-    }, IDLE_DIM_MS)
+      opacity.value = withTiming(RAIL_IDLE_OPACITY, { duration: 600 })
+    }, RAIL_IDLE_MS)
   }, [opacity])
 
   useEffect(() => {
@@ -66,13 +66,11 @@ export const ReactionRail = memo(function ReactionRail({
     }
   }, [wake])
 
-  const style = useAnimatedStyle(() => ({ opacity: opacity.value }))
+  const glyph = useAnimatedStyle(() => ({ opacity: opacity.value }))
   const unreadLabel = unread > 0 ? `Open chat, ${unread} unread message${unread === 1 ? '' : 's'}` : 'Open chat'
 
   return (
-    <Animated.View
-      style={[styles.rail, { borderColor: t.palette.hairline, backgroundColor: withAlpha(t.palette.raised, 0.78) }, style]}
-    >
+    <View style={[styles.rail, { borderColor: t.palette.hairline, backgroundColor: withAlpha(t.palette.raised, RAIL_BACKING_ALPHA) }]}>
       {RAIL_EMOJI.map((e) => (
         <IconButton
           key={e}
@@ -81,14 +79,18 @@ export const ReactionRail = memo(function ReactionRail({
           minTouch={keySize}
           haptic="none"
           accessibilityLabel={`Send ${EMOJI_NAMES[e]} reaction`}
-          icon={<Text style={styles.emoji}>{e}</Text>}
+          icon={
+            <Animated.View style={glyph}>
+              <Text style={styles.emoji}>{e}</Text>
+            </Animated.View>
+          }
           onPress={() => {
             wake()
             if (onReact(e)) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {})
           }}
         />
       ))}
-      <View style={[styles.divider, { backgroundColor: t.palette.hairline }]} />
+      <Animated.View style={[styles.divider, { backgroundColor: t.palette.hairline }, glyph]} />
       <IconButton
         ref={chatButtonRef}
         variant="plain"
@@ -97,13 +99,17 @@ export const ReactionRail = memo(function ReactionRail({
         haptic="selection"
         accessibilityLabel={unreadLabel}
         badge={unread > 0 ? (unread > 9 ? '9+' : String(unread)) : null}
-        icon={(c) => <MessageCircle size={20} color={unread > 0 ? t.palette.amber : c} strokeWidth={2} />}
+        icon={(c) => (
+          <Animated.View style={glyph}>
+            <MessageCircle size={20} color={unread > 0 ? t.palette.amber : c} strokeWidth={2} />
+          </Animated.View>
+        )}
         onPress={() => {
           wake()
           onOpenChat()
         }}
       />
-    </Animated.View>
+    </View>
   )
 })
 

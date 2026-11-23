@@ -1,9 +1,8 @@
-import { useEffect, type ReactNode, type Ref } from 'react'
+import { useEffect, useState, type ReactNode, type Ref } from 'react'
 import { Pressable, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native'
 import Animated, {
   cancelAnimation,
   useAnimatedStyle,
-  useReducedMotion,
   useSharedValue,
   withSpring,
   withTiming,
@@ -11,6 +10,7 @@ import Animated, {
 import * as Haptics from 'expo-haptics'
 import { Text } from './Text'
 import { withAlpha } from './alpha'
+import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { useTheme } from '@/theme/ThemeProvider'
 import { motion, radii } from '@/theme/tokens'
 
@@ -19,11 +19,13 @@ import { motion, radii } from '@/theme/tokens'
  * subtitles, transport, reactions) and small icon+label pills (moderation, requests, cleanup).
  *
  * One place for the interaction contract every one of those needs: a button role + label,
- * disabled/selected state announced to TalkBack, a touch target of at least `minTouch` (padded
- * with hitSlop when the visual is smaller — callers that sit side by side pass `minTouch={size}`
- * so targets never overlap), a pressed state (small spring scale + light wash; wash only under
- * reduce-motion) and an optional haptic accent. Selected uses amber — the interactive/human hue;
- * cyan stays reserved for sync. See docs/design-language.md.
+ * disabled/selected state announced to TalkBack, a touch target of at least `minTouch` that is
+ * PHYSICAL (the pressable box itself, with the visual centred in it — hitSlop can't reach past a
+ * parent's bounds, so it can't promise a target size; callers that sit side by side pass
+ * `minTouch={size}`), a pressed state (small spring scale + light wash; wash only under
+ * reduce-motion), an amber focus ring for keyboard / D-pad focus and an optional haptic accent.
+ * Selected uses amber — the interactive/human hue; cyan stays reserved for sync.
+ * See docs/design-language.md.
  */
 
 export type IconButtonVariant = 'glass' | 'amber' | 'ghost' | 'plain'
@@ -38,7 +40,7 @@ export type IconButtonProps = {
   label?: string
   /** Visual height (and diameter when round). */
   size?: number
-  /** Minimum touch target; the difference to `size` is added as hitSlop. */
+  /** Minimum touch target (the pressable's own box; the visual is centred in it). */
   minTouch?: number
   variant?: IconButtonVariant
   selected?: boolean
@@ -54,6 +56,8 @@ export type IconButtonProps = {
 }
 
 const PRESS_SCALE = 0.92
+/** Focus ring: 2dp amber, this far outside the visual. */
+const FOCUS_GAP = 3
 
 export function IconButton({
   icon,
@@ -73,8 +77,9 @@ export function IconButton({
   ref,
 }: IconButtonProps) {
   const t = useTheme()
-  const reduced = useReducedMotion()
+  const reduced = useReduceMotion()
   const pressed = useSharedValue(0)
+  const [focused, setFocused] = useState(false)
 
   // Disabled mid-press: Pressable may never deliver onPressOut, so release the state here.
   useEffect(() => {
@@ -111,7 +116,7 @@ export function IconButton({
   const shape: ViewStyle = label
     ? { height: size, borderRadius: radius ?? radii.pill, paddingHorizontal: Math.round(size * 0.36) }
     : { width: size, height: size, borderRadius: size / 2 }
-  const slop = Math.max(0, (minTouch - size) / 2)
+  const ringRadius = (shape.borderRadius as number) + FOCUS_GAP
 
   const handlePress = () => {
     if (disabled) return
@@ -130,33 +135,45 @@ export function IconButton({
       onPressOut={() => {
         pressed.value = withSpring(0, motion.spring)
       }}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
       disabled={disabled}
-      hitSlop={slop}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
       accessibilityHint={accessibilityHint}
       accessibilityState={{ disabled, selected }}
-      style={style}
+      style={[styles.target, { minWidth: minTouch, minHeight: minTouch }, style]}
     >
-      <Animated.View style={[styles.body, shape, surface, disabled && styles.disabled, bodyStyle]}>
-        <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { borderRadius: shape.borderRadius, backgroundColor: wash }, washStyle]} />
-        {typeof icon === 'function' ? icon(fg) : icon}
-        {label ? (
-          <Text variant="caption" style={[styles.label, { color: fg }]} numberOfLines={1}>
-            {label}
-          </Text>
+      {/* The visual (and its badge / focus ring) sits centred in the larger touch box. */}
+      <View>
+        {focused ? (
+          <View
+            pointerEvents="none"
+            style={[styles.ring, { borderRadius: ringRadius, borderColor: t.palette.amber }]}
+          />
         ) : null}
-      </Animated.View>
-      {badge ? (
-        <View pointerEvents="none" style={[styles.badge, { backgroundColor: t.palette.amber, borderColor: t.palette.void }]}>
-          <Text style={[styles.badgeText, { color: t.palette.onAmber, fontFamily: t.fonts.monoBold }]}>{badge}</Text>
-        </View>
-      ) : null}
+        <Animated.View style={[styles.body, shape, surface, disabled && styles.disabled, bodyStyle]}>
+          <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { borderRadius: shape.borderRadius, backgroundColor: wash }, washStyle]} />
+          {typeof icon === 'function' ? icon(fg) : icon}
+          {label ? (
+            <Text variant="caption" style={[styles.label, { color: fg }]} numberOfLines={1}>
+              {label}
+            </Text>
+          ) : null}
+        </Animated.View>
+        {badge ? (
+          <View pointerEvents="none" style={[styles.badge, { backgroundColor: t.palette.amber, borderColor: t.palette.void }]}>
+            <Text style={[styles.badgeText, { color: t.palette.onAmber, fontFamily: t.fonts.monoBold }]}>{badge}</Text>
+          </View>
+        ) : null}
+      </View>
     </Pressable>
   )
 }
 
 const styles = StyleSheet.create({
+  target: { alignItems: 'center', justifyContent: 'center' },
+  ring: { position: 'absolute', top: -FOCUS_GAP, left: -FOCUS_GAP, right: -FOCUS_GAP, bottom: -FOCUS_GAP, borderWidth: 2 },
   body: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, overflow: 'hidden' },
   label: {},
   disabled: { opacity: 0.45 },

@@ -1,17 +1,18 @@
 import { memo, type ReactNode } from 'react'
 import { StyleSheet, View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from 'react-native'
-import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, type SharedValue } from 'react-native-reanimated'
+import Animated, { useAnimatedStyle, useSharedValue, type SharedValue } from 'react-native-reanimated'
 import { LinearGradient } from 'expo-linear-gradient'
 import { Text } from '@/ui'
 import { withAlpha } from '@/ui/alpha'
+import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { useTheme } from '@/theme/ThemeProvider'
 
 /**
  * Player chrome as letterbox curtains: a top bar and a bottom bar of deep night that slide in
  * from the screen edges when the film is tapped and slide back out to leave it unobstructed
  * (docs/design-language.md: "Player controls ride inside letterbox bars"). One shared progress
- * value (0 = closed, 1 = open) drives both on the UI thread; under reduce-motion they don't
- * travel — the same value just switches their opacity.
+ * value (0 = closed, 1 = open) drives both on the UI thread; under reduce-motion (read live) they
+ * don't travel — the same value just switches their opacity.
  *
  * Closed curtains are untouchable and hidden from TalkBack, so taps fall through to the film.
  */
@@ -33,7 +34,7 @@ export function Curtain({
   children: ReactNode
 }) {
   const t = useTheme()
-  const reduced = useReducedMotion()
+  const reduced = useReduceMotion()
   const height = useSharedValue(0)
 
   const anim = useAnimatedStyle(() => {

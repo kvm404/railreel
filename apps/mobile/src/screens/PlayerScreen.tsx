@@ -33,7 +33,8 @@ import {
   stallReport,
   targetPositionSec,
 } from '@/lib/sync/playback'
-import { playerLayout } from '@/lib/player/layout'
+import { playerLayout, TOP_FADE } from '@/lib/player/layout'
+import { shouldPublishHostExit } from '@/lib/player/exit'
 import { lastChatId, unreadCount } from '@/lib/social/feed'
 import { cleanupFailureMessage, formatBytes, type ClearCacheResult } from '@/lib/storage'
 import type { PlaybackState } from '@/lib/protocol'
@@ -75,7 +76,7 @@ export function PlayerScreen() {
   const t = useTheme()
   const nav = useNavigation()
   const insets = useSafeAreaInsets()
-  const { width, height } = useWindowDimensions()
+  const { width, height, fontScale } = useWindowDimensions()
   const s = useSession()
   const isHost = s.role === 'host'
   // Stable handles: the session object's identity changes on every roster/heartbeat, so depending on
@@ -124,6 +125,8 @@ export function PlayerScreen() {
   const [buffering, setBuffering] = useState(false)
   const [durationSec, setDurationSec] = useState(0)
   const [bottomCurtainH, setBottomCurtainH] = useState(0)
+  const [topCurtainH, setTopCurtainH] = useState(0)
+  const [captionH, setCaptionH] = useState(0)
   const [screenReader, setScreenReader] = useState(false)
 
   const playingRef = useRef(playing)
@@ -145,6 +148,10 @@ export function PlayerScreen() {
   const mounted = useMountedRef()
   const sessionRef = useRef(s)
   sessionRef.current = s
+  // The session this player was mounted for, and whether WE just left it: leave() and the
+  // navigation reset land in one commit, so the last-rendered `s` still says "host" at unmount.
+  const mountedJoinCodeRef = useRef(s.joinCode)
+  const leftSessionRef = useRef(false)
 
   const handleBackPress = useLatestCallback(async () => {
     if (ended) {
@@ -185,12 +192,16 @@ export function PlayerScreen() {
     }
     setShowCleanupSheet(false)
     const step = resumeExit({ mounted: mounted.current, sessionActive: sessionRef.current.role !== 'none' })
-    if (step === 'leave') s.leave()
+    if (step === 'leave') {
+      leftSessionRef.current = true
+      s.leave()
+    }
     if (step !== 'skip') nav.reset('Home')
   }
 
   const handleKeepAndLeave = () => {
     setShowCleanupSheet(false)
+    leftSessionRef.current = true
     s.leave()
     nav.reset('Home')
   }
@@ -203,6 +214,9 @@ export function PlayerScreen() {
   const autoPausedRef = useRef(false) // host: the room-hold paused us (vs. a manual pause)
   const overrideRef = useRef(false) // host: chose to play through a hold; don't auto-pause again
   const notReadySinceRef = useRef<number | null>(null) // client: when our player first went not-ready
+  // client: we asked the native player to play. Mid-buffer `player.playing` is false while ExoPlayer
+  // still has playback requested, so `playing` alone can't tell us a pause is needed.
+  const playRequestedRef = useRef(false)
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // follower: correct only while on screen ('unknown' at launch counts as on screen)
   const appActiveRef = useRef(AppState.currentState !== 'background')
@@ -466,6 +480,7 @@ export function PlayerScreen() {
           // Unconditionally: mid-buffer expo-video reports playing=false while ExoPlayer still has
           // playback requested, which would start audio behind the lock screen once it lands.
           player.pause()
+          playRequestedRef.current = false
         } catch {
           // released
         }
@@ -507,9 +522,20 @@ export function PlayerScreen() {
   const exitRef = useRef<() => void>(() => {})
   exitRef.current = () => {
     // Use the mirrored position, never the player — by unmount expo-video may have released it
-    // (touching a released player throws "shared object already released").
+    // (touching a released player throws "shared object already released"). Keep `ended`, or
+    // guests lose "The End" the moment the host steps back to the lobby; and only for the session
+    // we were hosting — never stamp a state onto one that has ended or been replaced.
     if (isHost) {
-      setHostPlayback(playhead.get(), false)
+      const live = sessionRef.current
+      const publish = shouldPublishHostExit({
+        leftSession: leftSessionRef.current,
+        role: live.role,
+        joinCode: live.joinCode,
+        mountedJoinCode: mountedJoinCodeRef.current,
+      })
+      if (publish) {
+        setHostPlayback(playhead.get(), false, 1, endedRef.current)
+      }
     } else {
       s.exitShow()
     }
@@ -578,7 +604,10 @@ export function PlayerScreen() {
     }
 
     if (c.action === 'pause') {
-      if (player.playing) player.pause()
+      // Also while buffering: a play request left standing would start the film once it lands,
+      // against a host that has paused.
+      if (player.playing || playRequestedRef.current) player.pause()
+      playRequestedRef.current = false
     } else {
       // Hold the host's plain rate while a seek settles; otherwise apply the nudged rate.
       const rate = settling ? pb.rate : c.rate
@@ -587,6 +616,7 @@ export function PlayerScreen() {
         appliedRateRef.current = rate
       }
       if (!player.playing) player.play()
+      playRequestedRef.current = true
     }
     setInSync(Math.abs(target - actual) < IN_SYNC_SEC)
 
@@ -704,12 +734,35 @@ export function PlayerScreen() {
   const cues = s.subtitle?.cues ?? NO_CUES
   const captionsOn = subtitlesEnabled && cues.length > 0
   const layout = useMemo(
-    () => playerLayout({ width, height, insets, bottomCurtainHeight: bottomCurtainH, captionsOn }),
-    [width, height, insets, bottomCurtainH, captionsOn],
+    () =>
+      playerLayout({
+        width,
+        height,
+        insets,
+        fontScale,
+        bottomCurtainHeight: bottomCurtainH,
+        topCurtainHeight: topCurtainH,
+        captionsOn,
+        captionHeight: captionH,
+      }),
+    [width, height, insets, fontScale, bottomCurtainH, topCurtainH, captionsOn, captionH],
   )
   const onBottomCurtainHeight = useCallback((h: number) => {
     setBottomCurtainH((prev) => (Math.abs(prev - h) > 1 ? Math.round(h) : prev))
   }, [])
+  const onTopCurtainHeight = useCallback((h: number) => {
+    setTopCurtainH((prev) => (Math.abs(prev - h) > 1 ? Math.round(h) : prev))
+  }, [])
+  // Only a caption block TALLER than the default reservation changes the budget, so ordinary
+  // one/two-line cues never re-render the screen.
+  const captionFloorPx = layout.captionFloor
+  const onCaptionHeight = useCallback(
+    (h: number) => {
+      const next = h > captionFloorPx ? Math.round(h) : 0
+      setCaptionH((prev) => (Math.abs(prev - next) > 1 ? next : prev))
+    },
+    [captionFloorPx],
+  )
 
   const chromeOpen = showControls || ended
   const curtain = useSharedValue(1)
@@ -721,6 +774,8 @@ export function PlayerScreen() {
     liftPx.value = layout.lift
   }, [layout.lift, liftPx])
   const lift = useDerivedValue(() => curtain.value * liftPx.value)
+  // The social band's budget for the chrome state we're in (or heading to).
+  const band = chromeOpen ? layout.social.open : layout.social.closed
 
   // ── status ──────────────────────────────────────────────────────────────────
   const failed = nativeStatus === 'error'
@@ -746,7 +801,7 @@ export function PlayerScreen() {
   let notice: ReactNode = null
   if (ended) {
     notice = (
-      <View style={styles.noticeCol}>
+      <View style={[styles.noticeCol, layout.wide && styles.noticeInline]}>
         <FlapText value="THE END" size={22} />
         {cacheBytes > 0 ? (
           <IconButton
@@ -770,11 +825,11 @@ export function PlayerScreen() {
         {`Playing on without ${waiting.join(', ')} — they'll catch up`}
       </Text>
     ) : (
-      <View style={styles.noticeCol}>
+      <View style={[styles.noticeCol, layout.wide && styles.noticeInline]}>
         <Text variant="data" tone="secondary" style={styles.noticeText} numberOfLines={2}>
           {`Holding for ${waiting.join(', ')} to catch up…`}
         </Text>
-        <Button title={`Play without ${waiting.length > 1 ? 'them' : waiting[0]}`} intent="cyan" height={44} onPress={playWithout} />
+        <Button title={`Play without ${waiting.length > 1 ? 'them' : waiting[0]}`} intent="neutral" height={44} onPress={playWithout} />
       </View>
     )
   } else if (!isHost && playback && !playback.isPlaying) {
@@ -873,13 +928,15 @@ export function PlayerScreen() {
           left={layout.sideLeft + 4}
           right={layout.sideRight + 4}
           lift={lift}
+          onHeight={onCaptionHeight}
         />
-        {!chatOpen && (
+        {!chatOpen && band.ticker && (
           <ChatTicker
             log={chatLog}
             bottom={layout.socialBottom}
             left={layout.sideLeft}
-            right={layout.tickerRight}
+            right={band.tickerRight}
+            maxHeight={band.tickerMaxHeight}
             lift={lift}
           />
         )}
@@ -887,11 +944,11 @@ export function PlayerScreen() {
           reactions={s.reactions}
           bottom={layout.socialBottom}
           right={layout.sideRight}
-          lanes={layout.reactions}
+          lanes={band.reactions}
           lift={lift}
         />
 
-        <Curtain edge="top" progress={curtain} open={chromeOpen}>
+        <Curtain edge="top" progress={curtain} open={chromeOpen} onHeight={onTopCurtainHeight}>
           <View style={[styles.topBar, sidePad, { paddingTop: insets.top + 10 }]} pointerEvents="box-none">
             <IconButton
               variant="glass"
@@ -959,7 +1016,7 @@ export function PlayerScreen() {
         />
       ) : null}
 
-      <ChatSheet visible={chatOpen} log={chatLog} onSend={sendChat} onClose={closeChat} />
+      <ChatSheet visible={chatOpen} log={chatLog} onSend={sendChat} onClose={closeChat} reconnecting={s.reconnecting} />
 
       {/* Time-boxed host prompt and guest feedback sit above even the chat: they expire on their own. */}
       {moderation ? (
@@ -990,12 +1047,15 @@ export function PlayerScreen() {
 
 const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: palette.black },
-  topBar: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingBottom: 28 },
+  // paddingBottom is the curtain's fade below the controls — the layout's TOP_FADE.
+  topBar: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingBottom: TOP_FADE },
   titleCol: { flex: 1, minWidth: 0 },
   bottomBar: { paddingTop: 36, gap: 10 },
   noticeRow: { alignItems: 'center' },
   noticeCol: { alignItems: 'center', gap: 10 },
-  noticeText: { textAlign: 'center' },
+  // Landscape: notice and its action share a line, so the bottom curtain stays short.
+  noticeInline: { flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: 16 },
+  noticeText: { textAlign: 'center', flexShrink: 1 },
   transport: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 32 },
   transportWide: { gap: 20, justifyContent: 'flex-start' },
   requests: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, flexWrap: 'wrap' },

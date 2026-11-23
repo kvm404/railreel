@@ -13,7 +13,7 @@ import Animated, {
 import * as Haptics from 'expo-haptics'
 import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { useTheme } from '@/theme/ThemeProvider'
-import { fonts, veils } from '@/theme/tokens'
+import { fonts, motion, veils } from '@/theme/tokens'
 
 /**
  * The split-flap departure board — RailReel's signature element.
@@ -115,7 +115,7 @@ function FlapCell({
     const startDelay = mounted.current ? 0 : delay
     progress.value = withDelay(
       startDelay,
-      withTiming(1, { duration: 360, easing: Easing.bezier(0.16, 1, 0.3, 1) }, (done) => {
+      withTiming(1, { duration: motion.flip, easing: Easing.bezier(...motion.expoOut) }, (done) => {
         if (done) {
           runOnJS(setFlipping)(false)
           if (haptic) runOnJS(Haptics.selectionAsync)()
@@ -139,14 +139,14 @@ function FlapCell({
     progress.value = 0
     progress.value = withDelay(
       delay,
-      withTiming(1, { duration: 360, easing: Easing.bezier(0.16, 1, 0.3, 1) }, (done) => {
+      withTiming(1, { duration: motion.flip, easing: Easing.bezier(...motion.expoOut) }, (done) => {
         if (done) {
           runOnJS(setFlipping)(false)
           if (haptic) runOnJS(Haptics.selectionAsync)()
         }
       }),
     )
-    const id = setTimeout(() => (mounted.current = true), delay + 360)
+    const id = setTimeout(() => (mounted.current = true), delay + motion.flip)
     return () => {
       clearTimeout(id)
       cancelAnimation(progress)

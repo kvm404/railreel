@@ -144,6 +144,13 @@ export const motion = {
   fast: 150,
   base: 250,
   slow: 420,
+  /** A split-flap cell's top→bottom flip. */
+  flip: 360,
+  /** Sheets rising over the film, and falling away (quicker out than in). */
+  sheetIn: 260,
+  sheetOut: 200,
+  /** Quiet cross-fades: backdrops, toasts, status cues. */
+  fade: 160,
   /** Default UI spring. */
   spring: { stiffness: 200, damping: 22, mass: 1 },
   /** Snappy spring for split-flap cells. */
@@ -152,5 +159,14 @@ export const motion = {
   expoOut: [0.16, 1, 0.3, 1] as const,
 } as const
 
-export const tokens = { palette, veils, gradients, fonts, typography, spacing, sizes, radii, motion }
+/** Bottom-sheet geometry (chat, cleanup): one shape for everything that rises over the film. */
+export const sheet = {
+  radius: 20,
+  handleWidth: 36,
+  handleHeight: 4,
+  /** Share of the window a resting sheet may take; a compact window gets all of it. */
+  maxHeightPct: 64,
+} as const
+
+export const tokens = { palette, veils, gradients, fonts, typography, spacing, sizes, radii, motion, sheet }
 export type Tokens = typeof tokens

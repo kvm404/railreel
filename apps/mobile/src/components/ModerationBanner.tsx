@@ -1,10 +1,11 @@
 import { memo, useEffect, useState } from 'react'
 import { StyleSheet, View } from 'react-native'
-import Animated, { Easing, useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from 'react-native-reanimated'
+import Animated, { cancelAnimation, Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated'
 import { Check, Pause, RotateCcw, X } from 'lucide-react-native'
 import { Text } from '@/ui'
 import { IconButton } from '@/ui/IconButton'
 import { withAlpha } from '@/ui/alpha'
+import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { useTheme } from '@/theme/ThemeProvider'
 import { radii, spacing } from '@/theme/tokens'
 import { fractionLeft, secondsLeft } from '@/lib/social/countdown'
@@ -25,7 +26,7 @@ const TICK_MS = 250
  * and Approve / Dismiss. The countdown is derived from the request's arrival time (see
  * lib/social/countdown), so parent re-renders can't reset it and it always agrees with the
  * session store, which owns the actual auto-dismiss. A thin amber fuse drains along the bottom
- * edge (static under reduce-motion).
+ * edge (static under reduce-motion, read live: flipping it mid-countdown stops the tween).
  */
 export const ModerationBanner = memo(function ModerationBanner({
   request,
@@ -34,7 +35,7 @@ export const ModerationBanner = memo(function ModerationBanner({
   autoDismissMs = 10_000,
 }: ModerationBannerProps) {
   const t = useTheme()
-  const reduced = useReducedMotion()
+  const reduced = useReduceMotion()
   const [now, setNow] = useState(() => Date.now())
   const fuse = useSharedValue(1)
   const requestId = request?.requestId
@@ -49,7 +50,10 @@ export const ModerationBanner = memo(function ModerationBanner({
     const left = fractionLeft(receivedAt, start, autoDismissMs)
     fuse.value = left
     if (!reduced) fuse.value = withTiming(0, { duration: left * autoDismissMs, easing: Easing.linear })
-    return () => clearInterval(id)
+    return () => {
+      clearInterval(id)
+      cancelAnimation(fuse)
+    }
   }, [requestId, receivedAt, autoDismissMs, reduced, fuse])
 
   const fuseStyle = useAnimatedStyle(() => ({ transform: [{ scaleX: fuse.value }] }))

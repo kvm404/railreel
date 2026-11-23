@@ -2,6 +2,7 @@ import { memo, useEffect, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import Animated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
 import { findActiveCues, type SubtitleCue } from '@/lib/subtitles'
+import { sameActiveCues } from '@/lib/player/captions'
 import type { PlayheadStore } from '@/lib/player/playhead'
 import { withAlpha } from '@/ui/alpha'
 import { fonts, palette, radii } from '@/theme/tokens'
@@ -21,11 +22,14 @@ export interface CaptionOverlayProps {
   right?: number
   /** Extra upward offset (px), animated with the chrome curtain on the UI thread. */
   lift?: SharedValue<number>
+  /** Measured height of the rendered caption block (0 while nothing is shown) — the Player's budget. */
+  onHeight?: (h: number) => void
 }
 
-const cueKey = (cues: SubtitleCue[]): string => cues.map((c) => c.id).join('|')
-
-/** Active cues at the playhead, as React state that changes only when the cue SET changes. */
+/**
+ * Active cues at the playhead, as React state that changes only when the cue SET changes. A new
+ * cue array (a replaced subtitle file) always resets it: its cues are fresh objects.
+ */
 function useActiveCues(cues: SubtitleCue[], playhead: PlayheadStore | undefined, fallbackMs: number): SubtitleCue[] {
   const [active, setActive] = useState<SubtitleCue[]>(() =>
     findActiveCues(cues, playhead ? playhead.get() * 1000 : fallbackMs),
@@ -33,7 +37,7 @@ function useActiveCues(cues: SubtitleCue[], playhead: PlayheadStore | undefined,
   useEffect(() => {
     const read = (sec: number) => {
       const next = findActiveCues(cues, sec * 1000)
-      setActive((prev) => (cueKey(prev) === cueKey(next) ? prev : next))
+      setActive((prev) => (sameActiveCues(prev, next) ? prev : next))
     }
     if (!playhead) {
       read(fallbackMs / 1000)
@@ -61,16 +65,24 @@ export const CaptionOverlay = memo(function CaptionOverlay({
   left = 20,
   right = 20,
   lift,
+  onHeight,
 }: CaptionOverlayProps) {
   const fallbackMs = positionMs ?? (currentTimeSec !== undefined ? currentTimeSec * 1000 : 0)
   const activeCues = useActiveCues(visible ? cues : EMPTY, playhead, fallbackMs)
   const liftStyle = useAnimatedStyle(() => ({ transform: [{ translateY: lift ? -lift.value : 0 }] }))
+  const shown = visible && activeCues.length > 0
 
-  if (!visible || activeCues.length === 0) return null
+  // Nothing on screen → nothing to reserve beyond the Player's default floor.
+  useEffect(() => {
+    if (!shown) onHeight?.(0)
+  }, [shown, onHeight])
+
+  if (!shown) return null
 
   return (
     <Animated.View
       pointerEvents="none"
+      onLayout={onHeight ? (e) => onHeight(e.nativeEvent.layout.height) : undefined}
       style={[styles.container, { left, right }, bottomOffset !== undefined && { bottom: bottomOffset }, liftStyle]}
     >
       {activeCues.map((cue, cueIdx) => (

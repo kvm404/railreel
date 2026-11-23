@@ -2,64 +2,54 @@ import { useEffect } from 'react'
 import { StyleSheet, View } from 'react-native'
 import { Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
-import { radii, spacing } from '@/theme/tokens'
+import { palette, radii, spacing } from '@/theme/tokens'
+import { requestToastCopy, type RequestToastTone } from '@/lib/player/requestToast'
 import type { PlaybackRequestStatus } from '@/session/SessionProvider'
 
+/** The store's statuses, plus the finer outcomes it reports once they exist ('declined' / 'expired'). */
+export type RequestToastStatus = PlaybackRequestStatus | 'declined' | 'expired'
+
 export interface RequestFeedbackToastProps {
-  status: PlaybackRequestStatus
+  status: RequestToastStatus
   onDismiss?: () => void
-  /** Auto-fade duration in milliseconds for terminal states (dismissed, approved). Defaults to 3000ms. */
+  /** Auto-fade duration in milliseconds for terminal states. Defaults to 3000ms. */
   autoFadeMs?: number
 }
 
 /**
- * Visual confirmation toast for followers showing playback request transmission and resolution.
- * Adheres to the "Night Train" visual design system.
+ * A follower's request, from "asked" to its outcome: who decided (the host passed), or that
+ * nobody did (no answer yet — ask again). Copy lives in lib/player/requestToast; a status this
+ * build doesn't know renders nothing. Cyan only for the approval (sync is about to happen); a
+ * decision or a timeout is neutral, never a red error.
  */
-export function RequestFeedbackToast({
-  status,
-  onDismiss,
-  autoFadeMs = 3000,
-}: RequestFeedbackToastProps) {
+export function RequestFeedbackToast({ status, onDismiss, autoFadeMs = 3000 }: RequestFeedbackToastProps) {
   const t = useTheme()
+  const copy = requestToastCopy(status)
+  const terminal = copy?.terminal ?? false
 
   useEffect(() => {
-    if (status === 'dismissed' || status === 'approved') {
-      const timer = setTimeout(() => {
-        onDismiss?.()
-      }, autoFadeMs)
-      return () => clearTimeout(timer)
-    }
-  }, [status, autoFadeMs, onDismiss])
+    if (!terminal) return
+    const timer = setTimeout(() => onDismiss?.(), autoFadeMs)
+    return () => clearTimeout(timer)
+  }, [status, terminal, autoFadeMs, onDismiss])
 
-  if (status === 'idle') return null
+  if (!copy) return null
 
-  let message = 'Playback request sent to host...'
-  let dotColor: string = t.palette.amber
-
-  if (status === 'approved') {
-    message = 'Request approved! Synchronizing...'
-    dotColor = t.palette.cyan
-  } else if (status === 'dismissed') {
-    message = 'Request dismissed by host'
-    dotColor = t.palette.danger
+  const dot: Record<RequestToastTone, string> = {
+    pending: t.palette.amber,
+    sync: t.palette.cyan,
+    neutral: t.palette.textSecondary,
   }
 
   return (
     <View
-      style={[
-        styles.container,
-        {
-          backgroundColor: t.palette.raised,
-          borderColor: t.palette.hairline,
-        },
-      ]}
+      style={[styles.container, { backgroundColor: t.palette.raised, borderColor: t.palette.hairline }]}
       accessibilityRole="alert"
       accessibilityLiveRegion="polite"
     >
-      <View style={[styles.dot, { backgroundColor: dotColor }]} />
-      <Text variant="caption" tone="primary" style={styles.text}>
-        {message}
+      <View style={[styles.dot, { backgroundColor: dot[copy.tone] }]} />
+      <Text variant="caption" tone="primary">
+        {copy.message}
       </Text>
     </View>
   )
@@ -74,8 +64,8 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     borderRadius: radii.pill,
     borderWidth: 1,
-    gap: 8,
-    shadowColor: '#000',
+    gap: spacing.sm,
+    shadowColor: palette.black,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.35,
     shadowRadius: 6,
@@ -85,8 +75,5 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-  },
-  text: {
-    fontFamily: 'SpaceGrotesk_500Medium',
   },
 })
