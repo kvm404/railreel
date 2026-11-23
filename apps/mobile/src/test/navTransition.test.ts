@@ -18,14 +18,18 @@ describe('atmosphere by route', () => {
 })
 
 describe('retainsOutgoing', () => {
-  it('keeps ordinary screens on stage for the transition', () => {
-    expect(retainsOutgoing('Home', false)).toBe(true)
-    expect(retainsOutgoing('Lobby', false)).toBe(true)
+  it('keeps ordinary screens on stage for a push / pop / replace', () => {
+    expect(retainsOutgoing('Home', false, 'step')).toBe(true)
+    expect(retainsOutgoing('Lobby', false, 'step')).toBe(true)
   })
   it('swaps instantly under reduce-motion', () => {
-    expect(retainsOutgoing('Home', true)).toBe(false)
+    expect(retainsOutgoing('Home', true, 'step')).toBe(false)
   })
   it('never delays the Player unmount (it pauses the room)', () => {
-    expect(retainsOutgoing('Player', false)).toBe(false)
+    expect(retainsOutgoing('Player', false, 'step')).toBe(false)
+  })
+  it('unmounts the outgoing screen at once on a reset (session ending: its Modal sheet must go too)', () => {
+    // e.g. the host ends the show while a guest's Lobby cleanup sheet is open → reset('Home')
+    for (const r of ['Lobby', 'CreateSession', 'JoinSession', 'Home']) expect(retainsOutgoing(r, false, 'reset')).toBe(false)
   })
 })

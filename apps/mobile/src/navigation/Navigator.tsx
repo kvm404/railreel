@@ -11,7 +11,7 @@ import { WindowAtmosphere } from '@/components/WindowAtmosphere'
 import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { motion, palette } from '@/theme/tokens'
 import { createBackRegistry } from '@/lib/nav/backStack'
-import { ENTER_SHIFT, LEAVE_SHIFT, retainsOutgoing, stagedAtmosphere } from '@/lib/nav/transition'
+import { ENTER_SHIFT, LEAVE_SHIFT, retainsOutgoing, stagedAtmosphere, type TransitionKind } from '@/lib/nav/transition'
 import { BackRegistryContext, NavContext, RouteKeyContext, type NavParams, type RouteName } from './context'
 
 export type ScreenComponent = ComponentType<{ params?: NavParams }>
@@ -55,15 +55,16 @@ export function Navigator({ routes, initial }: { routes: Routes; initial: RouteN
   const canGoBack = stack.length > 1
 
   const commit = useCallback(
-    (next: Entry[], d: 1 | -1) => {
+    (next: Entry[], d: 1 | -1, kind: TransitionKind = 'step') => {
       const prevTop = stackRef.current[stackRef.current.length - 1]
       transitioning.current = true
       dirSv.value = d
       if (!reduced) anim.value = 0 // reset BEFORE the new screen paints (no flash)
       stackRef.current = next
       setStack(next)
-      // A reset mid-transition hands the stage to the half-arrived screen; the older one just goes.
-      setLeaving(prevTop && retainsOutgoing(prevTop.name, reduced) ? prevTop : null)
+      // Only an ordinary step keeps the outgoing screen on stage (a reset unmounts it at once — see
+      // lib/nav/transition); a step mid-transition hands the stage to the half-arrived screen.
+      setLeaving(prevTop && retainsOutgoing(prevTop.name, reduced, kind) ? prevTop : null)
     },
     [reduced, anim, dirSv],
   )
@@ -97,7 +98,7 @@ export function Navigator({ routes, initial }: { routes: Routes; initial: RouteN
     (name: RouteName, params?: NavParams) => {
       const cur = stackRef.current
       if (cur.length === 1 && cur[0]!.name === name) return
-      commit([makeEntry(name, params)], -1)
+      commit([makeEntry(name, params)], -1, 'reset')
     },
     [commit],
   )
