@@ -27,8 +27,14 @@ const RISE_PX = 170
 const MAX_CONCURRENT = 4
 const LANE_STEP_PX = 54
 const LANE_STEP_X = 52
+const SPARK_MAX_W = 92
 /** Below this much vertical room, lanes go side by side. */
 const TALL_ENOUGH_PX = RISE_PX + LANE_STEP_PX * (MAX_CONCURRENT - 1) + 48
+
+/** Horizontal span the reaction lanes occupy from the right edge (so the chat ticker stays clear). */
+export function reactionLaneSpan(room: number): number {
+  return room < TALL_ENOUGH_PX ? LANE_STEP_X * (MAX_CONCURRENT - 1) + SPARK_MAX_W : SPARK_MAX_W
+}
 
 export const FloatingReactions = memo(function FloatingReactions({
   reactions,
@@ -122,7 +128,7 @@ function Spark({
 }
 
 const styles = StyleSheet.create({
-  spark: { position: 'absolute', alignItems: 'center', maxWidth: 92 },
+  spark: { position: 'absolute', alignItems: 'center', maxWidth: SPARK_MAX_W },
   emoji: { fontSize: 30, lineHeight: 36 },
   name: { fontSize: 10, marginTop: -2, textShadowRadius: 4 },
 })

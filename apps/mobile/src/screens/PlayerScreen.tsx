@@ -1,31 +1,53 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, View } from 'react-native'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { AccessibilityInfo, AppState, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { useVideoPlayer, VideoView } from 'expo-video'
+import { Easing, useDerivedValue, useSharedValue, withTiming } from 'react-native-reanimated'
+import { useVideoPlayer, VideoView, type VideoPlayerStatus } from 'expo-video'
 import { ChevronLeft, Pause, Play, RotateCcw, RotateCw, Subtitles, Trash2 } from 'lucide-react-native'
-import { Button, Text } from '@/ui'
+import { Button, FlapText, Text } from '@/ui'
+import { IconButton } from '@/ui/IconButton'
 import { useTheme } from '@/theme/ThemeProvider'
+import { motion, palette } from '@/theme/tokens'
 import { useBackHandler, useNavigation } from '@/navigation/context'
 import { useMountedRef } from '@/hooks/useMountedRef'
+import { useLatestCallback } from '@/hooks/useLatestCallback'
+import { usePlayhead } from '@/hooks/usePlayhead'
 import { resumeExit } from '@/lib/nav/exitGuard'
 import { useSession } from '@/session/SessionProvider'
 import { CaptionOverlay } from '@/components/CaptionOverlay'
 import { ChatSheet } from '@/components/ChatSheet'
 import { ChatTicker } from '@/components/ChatTicker'
 import { CleanupSheet } from '@/components/CleanupSheet'
-import { FloatingReactions } from '@/components/FloatingReactions'
+import { FloatingReactions, reactionLaneSpan } from '@/components/FloatingReactions'
 import { ModerationBanner } from '@/components/ModerationBanner'
+import { Curtain, SyncTag, type SyncTone } from '@/components/PlayerChrome'
+import { PlayerStatusOverlay } from '@/components/PlayerStatusOverlay'
 import { ReactionRail } from '@/components/ReactionRail'
 import { RequestFeedbackToast } from '@/components/RequestFeedbackToast'
-import { decideCorrection, nextSeekLead, roomGate, stallReport, targetPositionSec } from '@/lib/sync/playback'
+import { Scrubber } from '@/components/Scrubber'
+import {
+  decideCorrection,
+  nativePauseVerdict,
+  nextSeekLead,
+  roomGate,
+  stallReport,
+  targetPositionSec,
+} from '@/lib/sync/playback'
+import { playerLayout } from '@/lib/player/layout'
+import { lastChatId, unreadCount } from '@/lib/social/feed'
 import { formatBytes } from '@/lib/storage'
 import type { PlaybackState } from '@/lib/protocol'
-import { radii } from '@/theme/tokens'
+import type { SubtitleCue } from '@/lib/subtitles'
 
 /**
  * The show. Immersive full-bleed video; the host drives play/pause/seek and broadcasts state,
  * every other phone is a follower that drift-corrects to the host's authoritative timeline
- * (see lib/sync/playback). Controls fade away; tap to bring them back. See docs/architecture.md §5.
+ * (see lib/sync/playback). Controls ride in letterbox curtains that slide away; tap the film to
+ * bring them back. See docs/architecture.md §5 and docs/design-language.md (Player).
+ *
+ * Rendering: the playhead lives outside React state (hooks/usePlayhead) — captions, the time
+ * readout and the filament subscribe to it themselves — and drift correction runs on timers, so
+ * this screen only re-renders on session/transport changes, not ten times a second.
  */
 
 const SKIP_SEC = 10
@@ -34,23 +56,42 @@ const HOST_BEAT_MS = 2000 // host re-stamps state so followers stay fresh
 const SEEK_SETTLE_MS = 2500 // after a corrective seek, leave the player alone to actually land + buffer
 const IN_SYNC_SEC = 0.35 // |drift| under this shows the "in sync" badge
 const CONTROLS_HIDE_MS = 3500 // while playing, chrome (controls + reaction rail) melts away after this
+/** Host: how long a native not-playing must persist before we call it a pause (rebuffers blip). */
+const NATIVE_PAUSE_CONFIRM_MS = 500
+/** A loading status shorter than this (a drift-seek landing) never shows the buffering cue. */
+const BUFFERING_SHOW_MS = 450
+/**
+ * Local mirror of the store's REACTION_SEND_GAP_MS (250ms) plus a little margin, so a tap we
+ * accept is one the store accepts too (its timestamp is taken a hair after ours) — the haptic
+ * then only ever confirms a reaction that was really sent.
+ */
+const LOCAL_REACTION_GAP_MS = 260
+const NO_CUES: SubtitleCue[] = []
 
-function fmt(sec: number): string {
-  if (!Number.isFinite(sec) || sec < 0) sec = 0
-  const m = Math.floor(sec / 60)
-  const s = Math.floor(sec % 60)
-  return `${m}:${s.toString().padStart(2, '0')}`
-}
+/** Read cursor for the chat badge, kept across Player remounts (ids are monotonic app-wide). */
+let lastSeenChatId = 0
 
 export function PlayerScreen() {
   const t = useTheme()
   const nav = useNavigation()
   const insets = useSafeAreaInsets()
+  const { width, height } = useWindowDimensions()
   const s = useSession()
   const isHost = s.role === 'host'
   // Stable handles: the session object's identity changes on every roster/heartbeat, so depending on
   // `s` directly would tear down and rebuild our effects/listeners constantly.
-  const { setHostPlayback, reportPlayback, hostNowMs, getCacheInfo } = s
+  const {
+    setHostPlayback,
+    reportPlayback,
+    hostNowMs,
+    getCacheInfo,
+    handlePlaybackRequest,
+    sendReaction,
+    sendChat,
+    sendPlaybackRequest,
+    clearPlaybackRequestStatus,
+    registerHostTransport,
+  } = s
   const playback = s.playback
   const playbackRef = useRef(playback)
   playbackRef.current = playback // always read the latest host state without re-creating `correct`
@@ -65,17 +106,29 @@ export function PlayerScreen() {
   const player = useVideoPlayer(s.movieUri ?? null, (p) => {
     p.loop = false
   })
+  const playhead = usePlayhead(player)
 
   const [playing, setPlaying] = useState(false)
   const [showControls, setShowControls] = useState(true)
   const [chatOpen, setChatOpen] = useState(false)
-  const [chatSeen, setChatSeen] = useState(0) // chatLog length when the sheet was last open
-  const [pos, setPos] = useState(0)
+  const [seenChatId, setSeenChatId] = useState(lastSeenChatId)
   const [inSync, setInSync] = useState(true)
   const [ended, setEnded] = useState(false)
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(true)
   const [showCleanupSheet, setShowCleanupSheet] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
+  const [nativeStatus, setNativeStatus] = useState<VideoPlayerStatus>(() => player.status)
+  const [playerError, setPlayerError] = useState<string | null>(null)
+  const [everReady, setEverReady] = useState(false)
+  const [buffering, setBuffering] = useState(false)
+  const [durationSec, setDurationSec] = useState(0)
+  const [bottomCurtainH, setBottomCurtainH] = useState(0)
+  const [screenReader, setScreenReader] = useState(false)
+
+  const playingRef = useRef(playing)
+  playingRef.current = playing
+  const endedRef = useRef(ended)
+  endedRef.current = ended
 
   // Query cache status once when playback concludes. Depend on the stable callback, not `s`: the
   // query itself sets a fresh cacheStatus (a new `s`), which would otherwise re-run this forever.
@@ -92,7 +145,7 @@ export function PlayerScreen() {
   const sessionRef = useRef(s)
   sessionRef.current = s
 
-  const handleBackPress = async () => {
+  const handleBackPress = useLatestCallback(async () => {
     if (ended) {
       const info = await s.getCacheInfo()
       if (!mounted.current) return
@@ -104,7 +157,7 @@ export function PlayerScreen() {
     if (!isHost) s.exitShow()
     if (nav.canGoBack) nav.goBack()
     else nav.reset('Lobby')
-  }
+  })
   useBackHandler(() => {
     void handleBackPress()
     return true
@@ -134,46 +187,144 @@ export function PlayerScreen() {
   const seekLeadRef = useRef(0) // client: EMA of this device's seek-landing latency (s)
   const appliedRateRef = useRef(1) // client: the playbackRate we last set (avoid redundant churn)
   const lastDriftLogRef = useRef(0) // client: dev drift telemetry throttle
-  const posRef = useRef(0) // last known playhead; read at unmount when the player may be released
   const autoPausedRef = useRef(false) // host: the room-hold paused us (vs. a manual pause)
   const overrideRef = useRef(false) // host: chose to play through a hold; don't auto-pause again
   const notReadySinceRef = useRef<number | null>(null) // client: when our player first went not-ready
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // follower: correct only while on screen ('unknown' at launch counts as on screen)
+  const appActiveRef = useRef(AppState.currentState !== 'background')
+
+  // TalkBack users navigate the chrome element by element — never pull it out from under them.
+  useEffect(() => {
+    AccessibilityInfo.isScreenReaderEnabled().then(setScreenReader).catch(() => {})
+    const sub = AccessibilityInfo.addEventListener('screenReaderChanged', setScreenReader)
+    return () => sub.remove()
+  }, [])
 
   // "Is the show playing?" — the host owns its local transport; a follower's own `playing` state
   // is never set (its player is driven by drift-correction), so it reads the host's authoritative
   // isPlaying. Without this a follower's chrome would never auto-hide.
   const showIsPlaying = isHost ? playing : (playback?.isPlaying ?? false)
+  const canAutoHide = showIsPlaying && !screenReader && !chatOpen
 
   // Reveal controls (+ the reaction rail), and while the movie is PLAYING arm an auto-hide so the
   // chrome melts away and the film is unobstructed. While paused (e.g. waiting for the host to
   // press play) they stay put — a vanishing play button reads as broken.
-  const revealControls = useCallback(() => {
+  const revealControls = useLatestCallback(() => {
     setShowControls(true)
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
-    if (showIsPlaying) hideTimerRef.current = setTimeout(() => setShowControls(false), CONTROLS_HIDE_MS)
-  }, [showIsPlaying])
+    if (canAutoHide) hideTimerRef.current = setTimeout(() => setShowControls(false), CONTROLS_HIDE_MS)
+  })
 
   // Re-arm (or cancel) the auto-hide whenever play/pause flips: hide the chrome once playing,
   // bring it back and keep it when paused.
   useEffect(() => {
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
-    if (showIsPlaying && showControls) hideTimerRef.current = setTimeout(() => setShowControls(false), CONTROLS_HIDE_MS)
-    else if (!showIsPlaying) setShowControls(true)
+    if (canAutoHide && showControls) hideTimerRef.current = setTimeout(() => setShowControls(false), CONTROLS_HIDE_MS)
+    else if (!canAutoHide) setShowControls(true)
     return () => {
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     }
-  }, [showIsPlaying, showControls])
+  }, [canAutoHide, showControls])
 
-  // Lightweight position readout for captions and overlay (also mirrored to a ref for the exit handler).
+  // ── native player status ─────────────────────────────────────────────────────
+  // Loading / error / duration come from expo-video's own events, so the chrome can tell the
+  // truth (no "IN SYNC" over a black frame) and the host can notice pauses it didn't make.
+  const nativeCheckRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const checkNativePause = useLatestCallback(() => {
+    nativeCheckRef.current = null
+    if (!isHost) return
+    let status: VideoPlayerStatus
+    let nativePlaying: boolean
+    let cur: number
+    let dur: number
+    try {
+      status = player.status
+      nativePlaying = player.playing
+      cur = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
+      dur = player.duration
+    } catch {
+      return // released under us (unmount)
+    }
+    const atEnd = endedRef.current || (dur > 0 && cur >= dur - 0.5)
+    const verdict = nativePauseVerdict({ intendsPlaying: playingRef.current, nativePlaying, status, atEnd })
+    if (verdict === 'wait') {
+      scheduleNativeCheck()
+    } else if (verdict === 'reconcile') {
+      // Audio focus loss, a call, unplugged headphones, an error: the film stopped here, so the
+      // room stops too — followers must not run ahead of a frozen host. Resuming is a manual Play.
+      autoPausedRef.current = false
+      overrideRef.current = false
+      try {
+        player.pause()
+      } catch {
+        // already released
+      }
+      setPlaying(false)
+      setHostPlayback(cur, false)
+      revealControls()
+    }
+  })
+  const scheduleNativeCheck = useLatestCallback(() => {
+    if (nativeCheckRef.current) clearTimeout(nativeCheckRef.current)
+    nativeCheckRef.current = setTimeout(checkNativePause, NATIVE_PAUSE_CONFIRM_MS)
+  })
+  useEffect(
+    () => () => {
+      if (nativeCheckRef.current) clearTimeout(nativeCheckRef.current)
+    },
+    [],
+  )
+
   useEffect(() => {
-    const id = setInterval(() => {
-      const cur = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
-      posRef.current = cur
-      setPos(cur)
-    }, 100)
-    return () => clearInterval(id)
-  }, [player])
+    const status = player.addListener('statusChange', ({ status: next, error }) => {
+      setNativeStatus(next)
+      if (next === 'readyToPlay') {
+        setEverReady(true)
+        setPlayerError(null)
+        if (player.duration > 0) setDurationSec(player.duration)
+      } else if (next === 'error') {
+        setPlayerError(error?.message ?? null)
+      }
+      if (next === 'error') scheduleNativeCheck()
+    })
+    const playingSub = player.addListener('playingChange', ({ isPlaying }) => {
+      if (!isPlaying) scheduleNativeCheck()
+    })
+    const load = player.addListener('sourceLoad', ({ duration }) => {
+      if (duration > 0) setDurationSec(duration)
+    })
+    return () => {
+      status.remove()
+      playingSub.remove()
+      load.remove()
+    }
+  }, [player, scheduleNativeCheck])
+
+  // A rebuffer has to last a beat before we say so (drift-seeks blip `loading` constantly).
+  useEffect(() => {
+    if (nativeStatus !== 'loading' && !(nativeStatus === 'idle' && s.movieUri)) {
+      setBuffering(false)
+      return
+    }
+    const id = setTimeout(() => setBuffering(true), BUFFERING_SHOW_MS)
+    return () => clearTimeout(id)
+  }, [nativeStatus, s.movieUri])
+
+  const retryPlayback = useLatestCallback(() => {
+    if (!s.movieUri) return
+    const at = playhead.get()
+    setPlayerError(null)
+    player
+      .replaceAsync(s.movieUri)
+      .then(() => {
+        if (isHost && at > 0) player.currentTime = at // followers re-seek via drift correction
+      })
+      .catch(() => {})
+  })
+  const leaveToLobby = useLatestCallback(() => {
+    void handleBackPress()
+  })
 
   // End of the movie: the host ends the show for everyone (broadcasts a paused state at the end) and
   // both roles show "The End". Reaching the end is NOT a stall, so it must never hold the room.
@@ -185,14 +336,14 @@ export function PlayerScreen() {
         setPlaying(false)
         // Broadcast an explicit ended state at the exact end so followers show "The End" too, even
         // if they paused just shy of EOF and never fired their own playToEnd.
-        setHostPlayback(player.duration || posRef.current, false, 1, true)
+        setHostPlayback(player.duration || playhead.get(), false, 1, true)
       }
     })
     return () => sub.remove()
-  }, [player, isHost, setHostPlayback, revealControls])
+  }, [player, isHost, setHostPlayback, revealControls, playhead])
 
   // ── host: drive playback + keep followers fresh ─────────────────────────────
-  const togglePlay = useCallback(() => {
+  const togglePlay = useLatestCallback(() => {
     revealControls()
     if (playing) {
       autoPausedRef.current = false
@@ -211,19 +362,24 @@ export function PlayerScreen() {
       setPlaying(true)
       setHostPlayback(player.currentTime, true)
     }
-  }, [playing, player, setHostPlayback, revealControls])
+  })
 
-  const skip = useCallback(
-    (delta: number) => {
-      revealControls()
-      setEnded(false)
-      const cur = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
-      const to = Math.max(0, cur + delta)
-      player.currentTime = to
-      setHostPlayback(to, playing)
-    },
-    [player, playing, setHostPlayback, revealControls],
-  )
+  // Host seek (skip buttons, filament scrub, TalkBack adjust): move, show it at once, broadcast.
+  const seekHost = useLatestCallback((toSec: number) => {
+    revealControls()
+    setEnded(false)
+    const max = durationSec > 0 ? durationSec : Number.POSITIVE_INFINITY
+    const to = Math.min(max, Math.max(0, toSec))
+    player.currentTime = to
+    playhead.seekTo(to)
+    setHostPlayback(to, playing)
+  })
+  const skip = useLatestCallback((delta: number) => {
+    const cur = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
+    seekHost(cur + delta)
+  })
+  const skipBack = useCallback(() => skip(-SKIP_SEC), [skip])
+  const skipForward = useCallback(() => skip(SKIP_SEC), [skip])
 
   // Host: "one bad device can't hold the group hostage" (PRD §7) — play through an active hold.
   // The straggler keeps downloading/buffering and its player drift-corrects back into the show
@@ -252,8 +408,7 @@ export function PlayerScreen() {
     if (!pb) return
     if (pb.positionSec > 0) {
       player.currentTime = pb.positionSec
-      posRef.current = pb.positionSec
-      setPos(pb.positionSec)
+      playhead.seekTo(pb.positionSec)
     }
     if (pb.isPlaying) {
       player.play()
@@ -262,10 +417,49 @@ export function PlayerScreen() {
     // mount-only: the host owns playback from here via the controls.
   }, [])
 
+  // App lifecycle. The host is the session's lifeline (PRD §8, architecture §9): if it leaves the
+  // foreground mid-show, pause the room at once and say so — followers must not play on against a
+  // host that stopped (expo-video pauses itself in the background). The session itself stays up
+  // (foreground service); resuming is a deliberate Play. A backgrounded follower stops correcting
+  // (or it would restart audio behind the lock screen) and re-syncs the moment it's back.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      const active = state === 'active'
+      appActiveRef.current = active
+      if (isHost) {
+        if (!active && playingRef.current) {
+          autoPausedRef.current = false
+          overrideRef.current = false
+          let cur = playhead.get()
+          try {
+            cur = Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : cur
+            player.pause()
+          } catch {
+            // released
+          }
+          setPlaying(false)
+          setHostPlayback(cur, false)
+        }
+        return
+      }
+      if (!active) {
+        try {
+          if (player.playing) player.pause()
+        } catch {
+          // released
+        }
+      } else {
+        lastSeekAtRef.current = 0 // we've been away — allow an immediate corrective seek
+        correctRef.current()
+      }
+    })
+    return () => sub.remove()
+  }, [isHost, player, playhead, setHostPlayback])
+
   // Register host transport with session store so approved moderation requests can actuate playback
   useEffect(() => {
     if (!isHost) return
-    s.registerHostTransport({
+    registerHostTransport({
       pause: () => {
         autoPausedRef.current = false
         overrideRef.current = false
@@ -275,8 +469,7 @@ export function PlayerScreen() {
       seekTo: (positionSec: number) => {
         setEnded(false)
         player.currentTime = positionSec
-        posRef.current = positionSec
-        setPos(positionSec)
+        playhead.seekTo(positionSec)
       },
       getCurrentPosition: () => {
         return Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0
@@ -284,9 +477,9 @@ export function PlayerScreen() {
       isPlaying: () => playing,
     })
     return () => {
-      s.registerHostTransport(null)
+      registerHostTransport(null)
     }
-  }, [isHost, player, playing, s.registerHostTransport])
+  }, [isHost, player, playing, registerHostTransport, playhead])
 
   // If host leaves the show (back), pause everyone rather than letting followers run on alone.
   // If follower leaves the show (back), notify session so inShow resets and lobby does not trap.
@@ -295,7 +488,7 @@ export function PlayerScreen() {
     // Use the mirrored position, never the player — by unmount expo-video may have released it
     // (touching a released player throws "shared object already released").
     if (isHost) {
-      setHostPlayback(posRef.current, false)
+      setHostPlayback(playhead.get(), false)
     } else {
       s.exitShow()
     }
@@ -381,6 +574,8 @@ export function PlayerScreen() {
       console.log(`[sync] drift=${(target - actual).toFixed(3)}s lead=${seekLeadRef.current.toFixed(2)}s rate=${appliedRateRef.current.toFixed(3)}`)
     }
   }, [player, hostNowMs])
+  const correctRef = useRef(correct)
+  correctRef.current = correct
 
   // React to each NEW host state: mirror "The End", and let a host DISCONTINUITY (play/pause toggle,
   // rate change, or a seek/skip that jumps the timeline) bypass the seek-settle cooldown so we follow
@@ -398,12 +593,14 @@ export function PlayerScreen() {
       if (discontinuous) lastSeekAtRef.current = 0 // allow an immediate corrective seek to the new point
       lastStateRef.current = pb
     }
-    correct()
+    if (appActiveRef.current) correct()
   }, [isHost, playback, correct])
 
   useEffect(() => {
     if (isHost) return
-    const id = setInterval(correct, CORRECT_MS)
+    const id = setInterval(() => {
+      if (appActiveRef.current) correct()
+    }, CORRECT_MS)
     return () => clearInterval(id)
   }, [isHost, correct])
 
@@ -424,254 +621,338 @@ export function PlayerScreen() {
     return () => clearInterval(id)
   }, [isHost, player, reportPlayback])
 
-  // While the sheet is open we're caught up; the badge counts what lands after it closes.
+  // ── the cabin: chat + reactions ─────────────────────────────────────────────
+  // Unread = lines past a monotonic read cursor; while the sheet is open we're caught up.
+  const chatLog = s.chatLog
   useEffect(() => {
-    if (chatOpen) setChatSeen(s.chatLog.length)
-  }, [chatOpen, s.chatLog.length])
-  const unread = Math.max(0, s.chatLog.length - chatSeen)
+    if (!chatOpen) return
+    const id = lastChatId(chatLog, lastSeenChatId)
+    lastSeenChatId = id
+    setSeenChatId(id)
+  }, [chatOpen, chatLog])
+  const unread = unreadCount(chatLog, seenChatId)
+
+  const chatButtonRef = useRef<View>(null)
+  const openChat = useLatestCallback(() => {
+    revealControls()
+    setChatOpen(true)
+  })
+  const closeChat = useLatestCallback(() => {
+    setChatOpen(false)
+    // Hand screen-reader focus back to where the sheet was opened from.
+    if (screenReader) {
+      setTimeout(() => {
+        if (chatButtonRef.current) AccessibilityInfo.sendAccessibilityEvent(chatButtonRef.current, 'focus')
+      }, 350)
+    }
+  })
+
+  const lastReactAtRef = useRef(0)
+  const onReact = useLatestCallback((emoji: string): boolean => {
+    revealControls() // reacting is interaction — keep the chrome up a bit longer
+    const now = Date.now()
+    if (now - lastReactAtRef.current < LOCAL_REACTION_GAP_MS) return false
+    lastReactAtRef.current = now
+    sendReaction(emoji)
+    return true
+  })
+
+  const approveRequest = useCallback((id: string) => handlePlaybackRequest(id, true), [handlePlaybackRequest])
+  const dismissRequest = useCallback((id: string) => handlePlaybackRequest(id, false), [handlePlaybackRequest])
+  const askPause = useLatestCallback(() => {
+    revealControls()
+    sendPlaybackRequest('pause')
+  })
+  const askRewind = useLatestCallback(() => {
+    revealControls()
+    sendPlaybackRequest('rewind', 15)
+  })
+  const toggleSubtitles = useLatestCallback(() => {
+    revealControls()
+    setSubtitlesEnabled((v) => !v)
+  })
+  // Holding the filament: keep the curtain up for the whole drag (the seek re-arms the auto-hide).
+  const holdControls = useLatestCallback(() => {
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+    setShowControls(true)
+  })
+  const onFilmPress = useLatestCallback(() => (showControls ? setShowControls(false) : revealControls()))
+
+  // ── layout + curtains ────────────────────────────────────────────────────────
+  const cues = s.subtitle?.cues ?? NO_CUES
+  const captionsOn = subtitlesEnabled && cues.length > 0
+  const layout = useMemo(
+    () => playerLayout({ width, height, insets, bottomCurtainHeight: bottomCurtainH, captionsOn }),
+    [width, height, insets, bottomCurtainH, captionsOn],
+  )
+  const onBottomCurtainHeight = useCallback((h: number) => {
+    setBottomCurtainH((prev) => (Math.abs(prev - h) > 1 ? Math.round(h) : prev))
+  }, [])
+
+  const chromeOpen = showControls || ended
+  const curtain = useSharedValue(1)
+  useEffect(() => {
+    curtain.value = withTiming(chromeOpen ? 1 : 0, { duration: motion.base, easing: Easing.bezier(...motion.expoOut) })
+  }, [chromeOpen, curtain])
+  const liftPx = useSharedValue(layout.lift)
+  useEffect(() => {
+    liftPx.value = layout.lift
+  }, [layout.lift, liftPx])
+  const lift = useDerivedValue(() => curtain.value * liftPx.value)
+
+  // ── status ──────────────────────────────────────────────────────────────────
+  const failed = nativeStatus === 'error'
+  const tag: { label: string; tone: SyncTone } = ended
+    ? { label: 'THE END', tone: 'quiet' }
+    : failed
+      ? { label: 'SNAGGED', tone: 'danger' }
+      : s.reconnecting
+        ? { label: 'RECONNECTING…', tone: 'danger' }
+        : buffering
+          ? { label: everReady ? 'BUFFERING…' : 'THREADING…', tone: 'amber' }
+          : isHost
+            ? { label: 'HOSTING', tone: 'cyan' }
+            : inSync
+              ? { label: 'IN SYNC', tone: 'cyan' }
+              : { label: 'CATCHING UP', tone: 'amber' }
+
+  const requestPending = s.playbackRequestStatus === 'pending'
+  const cacheBytes = s.cacheStatus?.totalBytes ?? 0
+  const moderation = isHost ? (s.pendingPlaybackRequests[0] ?? null) : null
+
+  // The line above the filament: the end, a hold for stragglers, or the host's pause.
+  let notice: ReactNode = null
+  if (ended) {
+    notice = (
+      <View style={styles.noticeCol}>
+        <FlapText value="THE END" size={22} />
+        {cacheBytes > 0 ? (
+          <IconButton
+            variant="ghost"
+            size={40}
+            label={`Free up ${formatBytes(cacheBytes)}`}
+            icon={(c) => <Trash2 size={15} color={c} strokeWidth={2} />}
+            accessibilityLabel={`Free up ${formatBytes(cacheBytes)} of storage`}
+            onPress={() => {
+              revealControls()
+              setShowCleanupSheet(true)
+            }}
+          />
+        ) : null}
+      </View>
+    )
+  } else if (isHost && waiting.length > 0) {
+    notice = playing ? (
+      <Text variant="data" tone="secondary" style={styles.noticeText} numberOfLines={2}>
+        {`Playing on without ${waiting.join(', ')} — they'll catch up`}
+      </Text>
+    ) : (
+      <View style={styles.noticeCol}>
+        <Text variant="data" tone="secondary" style={styles.noticeText} numberOfLines={2}>
+          {`Holding for ${waiting.join(', ')} to catch up…`}
+        </Text>
+        <Button title={`Play without ${waiting.length > 1 ? 'them' : waiting[0]}`} intent="cyan" height={44} onPress={playWithout} />
+      </View>
+    )
+  } else if (!isHost && playback && !playback.isPlaying) {
+    notice = (
+      <Text variant="data" tone="secondary" style={styles.noticeText}>
+        Paused by host
+      </Text>
+    )
+  }
+
+  const transport = isHost ? (
+    <View style={[styles.transport, layout.wide && styles.transportWide]}>
+      <IconButton
+        variant="plain"
+        size={52}
+        icon={(c) => <RotateCcw size={26} color={c} strokeWidth={2} />}
+        accessibilityLabel={`Back ${SKIP_SEC} seconds, for everyone`}
+        onPress={skipBack}
+      />
+      <IconButton
+        variant="amber"
+        size={64}
+        icon={(c) => (playing ? <Pause size={28} color={c} strokeWidth={2.5} /> : <Play size={28} color={c} strokeWidth={2.5} />)}
+        accessibilityLabel={playing ? 'Pause for everyone' : 'Play for everyone'}
+        onPress={togglePlay}
+      />
+      <IconButton
+        variant="plain"
+        size={52}
+        icon={(c) => <RotateCw size={26} color={c} strokeWidth={2} />}
+        accessibilityLabel={`Forward ${SKIP_SEC} seconds, for everyone`}
+        onPress={skipForward}
+      />
+    </View>
+  ) : ended ? (
+    <View />
+  ) : (
+    <View style={styles.requests}>
+      <IconButton
+        variant="glass"
+        size={40}
+        label="Ask to pause"
+        disabled={requestPending}
+        icon={(c) => <Pause size={14} color={requestPending ? c : t.palette.amber} strokeWidth={2} />}
+        accessibilityLabel="Ask the host to pause"
+        onPress={askPause}
+      />
+      <IconButton
+        variant="glass"
+        size={40}
+        label="Rewind 15s"
+        disabled={requestPending}
+        icon={(c) => <RotateCcw size={14} color={requestPending ? c : t.palette.amber} strokeWidth={2} />}
+        accessibilityLabel="Ask the host to rewind 15 seconds"
+        onPress={askRewind}
+      />
+    </View>
+  )
+
+  const rail = (
+    <ReactionRail onReact={onReact} onOpenChat={openChat} unread={unread} keySize={layout.railKey} chatButtonRef={chatButtonRef} />
+  )
+  const scrubber = (
+    <Scrubber playhead={playhead} durationSec={durationSec} interactive={isHost} onSeek={seekHost} onScrubStart={holdControls} />
+  )
+  const sidePad = { paddingLeft: layout.sideLeft, paddingRight: layout.sideRight }
 
   return (
     <View style={styles.fill}>
-      <Pressable style={StyleSheet.absoluteFill} onPress={() => (showControls ? setShowControls(false) : revealControls())}>
-        <VideoView style={StyleSheet.absoluteFill} player={player} contentFit="contain" nativeControls={false} />
-      </Pressable>
+      {/* Everything under the chat sheet; hidden from TalkBack while the sheet (a modal layer) is open. */}
+      <View style={StyleSheet.absoluteFill} importantForAccessibility={chatOpen ? 'no-hide-descendants' : 'auto'}>
+        <Pressable
+          style={StyleSheet.absoluteFill}
+          onPress={onFilmPress}
+          accessibilityRole="button"
+          accessibilityLabel={chromeOpen ? 'Hide controls' : 'Show controls'}
+        >
+          <VideoView style={StyleSheet.absoluteFill} player={player} contentFit="contain" nativeControls={false} />
+        </Pressable>
 
-      {/* the cabin: reactions drift up the right edge, fresh chat fades in like subtitles */}
-      <FloatingReactions reactions={s.reactions} />
-      {!chatOpen && <ChatTicker log={s.chatLog} />}
+        <PlayerStatusOverlay
+          state={buffering && !ended ? 'loading' : 'ok'}
+          firstLoad={!everReady}
+          isHost={isHost}
+          onRetry={retryPlayback}
+          onLeave={leaveToLobby}
+        />
 
-      {/* captions: synchronized subtitles overlay */}
-      <CaptionOverlay
-        cues={s.subtitle?.cues ?? []}
-        currentTimeSec={pos}
-        visible={subtitlesEnabled}
-        bottomOffset={showControls || ended ? insets.bottom + 80 : insets.bottom + 44}
-      />
-
-      {/* host moderation banner */}
-      {isHost && s.pendingPlaybackRequests.length > 0 ? (
-        <View style={[styles.bannerContainer, { top: insets.top + 60 }]} pointerEvents="box-none">
-          <ModerationBanner
-            request={s.pendingPlaybackRequests[0] ?? null}
-            onApprove={(id) => s.handlePlaybackRequest(id, true)}
-            onDismiss={(id) => s.handlePlaybackRequest(id, false)}
+        {/* the middle band: captions low and centred; chat ticker left and reactions right above them.
+            All rest near the bottom and lift together, on the UI thread, when the curtain opens. */}
+        <CaptionOverlay
+          cues={cues}
+          playhead={playhead}
+          visible={subtitlesEnabled}
+          bottomOffset={layout.captionBottom}
+          left={layout.sideLeft + 4}
+          right={layout.sideRight + 4}
+          lift={lift}
+        />
+        {!chatOpen && (
+          <ChatTicker
+            log={chatLog}
+            bottom={layout.socialBottom}
+            left={layout.sideLeft}
+            right={layout.sideRight + reactionLaneSpan(layout.reactionRoom) + 8}
+            lift={lift}
           />
-        </View>
-      ) : null}
+        )}
+        <FloatingReactions
+          reactions={s.reactions}
+          bottom={layout.socialBottom}
+          right={layout.sideRight}
+          room={layout.reactionRoom}
+          lift={lift}
+        />
 
-      {/* follower request feedback toast */}
-      {!isHost && s.playbackRequestStatus !== 'idle' ? (
-        <View style={[styles.toastContainer, { top: insets.top + 60 }]} pointerEvents="none">
-          <RequestFeedbackToast
-            status={s.playbackRequestStatus}
-            onDismiss={s.clearPlaybackRequestStatus}
-          />
-        </View>
-      ) : null}
-
-      {showControls || ended ? (
-        <View style={[styles.overlay, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 24 }]} pointerEvents="box-none">
-          {/* top bar */}
-          <View style={styles.topBar} pointerEvents="box-none">
-            <Pressable
-              onPress={handleBackPress}
-              hitSlop={12}
-              style={[styles.iconBtn, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}
-            >
-              <ChevronLeft size={20} color={t.palette.textSecondary} strokeWidth={2.25} />
-            </Pressable>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-              {s.subtitle ? (
-                <Pressable
-                  onPress={() => setSubtitlesEnabled((v) => !v)}
-                  hitSlop={12}
-                  style={[
-                    styles.iconBtn,
-                    {
-                      borderColor: subtitlesEnabled ? t.palette.cyan : t.palette.hairline,
-                      backgroundColor: subtitlesEnabled ? 'rgba(87,210,230,0.15)' : t.palette.raised,
-                    },
-                  ]}
-                >
-                  <Subtitles
-                    size={18}
-                    color={subtitlesEnabled ? t.palette.cyan : t.palette.textTertiary}
-                    strokeWidth={2}
-                  />
-                </Pressable>
-              ) : null}
-              <View style={styles.syncTag}>
-                <View
-                  style={[
-                    styles.dot,
-                    { backgroundColor: s.reconnecting ? t.palette.danger : inSync ? t.palette.cyan : t.palette.amber },
-                  ]}
-                />
-                <Text variant="eyebrow" tone="secondary">
-                  {ended
-                    ? 'THE END'
-                    : s.reconnecting
-                      ? 'RECONNECTING…'
-                      : isHost
-                        ? 'HOSTING'
-                        : inSync
-                          ? 'IN SYNC'
-                          : 'CATCHING UP'}
-                </Text>
-              </View>
-            </View>
-          </View>
-
-          {/* middle: host transport (always available, even while holding, so the host is never
-              stuck), or the follower's status */}
-          {isHost ? (
-            <View style={styles.transport} pointerEvents="box-none">
-              <Pressable onPress={() => skip(-SKIP_SEC)} hitSlop={12} style={styles.transportBtn}>
-                <RotateCcw size={26} color={t.palette.textPrimary} strokeWidth={2} />
-              </Pressable>
-              <Pressable
-                onPress={togglePlay}
-                hitSlop={12}
-                style={[styles.playBtn, { backgroundColor: t.palette.amber }]}
-              >
-                {playing ? <Pause size={30} color="#0A0E16" strokeWidth={2.5} /> : <Play size={30} color="#0A0E16" strokeWidth={2.5} />}
-              </Pressable>
-              <Pressable onPress={() => skip(SKIP_SEC)} hitSlop={12} style={styles.transportBtn}>
-                <RotateCw size={26} color={t.palette.textPrimary} strokeWidth={2} />
-              </Pressable>
-            </View>
-          ) : (
-            <View style={styles.transport} pointerEvents="none">
-              <Text variant="data" tone="tertiary">
-                {ended || playing || s.playback?.isPlaying ? '' : 'paused by host'}
+        <Curtain edge="top" progress={curtain} open={chromeOpen}>
+          <View style={[styles.topBar, sidePad, { paddingTop: insets.top + 10 }]} pointerEvents="box-none">
+            <IconButton
+              variant="glass"
+              size={44}
+              icon={(c) => <ChevronLeft size={20} color={c} strokeWidth={2.25} />}
+              accessibilityLabel={ended ? 'Leave the show' : 'Back to the lobby'}
+              onPress={leaveToLobby}
+            />
+            <View style={styles.titleCol} accessible accessibilityRole="header">
+              <Text variant="eyebrow" tone="amber" numberOfLines={1}>
+                {isHost ? 'NOW SHOWING · HOST' : 'NOW SHOWING'}
               </Text>
+              {s.movie?.title ? (
+                <Text variant="caption" tone="primary" numberOfLines={1}>
+                  {s.movie.title}
+                </Text>
+              ) : null}
             </View>
-          )}
+            {s.subtitle ? (
+              <IconButton
+                variant="glass"
+                size={44}
+                selected={subtitlesEnabled}
+                haptic="selection"
+                icon={(c) => <Subtitles size={18} color={c} strokeWidth={2} />}
+                accessibilityLabel="Subtitles"
+                accessibilityHint={subtitlesEnabled ? 'Turns subtitles off' : 'Turns subtitles on'}
+                onPress={toggleSubtitles}
+              />
+            ) : null}
+            <SyncTag label={tag.label} tone={tag.tone} />
+          </View>
+        </Curtain>
 
-          {/* bottom: a "holding for stragglers" notice + the host's way out, else the position */}
-          <View style={styles.bottomBar} pointerEvents="box-none">
-            {!ended && isHost && waiting.length > 0 && !playing ? (
-              <View style={styles.holdRow} pointerEvents="box-none">
-                <Text variant="data" tone="secondary">
-                  {`Holding for ${waiting.join(', ')} to catch up…`}
-                </Text>
-                <Button
-                  title={`Play without ${waiting.length > 1 ? 'them' : waiting[0]}`}
-                  intent="cyan"
-                  height={44}
-                  onPress={playWithout}
-                />
-              </View>
+        <Curtain edge="bottom" progress={curtain} open={chromeOpen} onHeight={onBottomCurtainHeight}>
+          <View style={[styles.bottomBar, sidePad, { paddingBottom: insets.bottom + 12 }]} pointerEvents="box-none">
+            {notice ? <View style={styles.noticeRow}>{notice}</View> : null}
+            {layout.wide ? (
+              <>
+                {scrubber}
+                <View style={styles.wideRow} pointerEvents="box-none">
+                  {transport}
+                  {rail}
+                </View>
+              </>
             ) : (
-              <View style={styles.timeAndActionsCol} pointerEvents="box-none">
-                <Text variant="data" tone="secondary">
-                  {ended
-                    ? 'The End'
-                    : isHost && waiting.length > 0
-                      ? `Holding for ${waiting.join(', ')} to catch up…`
-                      : `${fmt(pos)}${player.duration ? ` / ${fmt(player.duration)}` : ''}`}
-                </Text>
-                {ended && (s.cacheStatus?.totalBytes ?? 0) > 0 ? (
-                  <Pressable
-                    onPress={() => {
-                      revealControls()
-                      setShowCleanupSheet(true)
-                    }}
-                    hitSlop={8}
-                    accessibilityRole="button"
-                    accessibilityLabel="Free up storage space"
-                    style={[
-                      styles.reqBtn,
-                      {
-                        borderColor: t.palette.amber,
-                        backgroundColor: 'rgba(255,178,92,0.14)',
-                        paddingHorizontal: 16,
-                        paddingVertical: 8,
-                        marginTop: 10,
-                      },
-                    ]}
-                  >
-                    <Trash2 size={15} color={t.palette.amber} strokeWidth={2} />
-                    <Text variant="caption" tone="primary" style={[styles.reqBtnText, { color: t.palette.amber }]}>
-                      {`Free up ${formatBytes(s.cacheStatus?.totalBytes ?? 0)}`}
-                    </Text>
-                  </Pressable>
-                ) : null}
-                {!isHost && !ended ? (
-                  <View style={styles.followerControlsRow} pointerEvents="box-none">
-                    <Pressable
-                      onPress={() => {
-                        revealControls()
-                        s.sendPlaybackRequest('pause')
-                      }}
-                      disabled={s.playbackRequestStatus === 'pending'}
-                      hitSlop={8}
-                      accessibilityRole="button"
-                      accessibilityLabel="Request pause"
-                      style={[
-                        styles.reqBtn,
-                        {
-                          borderColor: t.palette.hairline,
-                          backgroundColor: t.palette.raised,
-                          opacity: s.playbackRequestStatus === 'pending' ? 0.5 : 1,
-                        },
-                      ]}
-                    >
-                      <Pause size={14} color={t.palette.amber} strokeWidth={2} />
-                      <Text variant="caption" tone="primary" style={styles.reqBtnText}>
-                        [Req Pause]
-                      </Text>
-                    </Pressable>
-                    <Pressable
-                      onPress={() => {
-                        revealControls()
-                        s.sendPlaybackRequest('rewind', 15)
-                      }}
-                      disabled={s.playbackRequestStatus === 'pending'}
-                      hitSlop={8}
-                      accessibilityRole="button"
-                      accessibilityLabel="Request rewind 15 seconds"
-                      style={[
-                        styles.reqBtn,
-                        {
-                          borderColor: t.palette.hairline,
-                          backgroundColor: t.palette.raised,
-                          opacity: s.playbackRequestStatus === 'pending' ? 0.5 : 1,
-                        },
-                      ]}
-                    >
-                      <RotateCcw size={14} color={t.palette.amber} strokeWidth={2} />
-                      <Text variant="caption" tone="primary" style={styles.reqBtnText}>
-                        [Req -15s]
-                      </Text>
-                    </Pressable>
-                  </View>
-                ) : null}
-              </View>
+              <>
+                {rail}
+                {scrubber}
+                {transport}
+              </>
             )}
           </View>
-        </View>
-      ) : null}
+        </Curtain>
+      </View>
 
-      {/* The reaction rail rides with the controls — tap the film to bring both back — so the
-          movie plays unobstructed. Chat open pins it up (you're mid-conversation). */}
-      {showControls || ended || chatOpen ? (
-        <ReactionRail
-          onReact={(e) => {
-            revealControls() // reacting is interaction — keep the chrome up a bit longer
-            s.sendReaction(e)
-          }}
-          onOpenChat={() => setChatOpen(true)}
-          unread={unread}
-          bottom={insets.bottom + 64}
+      {failed ? (
+        <PlayerStatusOverlay
+          state="error"
+          firstLoad={!everReady}
+          isHost={isHost}
+          detail={playerError}
+          onRetry={retryPlayback}
+          onLeave={leaveToLobby}
         />
       ) : null}
 
-      <ChatSheet visible={chatOpen} log={s.chatLog} onSend={s.sendChat} onClose={() => setChatOpen(false)} />
+      <ChatSheet visible={chatOpen} log={chatLog} onSend={sendChat} onClose={closeChat} />
+
+      {/* Time-boxed host prompt and guest feedback sit above even the chat: they expire on their own. */}
+      {moderation ? (
+        <View style={[styles.topLayer, sidePad, { top: layout.bannerTop }]} pointerEvents="box-none">
+          <ModerationBanner request={moderation} onApprove={approveRequest} onDismiss={dismissRequest} />
+        </View>
+      ) : null}
+      {!isHost && s.playbackRequestStatus !== 'idle' ? (
+        <View style={[styles.topLayer, styles.centered, sidePad, { top: layout.bannerTop }]} pointerEvents="none">
+          <RequestFeedbackToast status={s.playbackRequestStatus} onDismiss={clearPlaybackRequestStatus} />
+        </View>
+      ) : null}
 
       <CleanupSheet
         visible={showCleanupSheet}
-        totalBytes={s.cacheStatus?.totalBytes ?? 0}
+        totalBytes={cacheBytes}
         movieBytes={s.cacheStatus?.movieBytes}
         subtitleBytes={s.cacheStatus?.subtitleBytes}
         onDeleteAndLeave={handleDeleteAndLeave}
@@ -684,51 +965,17 @@ export function PlayerScreen() {
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1, backgroundColor: '#000' },
-  overlay: { ...StyleSheet.absoluteFill, justifyContent: 'space-between', paddingHorizontal: 20 },
-  topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  iconBtn: { width: 40, height: 40, borderRadius: 20, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
-  syncTag: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  dot: { width: 8, height: 8, borderRadius: 4 },
-  transport: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 36 },
-  transportBtn: { width: 52, height: 52, alignItems: 'center', justifyContent: 'center' },
-  playBtn: { width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center' },
-  bottomBar: { alignItems: 'center' },
-  // Sits above the reaction rail (which floats at ~bottom+64 while controls are up).
-  holdRow: { alignItems: 'center', gap: 10, marginBottom: 96 },
-  bannerContainer: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    zIndex: 30,
-  },
-  toastContainer: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    zIndex: 30,
-  },
-  timeAndActionsCol: {
-    alignItems: 'center',
-    gap: 8,
-  },
-  followerControlsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginTop: 4,
-  },
-  reqBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: radii.pill,
-    borderWidth: 1,
-  },
-  reqBtnText: {
-    fontFamily: 'SpaceGrotesk_500Medium',
-  },
+  fill: { flex: 1, backgroundColor: palette.black },
+  topBar: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingBottom: 28 },
+  titleCol: { flex: 1, minWidth: 0 },
+  bottomBar: { paddingTop: 36, gap: 10 },
+  noticeRow: { alignItems: 'center' },
+  noticeCol: { alignItems: 'center', gap: 10 },
+  noticeText: { textAlign: 'center' },
+  transport: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 32 },
+  transportWide: { gap: 20, justifyContent: 'flex-start' },
+  requests: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, flexWrap: 'wrap' },
+  wideRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 16 },
+  topLayer: { position: 'absolute', left: 0, right: 0, zIndex: 110, elevation: 110 },
+  centered: { alignItems: 'center' },
 })
