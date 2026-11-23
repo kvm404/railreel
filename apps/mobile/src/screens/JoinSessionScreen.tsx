@@ -96,6 +96,10 @@ export function JoinSessionScreen({ params }: { params?: NavParams }) {
       seen.current.delete(e.name)
       setCabins((prev) => prev.filter((c) => c.name !== e.name))
     })
+    // Android reports a failed start ASYNCHRONOUSLY (onStartDiscoveryFailed, after startDiscovery()
+    // already resolved), so the event — not the promise — is what flips the failed state. The
+    // listener belongs to this attempt and is removed on cleanup, so a stale failure can't leak in.
+    const failedEvt = RailReelHost.addListener('onNsdError', () => setStartFailed(true))
     let alive = true
     RailReelHost.startDiscovery().catch(() => {
       if (alive) setStartFailed(true)
@@ -106,6 +110,7 @@ export function JoinSessionScreen({ params }: { params?: NavParams }) {
       clearTimeout(grace)
       found.remove()
       lost.remove()
+      failedEvt.remove()
       RailReelHost.stopDiscovery().catch(() => {})
     }
   }, [attempt])

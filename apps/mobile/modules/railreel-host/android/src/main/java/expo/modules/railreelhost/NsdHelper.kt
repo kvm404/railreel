@@ -15,7 +15,7 @@ import android.net.nsd.NsdServiceInfo
  */
 class NsdHelper(
   private val ctx: Context,
-  /** (event, payload) — "found" carries host/port/txt, "lost" the service name. */
+  /** (event, payload) — "found" carries host/port/txt, "lost" the service name, "error" the NSD error code. */
   private val emit: (String, Map<String, Any?>) -> Unit,
 ) {
   private val nsd: NsdManager = ctx.getSystemService(Context.NSD_SERVICE) as NsdManager
@@ -60,7 +60,12 @@ class NsdHelper(
       stopDiscoveryLocked()
       val listener = object : NsdManager.DiscoveryListener {
         override fun onDiscoveryStarted(type: String) {}
-        override fun onStartDiscoveryFailed(type: String, error: Int) {}
+        // Asynchronous: startDiscovery()'s promise has already resolved by now, so the JS side
+        // learns about the failure ONLY through this event (it drives the Join "failed" state).
+        override fun onStartDiscoveryFailed(type: String, error: Int) {
+          synchronized(lock) { if (discovery === this) discovery = null }
+          emit("error", mapOf("code" to error))
+        }
         override fun onStopDiscoveryFailed(type: String, error: Int) {}
         override fun onDiscoveryStopped(type: String) {}
         override fun onServiceFound(info: NsdServiceInfo) {
