@@ -1,5 +1,6 @@
 import js from '@eslint/js'
 import globals from 'globals'
+import reactHooks from 'eslint-plugin-react-hooks'
 import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
@@ -31,6 +32,12 @@ export default defineConfig([
       ecmaVersion: 2022,
       globals: { ...globals.node },
     },
+  },
+  {
+    // rules-of-hooks only: exhaustive-deps is intentionally not enabled.
+    files: ['**/*.{ts,tsx}'],
+    plugins: { 'react-hooks': reactHooks },
+    rules: { 'react-hooks/rules-of-hooks': 'error' },
   },
   {
     files: ['apps/mobile/**/*.{ts,tsx}'],
