@@ -37,12 +37,33 @@ export interface MediaInfo {
   /** Video frame size (0 = unknown) — for the client decode-capability check (a 4K file is a slideshow on a 1080p-max decoder). */
   width?: number
   height?: number
+  /** Android mime of the first video / audio track (e.g. "video/avc"). Guests check THEIR decoder against the real codec; absent from older hosts → assume H.264. */
+  videoMime?: string
+  audioMime?: string
   /** Sidecar subtitle metadata attached by the host. */
   subtitle?: {
     name: string
     sizeBytes: number
     content?: string
   }
+}
+
+/** Validate media metadata off the wire before it drives buffer math or decode checks. */
+export function isMediaInfo(m: unknown): m is MediaInfo {
+  if (typeof m !== 'object' || m === null) return false
+  const o = m as Record<string, unknown>
+  return (
+    typeof o.title === 'string' &&
+    typeof o.sizeBytes === 'number' &&
+    Number.isFinite(o.sizeBytes) &&
+    o.sizeBytes > 0 &&
+    typeof o.durationSec === 'number' &&
+    Number.isFinite(o.durationSec) &&
+    o.durationSec >= 0 &&
+    // Optional codec hints: wrong-typed values reject the whole media block, like the other fields.
+    (o.videoMime === undefined || typeof o.videoMime === 'string') &&
+    (o.audioMime === undefined || typeof o.audioMime === 'string')
+  )
 }
 
 /** Everything a client needs to connect to a host, encoded into the QR/link. */

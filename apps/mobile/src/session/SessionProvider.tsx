@@ -25,6 +25,7 @@ import {
   type ChatEntry,
   type ReactionEvent,
 } from '@/lib/social/feed'
+import { mediaVerdict } from '@/lib/media/compat'
 import { batteryWarning, decodeWarning, storageWarning } from '@/lib/media/preflight'
 import { downloadBufferedAheadSec, smoothedMbps, updateFloorHolds } from '@/lib/sync/startGate'
 import { randomBytes } from '@/net/random'
@@ -33,6 +34,7 @@ import {
   encodeJoinUrl,
   generateGrant,
   generateSessionId,
+  isMediaInfo,
   isValidSecret,
   newSession,
   parseClientMsg,
@@ -753,6 +755,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }
       const asset = picked.assets[0]
 
+      // Vet the file BEFORE anything is acquired (no servers, no foreground-service notification,
+      // no permission prompt): every guest downloads its own copy, so a file the host can play but
+      // a guest can't (HEVC/AV1, MKV, AC3…) would cost them GBs and then fail in the player.
+      // A probe that throws means the container couldn't be parsed at all → rejected as unreadable.
+      // (A MISSING duration on an otherwise-valid MP4 is not a throw: it comes back as 0 and the
+      // start gate degrades to full pre-cache, below.)
+      const probed = await RailReelHost.probe(asset.uri).catch(() => null)
+      if (stale()) return // nothing acquired yet
+      const verdict = mediaVerdict(probed)
+      if (!verdict.ok || !probed) {
+        hostStartRef.current = null
+        setError(verdict.ok ? null : verdict.message)
+        setHostPhase('idle')
+        return
+      }
+
       // Android 13+ needs runtime notification permission for the foreground-service notification.
       if (Platform.OS === 'android' && Number(Platform.Version) >= 33) {
         await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS).catch(() => {})
@@ -788,10 +806,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setJoinCode(humanCode(sessionId))
 
       // Duration powers the progressive start gate (progress → seconds buffered); fastStart says
-      // whether a partial copy is even playable. If the probe fails we keep going with 0/false:
+      // whether a partial copy is even playable. A file without a readable duration still hosts:
       // the gate then degrades to "start after full pre-cache".
-      const probed = await RailReelHost.probe(asset.uri).catch(() => ({ durationSec: 0, fastStart: false, width: 0, height: 0 }))
-      if (stale()) return abandon()
       const durationSec = Number.isFinite(probed.durationSec) && probed.durationSec > 0 ? probed.durationSec : 0
       const fastStart = probed.fastStart === true
       const sizeBytes = asset.size ?? 0
@@ -806,6 +822,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         fastStart,
         width: probed.width || 0,
         height: probed.height || 0,
+        videoMime: probed.videoMime,
+        audioMime: probed.audioMime,
         ...(subtitleRef.current
           ? {
               subtitle: {
@@ -1259,7 +1277,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               // (PRD accepts H.264 only, so video/avc.) Warn here, and flag the host via beats.
               const w = m.media.width ?? 0
               const h = m.media.height ?? 0
-              const ok = w > 0 && h > 0 ? RailReelHost.canDecode('video/avc', w, h) : true
+              const ok = w > 0 && h > 0 ? RailReelHost.canDecode(m.media.videoMime || 'video/avc', w, h) : true
               decodeOkRef.current = ok
               setDecodeCaution(decodeWarning(ok, h))
             }
@@ -1657,21 +1675,6 @@ function isParticipantInfo(p: unknown): p is ParticipantInfo {
     PARTICIPANT_STATUSES.includes(o.status) &&
     typeof o.progress === 'number' &&
     typeof o.downloadMbps === 'number'
-  )
-}
-
-/** Validate the media metadata off the roster before it drives buffer math. */
-function isMediaInfo(m: unknown): m is MediaInfo {
-  if (typeof m !== 'object' || m === null) return false
-  const o = m as Record<string, unknown>
-  return (
-    typeof o.title === 'string' &&
-    typeof o.sizeBytes === 'number' &&
-    Number.isFinite(o.sizeBytes) &&
-    o.sizeBytes > 0 &&
-    typeof o.durationSec === 'number' &&
-    Number.isFinite(o.durationSec) &&
-    o.durationSec >= 0
   )
 }
 

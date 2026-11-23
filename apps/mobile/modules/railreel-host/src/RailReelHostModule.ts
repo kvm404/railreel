@@ -3,6 +3,25 @@ import { Platform } from 'react-native'
 
 export type HostPorts = { httpPort: number; wsPort: number }
 
+/** What `probe` reports about the picked file (see the native module for how each is derived). */
+export type MediaProbeResult = {
+  /** 0 when the container carries no readable duration. */
+  durationSec: number
+  fastStart: boolean
+  /** Frame size, 0 when unknown. */
+  width: number
+  height: number
+  /** Android mime of the FIRST video track (e.g. "video/avc", "video/hevc"); "" if none. */
+  videoMime: string
+  /** Android mime of the FIRST audio track (e.g. "audio/mp4a-latm", "audio/ac3"); "" if none. */
+  audioMime: string
+  /** All tracks the extractor found (video + audio + text/other). */
+  trackCount: number
+  audioTrackCount: number
+  /** Container hint sniffed from the first bytes: "mp4" | "quicktime" | "matroska" | "unknown". */
+  container: string
+}
+
 type RailReelHostEvents = {
   onWsOpen: () => void
   onWsClose: (event?: { id?: string }) => void
@@ -31,12 +50,13 @@ declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
   /** Stop both servers + the foreground service. */
   stop(): Promise<void>
   /**
-   * Read media metadata from a file:// or content:// source, for the start-gate math.
+   * Read media metadata + real track codecs from a file:// or content:// source — for the
+   * start-gate math and the H.264/AAC-in-MP4 compatibility verdict (`lib/media/compat`).
    * `fastStart` = the MP4's moov atom precedes mdat, i.e. a player can open a partial file —
    * false means only a full pre-cache start is safe. `width`/`height` are 0 when unknown and
-   * feed the (future) client decode-capability check.
+   * feed the client decode-capability check. Rejects when the container can't be parsed.
    */
-  probe(fileUri: string): Promise<{ durationSec: number; fastStart: boolean; width: number; height: number }>
+  probe(fileUri: string): Promise<MediaProbeResult>
   /**
    * Client: start the localhost playback proxy over the still-downloading movie file, declaring
    * its final size — the player streams from this instead of opening a partially-written file.

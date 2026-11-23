@@ -140,31 +140,44 @@ class RailReelHostModule : Module() {
       }
     }
 
-    // Probe the media the host picked: duration (start-gate math) and whether the MP4 is
-    // "faststart" (moov before mdat) — a player can only open a PARTIALLY-downloaded file if the
-    // moov atom is at the front, so non-faststart files must fully pre-cache before the show.
-    // Works for both file:// paths and content:// (SAF) documents.
+    // Probe the media the host picked BEFORE any server starts. Two jobs:
+    //  1. Start-gate inputs: duration, frame size, and whether the MP4 is "faststart" (moov before
+    //     mdat) — a player can only open a PARTIALLY-downloaded file if the moov atom is at the
+    //     front, so non-faststart files must fully pre-cache before the show.
+    //  2. Compatibility inputs (PRD §7: H.264 + AAC in MP4 only): the container hint and the real
+    //     track mimes, read by MediaExtractor — the retriever alone happily reports a duration for
+    //     HEVC/AV1/MKV files that guests would download in full and then fail to play.
+    // Works for both file:// paths and content:// (SAF) documents. Throws only when the container
+    // can't be parsed at all (JS treats that as "unreadable"); a missing duration/size degrades to
+    // 0 so an otherwise-valid MP4 still hosts, in pre-cache mode.
     AsyncFunction("probe") { fileUri: String ->
       val ctx = appContext.reactContext ?: throw CodedException("No app context")
-      val retriever = android.media.MediaMetadataRetriever()
       try {
-        if (fileUri.startsWith("content://")) {
-          retriever.setDataSource(ctx, Uri.parse(fileUri))
-        } else {
-          retriever.setDataSource(fileUri.removePrefix("file://"))
+        val container = sniffContainer(ctx, fileUri)
+        // The platform extractor is strict: it can fail outright, or skip tracks whose sample
+        // entry it doesn't know (e.g. H.264 stored as `avc3`, common in fragmented MP4 — which
+        // Media3, our player, plays fine). So an extractor miss is NOT a verdict: for ISO files we
+        // fall back to reading the sample-entry fourccs straight out of the moov box.
+        val extractorTracks = try { readTracks(ctx, fileUri) } catch (e: Exception) { null }
+        var tracks = extractorTracks ?: TrackSummary("", "", 0, 0, 0, 0, 0L)
+        if ((container == "mp4" || container == "quicktime") &&
+          (tracks.videoMime.isEmpty() || tracks.audioMime.isEmpty())
+        ) {
+          val iso = readIsoTracks(ctx, fileUri)
+          if (iso != null) tracks = mergeTracks(tracks, iso)
         }
-        val durationMs = retriever
-          .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
-          ?.toLongOrNull()
-          ?: throw CodedException("Media has no readable duration")
-        // Resolution feeds the (future) client decode-capability check — a 4K file plays as a
-        // slideshow on phones whose hardware decoder tops out at 1080p.
-        val width = retriever
-          .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-          ?.toIntOrNull() ?: 0
-        val height = retriever
-          .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-          ?.toIntOrNull() ?: 0
+        // Nothing could be read by either route (and it isn't a Matroska file we can name) → the
+        // JS side reports "unreadable".
+        if (extractorTracks == null && tracks.trackCount == 0 && container != "matroska") {
+          throw CodedException("Cannot read media tracks")
+        }
+        val (retrieverDurationMs, retrieverWidth, retrieverHeight) = readRetrieverMeta(ctx, fileUri)
+        // Resolution feeds the client decode-capability check — a 4K file plays as a slideshow on
+        // phones whose hardware decoder tops out at 1080p. Fall back to the track format when the
+        // retriever has nothing (it is the less forgiving of the two on odd containers).
+        val durationMs = if (retrieverDurationMs > 0) retrieverDurationMs else tracks.durationMs
+        val width = if (retrieverWidth > 0) retrieverWidth else tracks.width
+        val height = if (retrieverHeight > 0) retrieverHeight else tracks.height
         val fastStart = runCatching {
           openMediaStream(ctx.contentResolver, fileUri).use { isFastStart(it) }
         }.getOrNull()
@@ -175,13 +188,16 @@ class RailReelHostModule : Module() {
           "fastStart" to (fastStart ?: false),
           "width" to width,
           "height" to height,
+          "videoMime" to tracks.videoMime,
+          "audioMime" to tracks.audioMime,
+          "trackCount" to tracks.trackCount,
+          "audioTrackCount" to tracks.audioTrackCount,
+          "container" to container,
         )
       } catch (e: CodedException) {
         throw e
       } catch (e: Exception) {
         throw CodedException("Cannot probe media: ${e.message}")
-      } finally {
-        runCatching { retriever.release() }
       }
     }
 
@@ -406,6 +422,322 @@ class RailReelHostModule : Module() {
     }
     return null
   }
+
+  /** What MediaExtractor found inside the file: first video/audio mime ("" if none) + counts. */
+  private class TrackSummary(
+    val videoMime: String,
+    val audioMime: String,
+    val trackCount: Int,
+    val audioTrackCount: Int,
+    val width: Int,
+    val height: Int,
+    val durationMs: Long,
+  )
+
+  /**
+   * Enumerate the container's tracks. MediaExtractor only PARSES (it never instantiates a
+   * decoder), so HEVC/AV1 report their real mime even on phones that can't decode them. Throws if
+   * the file can't be parsed; the extractor is always released.
+   */
+  private fun readTracks(ctx: android.content.Context, fileUri: String): TrackSummary {
+    val extractor = android.media.MediaExtractor()
+    try {
+      if (fileUri.startsWith("content://")) {
+        extractor.setDataSource(ctx, Uri.parse(fileUri), null)
+      } else {
+        extractor.setDataSource(fileUri.removePrefix("file://"))
+      }
+      var videoMime = ""
+      var audioMime = ""
+      var audioTracks = 0
+      var width = 0
+      var height = 0
+      var durationUs = 0L
+      for (i in 0 until extractor.trackCount) {
+        val format = extractor.getTrackFormat(i)
+        val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: continue
+        if (mime.startsWith("video/")) {
+          if (videoMime.isEmpty()) {
+            videoMime = mime
+            if (format.containsKey(android.media.MediaFormat.KEY_WIDTH)) {
+              width = format.getInteger(android.media.MediaFormat.KEY_WIDTH)
+            }
+            if (format.containsKey(android.media.MediaFormat.KEY_HEIGHT)) {
+              height = format.getInteger(android.media.MediaFormat.KEY_HEIGHT)
+            }
+          }
+        } else if (mime.startsWith("audio/")) {
+          audioTracks++
+          if (audioMime.isEmpty()) audioMime = mime
+        }
+        if (format.containsKey(android.media.MediaFormat.KEY_DURATION)) {
+          val d = runCatching { format.getLong(android.media.MediaFormat.KEY_DURATION) }.getOrDefault(0L)
+          if (d > durationUs) durationUs = d
+        }
+      }
+      return TrackSummary(videoMime, audioMime, extractor.trackCount, audioTracks, width, height, durationUs / 1000)
+    } finally {
+      runCatching { extractor.release() }
+    }
+  }
+
+  /** Duration (ms) + frame size from MediaMetadataRetriever; zeros for anything it can't read. */
+  private fun readRetrieverMeta(ctx: android.content.Context, fileUri: String): Triple<Long, Int, Int> {
+    val retriever = android.media.MediaMetadataRetriever()
+    try {
+      if (fileUri.startsWith("content://")) {
+        retriever.setDataSource(ctx, Uri.parse(fileUri))
+      } else {
+        retriever.setDataSource(fileUri.removePrefix("file://"))
+      }
+      val durationMs = retriever
+        .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+        ?.toLongOrNull() ?: 0L
+      val width = retriever
+        .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+        ?.toIntOrNull() ?: 0
+      val height = retriever
+        .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+        ?.toIntOrNull() ?: 0
+      return Triple(durationMs, width, height)
+    } catch (e: Exception) {
+      return Triple(0L, 0, 0)
+    } finally {
+      runCatching { retriever.release() }
+    }
+  }
+
+  /** One MP4/QuickTime box header: payload starts [headerLen] bytes after the box start. */
+  private class BoxHeader(val type: String, val size: Long, val headerLen: Long)
+
+  /** Read a box header at the stream's position; handles 64-bit largesize and size 0 (to EOF). */
+  private fun readBoxHeader(s: InputStream, buf: ByteArray): BoxHeader? {
+    if (!readFully(s, buf, 8)) return null
+    var size = be32(buf, 0)
+    val type = String(buf, 4, 4, Charsets.ISO_8859_1)
+    var headerLen = 8L
+    when (size) {
+      1L -> {
+        if (!readFully(s, buf, 8)) return null
+        size = be64(buf, 0)
+        headerLen = 16L
+      }
+      0L -> size = Long.MAX_VALUE
+    }
+    return BoxHeader(type, size, headerLen)
+  }
+
+  /**
+   * Walk the TOP-LEVEL boxes (a few tiny positioned reads — payloads are seeked over, never read)
+   * to classify the container and, when [wantMoov], return the moov payload (capped, so a corrupt
+   * size can't allocate gigabytes). A leading `free` / `uuid` / `wide` box before `ftyp` is common
+   * in real files, so the first box alone is not enough. Container is "mp4" (ISO `ftyp`),
+   * "quicktime" (`qt  ` brand, or a legacy file made only of QuickTime atoms) or "unknown".
+   */
+  private fun scanIsoBoxes(
+    ctx: android.content.Context,
+    fileUri: String,
+    wantMoov: Boolean,
+  ): Pair<String, ByteArray?> {
+    var container = "unknown"
+    var moov: ByteArray? = null
+    var offset = 0L
+    val buf = ByteArray(16)
+    var boxes = 0
+    while (boxes < ISO_SCAN_MAX_BOXES) {
+      boxes++
+      val stream = try {
+        openAt(ctx.contentResolver, fileUri, offset)
+      } catch (e: Exception) {
+        break
+      }
+      val header: BoxHeader? = try {
+        val h = readBoxHeader(stream, buf)
+        if (h != null) {
+          when (h.type) {
+            "ftyp" -> if (container == "unknown" && readFully(stream, buf, 4)) {
+              container = if (String(buf, 0, 4, Charsets.ISO_8859_1) == "qt  ") "quicktime" else "mp4"
+            }
+            "moov" -> {
+              if (container == "unknown") container = "quicktime"
+              if (wantMoov) {
+                if (h.size == Long.MAX_VALUE) {
+                  // size 0 = "extends to EOF": no length to trust, so read with a hard ceiling.
+                  val bytes = readBounded(stream, ISO_MOOV_CAP_BYTES)
+                  if (bytes != null && bytes.isNotEmpty()) moov = bytes
+                } else {
+                  val len = h.size - h.headerLen
+                  if (len > 0 && len <= ISO_MOOV_CAP_BYTES) {
+                    val bytes = ByteArray(len.toInt())
+                    if (readFully(stream, bytes, bytes.size)) moov = bytes
+                  }
+                }
+              }
+            }
+            "mdat" -> if (container == "unknown") container = "quicktime"
+          }
+        }
+        h
+      } catch (e: Exception) {
+        null
+      } finally {
+        runCatching { stream.close() }
+      }
+      if (header == null) break
+      if (header.type == "moov" && wantMoov) break // read (or too big to read) — nothing further to find
+      if (container == "unknown") {
+        if (header.type != "free" && header.type != "skip" && header.type != "wide" &&
+          header.type != "pnot" && header.type != "uuid"
+        ) break // not an ISO/QuickTime file
+      } else if (!wantMoov) {
+        break
+      }
+      if (header.size == Long.MAX_VALUE || header.size < header.headerLen) break
+      val next = offset + header.size
+      if (next <= offset) break
+      offset = next
+    }
+    return Pair(container, moov)
+  }
+
+  /**
+   * Container hint: "matroska" (EBML magic 1A 45 DF A3 — MKV and WebM) or the ISO/QuickTime
+   * classification from [scanIsoBoxes]; "unknown" otherwise.
+   */
+  private fun sniffContainer(ctx: android.content.Context, fileUri: String): String {
+    val magic = ByteArray(4)
+    val read = runCatching {
+      openMediaStream(ctx.contentResolver, fileUri).use { readFully(it, magic, 4) }
+    }.getOrDefault(false)
+    if (!read) return "unknown"
+    if (magic[0] == 0x1A.toByte() && magic[1] == 0x45.toByte() && magic[2] == 0xDF.toByte() && magic[3] == 0xA3.toByte()) {
+      return "matroska"
+    }
+    return runCatching { scanIsoBoxes(ctx, fileUri, false).first }.getOrDefault("unknown")
+  }
+
+  /** Read the rest of [s], or null if it holds more than [maxBytes] (never buffers past the cap). */
+  private fun readBounded(s: InputStream, maxBytes: Long): ByteArray? {
+    val out = java.io.ByteArrayOutputStream()
+    val chunk = ByteArray(64 * 1024)
+    var total = 0L
+    while (true) {
+      val n = s.read(chunk)
+      if (n < 0) break
+      total += n
+      if (total > maxBytes) return null
+      out.write(chunk, 0, n)
+    }
+    return out.toByteArray()
+  }
+
+  /** Child boxes of [type] inside b[start, end): each as (payloadStart, payloadEnd). Bounded to the buffer. */
+  private fun findBoxes(b: ByteArray, start: Int, end: Int, type: String): List<IntArray> {
+    val out = ArrayList<IntArray>()
+    var pos = start
+    while (pos + 8 <= end) {
+      var size = be32(b, pos)
+      val t = String(b, pos + 4, 4, Charsets.ISO_8859_1)
+      var headerLen = 8
+      if (size == 1L) {
+        if (pos + 16 > end) break
+        size = be64(b, pos + 8)
+        headerLen = 16
+      } else if (size == 0L) {
+        size = (end - pos).toLong() // extends to the end of the parent
+      }
+      if (size < headerLen.toLong() || size > (end - pos).toLong()) break
+      if (t == type) out.add(intArrayOf(pos + headerLen, pos + size.toInt()))
+      pos += size.toInt()
+    }
+    return out
+  }
+
+  /** Android mime for a video sample-entry fourcc, or null when unknown. */
+  private fun videoMimeForFourcc(fourcc: String): String? = when (fourcc) {
+    "avc1", "avc3" -> "video/avc"
+    "hvc1", "hev1" -> "video/hevc"
+    "dvh1", "dvhe" -> "video/dolby-vision"
+    "av01" -> "video/av01"
+    "vp09" -> "video/x-vnd.on2.vp9"
+    "vp08" -> "video/x-vnd.on2.vp8"
+    "mp4v" -> "video/mp4v-es"
+    "s263" -> "video/3gpp"
+    else -> null
+  }
+
+  /** Android mime for an audio sample-entry fourcc, or null when unknown. */
+  private fun audioMimeForFourcc(fourcc: String): String? = when (fourcc) {
+    "mp4a" -> "audio/mp4a-latm"
+    "ac-3" -> "audio/ac3"
+    "ec-3" -> "audio/eac3"
+    "Opus" -> "audio/opus"
+    "fLaC" -> "audio/flac"
+    "alac" -> "audio/alac"
+    ".mp3" -> "audio/mpeg"
+    "dtsc", "dtsh", "dtse", "dtsl" -> "audio/vnd.dts"
+    "mlpa" -> "audio/true-hd"
+    "sowt", "twos", "lpcm", "ipcm", "fpcm" -> "audio/raw"
+    "samr" -> "audio/3gpp"
+    "sawb" -> "audio/amr-wb"
+    else -> null
+  }
+
+  /**
+   * Fallback track enumeration for ISO files the platform extractor couldn't fully identify:
+   * moov → trak → mdia → minf → stbl → stsd, reading the first sample-entry fourcc of each track
+   * (fragmented MP4s keep their stsd in the init segment's moov too). Null if there is no
+   * readable moov. Frame size and duration are left 0 — the retriever supplies those.
+   */
+  private fun readIsoTracks(ctx: android.content.Context, fileUri: String): TrackSummary? {
+    val moov = try { scanIsoBoxes(ctx, fileUri, true).second } catch (e: Exception) { null } ?: return null
+    var videoMime = ""
+    var audioMime = ""
+    var audioTracks = 0
+    var trackCount = 0
+    for (trak in findBoxes(moov, 0, moov.size, "trak")) {
+      trackCount++
+      var level = listOf(trak)
+      for (name in listOf("mdia", "minf", "stbl", "stsd")) {
+        level = level.flatMap { findBoxes(moov, it[0], it[1], name) }
+      }
+      val stsd = level.firstOrNull() ?: continue
+      // stsd payload: version/flags (4) + entry count (4), then the entries (each: size + fourcc).
+      // Validate the first entry's header so trailing/garbage bytes can't pose as a codec.
+      if (stsd[0] + 16 > stsd[1]) continue
+      if (be32(moov, stsd[0] + 4) <= 0L) continue
+      val entrySize = be32(moov, stsd[0] + 8)
+      if (entrySize < 8L || entrySize > (stsd[1] - (stsd[0] + 8)).toLong()) continue
+      val fourcc = String(moov, stsd[0] + 12, 4, Charsets.ISO_8859_1)
+      val v = videoMimeForFourcc(fourcc)
+      val a = audioMimeForFourcc(fourcc)
+      if (v != null) {
+        if (videoMime.isEmpty()) videoMime = v
+      } else if (a != null) {
+        audioTracks++
+        if (audioMime.isEmpty()) audioMime = a
+      }
+    }
+    if (trackCount == 0) return null
+    return TrackSummary(videoMime, audioMime, trackCount, audioTracks, 0, 0, 0L)
+  }
+
+  /** Prefer the extractor's findings; fill only what it missed from the moov fallback. */
+  private fun mergeTracks(a: TrackSummary, b: TrackSummary): TrackSummary = TrackSummary(
+    if (a.videoMime.isNotEmpty()) a.videoMime else b.videoMime,
+    if (a.audioMime.isNotEmpty()) a.audioMime else b.audioMime,
+    maxOf(a.trackCount, b.trackCount),
+    maxOf(a.audioTrackCount, b.audioTrackCount),
+    a.width,
+    a.height,
+    a.durationMs,
+  )
+
+  private val ISO_SCAN_MAX_BOXES = 64
+
+  /** moov larger than this is treated as corrupt and not read into memory. */
+  private val ISO_MOOV_CAP_BYTES = 16L * 1024 * 1024
+
 
   private fun be32(b: ByteArray, off: Int): Long =
     ((b[off].toLong() and 0xff) shl 24) or ((b[off + 1].toLong() and 0xff) shl 16) or
