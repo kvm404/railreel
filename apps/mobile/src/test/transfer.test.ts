@@ -10,6 +10,7 @@ import {
   transferRetryDelayMs,
   TRANSFER_STALL_MS,
   earnsRetryBudget,
+  retriesAfterFailure,
   MEANINGFUL_PROGRESS_BYTES,
   unvalidatedProgress,
   UNVALIDATED_PROGRESS_CAP,
@@ -161,5 +162,44 @@ describe('unvalidatedProgress', () => {
     expect(unvalidatedProgress(50, 0)).toBe(0)
     expect(unvalidatedProgress(0, 100)).toBe(0)
     expect(unvalidatedProgress(NaN, 100)).toBe(0)
+  })
+})
+
+describe('retriesAfterFailure', () => {
+  const failed = (retries: number): AutoResumeInput => ({
+    approved: true,
+    phase: 'approved',
+    complete: false,
+    transferring: false,
+    reconnecting: false,
+    retries,
+    integrityFailures: 0,
+  })
+
+  it('kept progress resets the streak; discarded or tiny progress leaves it', () => {
+    expect(retriesAfterFailure(3, MEANINGFUL_PROGRESS_BYTES, true)).toBe(0)
+    expect(retriesAfterFailure(3, MEANINGFUL_PROGRESS_BYTES, false)).toBe(3)
+    expect(retriesAfterFailure(3, MEANINGFUL_PROGRESS_BYTES - 1, true)).toBe(3)
+  })
+
+  it('repeated watchdog stalls that each keep real bytes never exhaust the budget', () => {
+    // Each cycle: the retry fires (+1), the attempt keeps 5 MiB, then the watchdog aborts it.
+    let retries = 0
+    for (let stall = 0; stall < MAX_TRANSFER_RETRIES * 3; stall++) {
+      expect(shouldAutoResume(failed(retries))).toBe(true)
+      retries++ // maybeAutoResume
+      retries = retriesAfterFailure(retries, 5 * 1024 * 1024, true) // the abort path credits kept bytes
+    }
+    expect(retries).toBe(0)
+  })
+
+  it('stalls that never get a byte through still run out (bounded)', () => {
+    let retries = 0
+    let fired = 0
+    while (shouldAutoResume(failed(retries))) {
+      retries = retriesAfterFailure(retries + 1, 0, true)
+      fired++
+    }
+    expect(fired).toBe(MAX_TRANSFER_RETRIES)
   })
 })

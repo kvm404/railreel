@@ -34,7 +34,7 @@ import {
   MAX_TRANSFER_RETRIES,
   resumeOffset,
   shouldAutoResume,
-  earnsRetryBudget,
+  retriesAfterFailure,
   unvalidatedProgress,
   transferResultOk,
   transferRetryDelayMs,
@@ -413,6 +413,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Consecutive fully-downloaded copies that failed validation — a separate, small budget
   // (lib/net/transfer MAX_INTEGRITY_RETRIES); discarded bytes never earn retry credit.
   const integrityFailuresRef = useRef(0)
+  // Bytes the running attempt has pulled beyond its resume offset (retry credit, see transfer.ts).
+  const attemptBytesRef = useRef(0)
   // The provider has unmounted: socket handlers, timers and async entry points must not act.
   const disposedRef = useRef(false)
   // The movie is cached AND validated (status, size, fingerprint). Byte progress is capped below 1
@@ -1532,6 +1534,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // budget + backoff — resume it. Abandoning bumps the attempt, so the dead attempt's own
   // continuations bail; the next attempt waits for its native download to settle.
   const abortStalledTransfer = useCallback(() => {
+    if (disposedRef.current) return
+    // Credit FIRST: the aborted attempt exits at its own stale guard and never reaches its error
+    // handler, so the kept-bytes credit it earned must be applied here. Its partial is still this
+    // session's clean prefix (a stall doesn't invalidate it), which the resume will continue.
+    const retained = partialEpochRef.current === epochRef.current
+    transferRetriesRef.current = retriesAfterFailure(transferRetriesRef.current, attemptBytesRef.current, retained)
+    attemptBytesRef.current = 0
     attemptRef.current++
     downloadRef.current?.cancelAsync().catch(() => {})
     downloadRef.current = null
@@ -1621,9 +1630,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         live.session.send({ t: 'ready', id: c.myId, grant: c.grant, positionSec: positionRef.current })
       }
 
-      // Bytes this attempt pulled (beyond its resume offset); credited to the retry budget only
-      // if they're still on disk when it ends (lib/net/transfer earnsRetryBudget).
-      let bytesThisAttempt = 0
+      // Bytes this attempt pulled (beyond its resume offset) live in attemptBytesRef: credited to
+      // the retry budget only if they're still on disk when it ends — whether it fails on its own
+      // (catch below) or the watchdog aborts it (abortStalledTransfer).
+      attemptBytesRef.current = 0
 
       const run = async (prev: Promise<void> | null): Promise<void> => {
         try {
@@ -1715,7 +1725,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               const frac = unvalidatedProgress(p.totalBytesWritten, size > 0 ? size : total)
               progressRef.current = frac
               setProgress(frac)
-              bytesThisAttempt = Math.max(0, p.totalBytesWritten - resumedFrom)
+              attemptBytesRef.current = Math.max(0, p.totalBytesWritten - resumedFrom)
 
               // Measured throughput (smoothed) — the number the host's start gate reasons about.
               const sample = mbpsSampleRef.current
@@ -1851,7 +1861,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           }
           // Real forward progress that is still on disk earns back the automatic retry budget
           // (a WS reconnect doesn't; bytes we just discarded don't either).
-          if (earnsRetryBudget(bytesThisAttempt, retained)) transferRetriesRef.current = 0
+          transferRetriesRef.current = retriesAfterFailure(transferRetriesRef.current, attemptBytesRef.current, retained)
+          attemptBytesRef.current = 0
           sendBeat()
           setError(String(e))
           setClientPhase('approved') // Retry in the lobby; automatic below (no button mid-show)

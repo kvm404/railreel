@@ -132,6 +132,16 @@ export function earnsRetryBudget(bytesThisAttempt: number, bytesRetained: boolea
 }
 
 /**
+ * The retry count to carry into the next attempt after one ends in failure — by ANY path: the
+ * attempt's own error handler, or the stall watchdog aborting it from outside (that attempt never
+ * reaches its handler, so the caller must apply this itself). Kept progress resets the streak;
+ * anything else leaves it as is (the increment happens when the retry actually fires).
+ */
+export function retriesAfterFailure(retries: number, bytesThisAttempt: number, bytesRetained: boolean): number {
+  return earnsRetryBudget(bytesThisAttempt, bytesRetained) ? 0 : retries
+}
+
+/**
  * Byte progress for telemetry and the UI before the file is validated: never a full 1, because
  * the host treats progress ≥ 1 as "ready" and an unvalidated file (fingerprint pending, disk
  * write failed after the last read) is not.
