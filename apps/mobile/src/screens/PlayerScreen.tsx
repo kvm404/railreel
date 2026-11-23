@@ -35,6 +35,7 @@ import {
 } from '@/lib/sync/playback'
 import { playerLayout, TOP_FADE } from '@/lib/player/layout'
 import { shouldPublishHostExit } from '@/lib/player/exit'
+import { playPressPlan } from '@/lib/player/transport'
 import { lastChatId, unreadCount } from '@/lib/social/feed'
 import { cleanupFailureMessage, formatBytes, type ClearCacheResult } from '@/lib/storage'
 import type { PlaybackState } from '@/lib/protocol'
@@ -385,10 +386,18 @@ export function PlayerScreen() {
       // which should still wait for them.
       autoPausedRef.current = false
       overrideRef.current = true
+      // After The End a plain play() would only flip ExoPlayer's intent at EOF: rewind explicitly,
+      // and publish 0 rather than the player's position (the native seek lands asynchronously).
+      const plan = playPressPlan({ ended, positionSec: player.currentTime, durationSec: durationSec || player.duration })
       setEnded(false)
-      player.play()
+      if (plan.restart) {
+        player.replay()
+        playhead.seekTo(0)
+      } else {
+        player.play()
+      }
       setPlaying(true)
-      setHostPlayback(player.currentTime, true)
+      setHostPlayback(plan.fromSec, true, 1, false)
     }
   })
 
