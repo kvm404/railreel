@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { AppState, PermissionsAndroid, Platform } from 'react-native'
 import * as DocumentPicker from 'expo-document-picker'
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
+import { useGuestKeepAwake } from '@/hooks/useGuestKeepAwake'
 import * as LegacyFS from 'expo-file-system/legacy'
 import {
   awaitOwnership,
@@ -552,6 +553,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     clientPhaseRef.current = clientPhase
   }, [clientPhase])
+
+  // Guest: keep the screen on through boarding and pauses (its own tag; the host's is separate).
+  useGuestKeepAwake(role, clientPhase)
 
   // Host preflight: while hosting, keep an eye on the battery — the host phone IS the session
   // (PRD §8), so "plug in" needs saying before the movie dies with it.
