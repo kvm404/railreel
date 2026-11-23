@@ -150,8 +150,6 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
-
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
@@ -188,7 +186,7 @@ jobs:
           EXPECT_CODE: ${{ steps.version.outputs.versionCode }}
           EXPECT_NAME: ${{ steps.version.outputs.versionName }}
         run: |
-          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}" # preinstalled on ubuntu-latest
           BT=$(ls -d "$SDK"/build-tools/* | sort -V | tail -n 1)
           IN=$(find apps/mobile/android/app/build/outputs/apk/release -name '*.apk' | head -n 1)
           [ -n "$IN" ] || { echo "::error::Release APK not found"; exit 1; }
