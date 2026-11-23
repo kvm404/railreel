@@ -1,20 +1,22 @@
 import { useState } from 'react'
-import { Pressable, StyleSheet, View } from 'react-native'
+import { Share, StyleSheet, View } from 'react-native'
 import * as DocumentPicker from 'expo-document-picker'
 import * as LegacyFS from 'expo-file-system/legacy'
-import QRCode from 'react-native-qrcode-svg'
-import { Film, Subtitles, Wifi } from 'lucide-react-native'
+import { Check, Film, Share2, Subtitles, Wifi } from 'lucide-react-native'
 import { Screen } from '@/components/Screen'
 import { SyncDots } from '@/components/SyncDots'
-import { Button, FlapText, Text } from '@/ui'
+import { InviteTicket } from '@/components/InviteTicket'
+import { Button, Text } from '@/ui'
 import { useNavigation } from '@/navigation/context'
 import { useTheme } from '@/theme/ThemeProvider'
+import { radii } from '@/theme/tokens'
 import { useSession } from '@/session/SessionProvider'
+import { validateSrtFile } from '@/lib/subtitles/validate'
 
 /**
  * Host's "ready to invite" screen. Opens the movie picker, starts the native HTTP+WS servers,
- * and shows the real QR + split-flap join code + the guided hotspot step. The session lives in
- * the store so it survives the trip into the lobby. See docs/design-language.md.
+ * and shows the real QR ticket + split-flap join code + the guided hotspot steps. The session
+ * lives in the store so it survives the trip into the lobby. See docs/design-language.md.
  */
 
 function fmtSize(bytes: number): string {
@@ -45,9 +47,27 @@ export function CreateSessionScreen() {
       const content = await LegacyFS.readAsStringAsync(asset.uri, {
         encoding: LegacyFS.EncodingType.UTF8,
       })
+      // Validate BEFORE attaching: attachSubtitle stores whatever it is given, so an empty or
+      // non-SRT file would replace a working subtitle with zero usable cues.
+      const check = validateSrtFile(asset.name, content)
+      if (!check.ok) {
+        setSubError(check.message)
+        return
+      }
       await s.attachSubtitle(asset.name, content)
     } catch {
       setSubError('Failed to read subtitle file')
+    }
+  }
+
+  // The system share sheet (Messages, WhatsApp, Copy…): a full invite link is what Join's paste
+  // field accepts — the short code alone cannot carry the host address offline.
+  const shareInvite = async () => {
+    if (!s.joinUrl) return
+    try {
+      await Share.share({ message: `Join my RailReel cabin (connect to my hotspot first): ${s.joinUrl}` })
+    } catch {
+      // The sheet failing to open is not actionable; the QR and code are still on screen.
     }
   }
 
@@ -74,7 +94,7 @@ export function CreateSessionScreen() {
           <Text variant="title" style={{ textAlign: 'center' }}>
             Share a movie with the cabin
           </Text>
-          <Text variant="caption" tone="tertiary" style={{ textAlign: 'center' }}>
+          <Text variant="caption" tone="muted" style={{ textAlign: 'center' }}>
             Pick a video on this phone — friends download their own copy and watch in sync.
           </Text>
           {s.error ? (
@@ -95,117 +115,99 @@ export function CreateSessionScreen() {
     )
   }
 
+  const live = s.joinUrl != null
+  const code = s.joinCode
+
   return (
     <Screen title="NEW SESSION" scroll onBack={exitSession}>
       <View style={styles.body}>
         {/* now sharing */}
-        <View style={[styles.movie, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}>
+        <View style={[styles.card, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}>
           <Film size={18} color={t.palette.amber} strokeWidth={2.25} />
           <View style={{ flex: 1 }}>
-            <Text variant="eyebrow" tone="tertiary">
+            <Text variant="eyebrow" tone="muted">
               NOW SHARING
             </Text>
             <Text variant="cardTitle" numberOfLines={1}>
               {s.movie?.title ?? 'Movie'}
             </Text>
           </View>
-          <Text variant="data" tone="tertiary">
+          <Text variant="data" tone="muted">
             {fmtSize(s.movie?.sizeBytes ?? 0)}
           </Text>
         </View>
 
         {/* subtitles */}
-        <View style={[styles.movie, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}>
-          <Subtitles size={18} color={s.subtitle ? t.palette.cyan : t.palette.textTertiary} strokeWidth={2.25} />
+        <View style={[styles.card, { borderColor: t.palette.hairline, backgroundColor: t.palette.raised }]}>
+          <Subtitles size={18} color={s.subtitle ? t.palette.amber : t.palette.textMuted} strokeWidth={2.25} />
           <View style={{ flex: 1 }}>
-            <Text variant="eyebrow" tone="tertiary">
+            <Text variant="eyebrow" tone="muted">
               SUBTITLES (OPTIONAL)
             </Text>
             <Text variant="cardTitle" numberOfLines={1}>
               {s.subtitle ? s.subtitle.name : 'None attached'}
             </Text>
             {s.subtitle ? (
-              <Text variant="caption" tone="cyan">
+              <Text variant="caption" tone="secondary">
                 {`${s.subtitle.cues.length} cues`}
               </Text>
             ) : null}
             {subError ? (
-              <Text variant="caption" style={{ color: t.palette.danger }}>
+              <Text variant="caption" tone="danger" accessibilityLiveRegion="polite">
                 {subError}
               </Text>
             ) : null}
           </View>
           {s.subtitle ? (
             <View style={{ flexDirection: 'row', gap: 8 }}>
-              <Pressable
-                onPress={pickSubtitle}
-                hitSlop={8}
-                style={[styles.smallBtn, { borderColor: t.palette.hairline }]}
-              >
-                <Text variant="caption" tone="secondary">
-                  Replace
-                </Text>
-              </Pressable>
-              <Pressable
-                onPress={s.removeSubtitle}
-                hitSlop={8}
-                style={[styles.smallBtn, { borderColor: t.palette.danger }]}
-              >
-                <Text variant="caption" style={{ color: t.palette.danger }}>
-                  Remove
-                </Text>
-              </Pressable>
+              <Button title="Replace" intent="neutral" compact onPress={pickSubtitle} />
+              <Button title="Remove" intent="danger" compact onPress={s.removeSubtitle} />
             </View>
           ) : (
-            <Pressable
-              onPress={pickSubtitle}
-              hitSlop={8}
-              style={[styles.smallBtn, { borderColor: t.palette.cyan, backgroundColor: 'rgba(87,210,230,0.08)' }]}
-            >
-              <Text variant="caption" tone="cyan">
-                Attach .srt
-              </Text>
-            </Pressable>
+            <Button title="Attach .srt" intent="neutral" compact onPress={pickSubtitle} />
           )}
         </View>
 
-        {/* invite panel — film/ticket frame around the QR (only once we have a reachable address) */}
-        {s.joinUrl ? (
-          <View style={[styles.invite, { borderColor: t.palette.hairline }]}>
-            <View style={styles.qrWrap}>
-              <QRCode value={s.joinUrl} size={172} color="#0A0E16" backgroundColor="#F5F3EC" />
-            </View>
-            <Text variant="eyebrow" tone="tertiary" style={{ marginTop: 18 }}>
-              JOIN CODE
-            </Text>
-            <FlapText value={s.joinCode ?? '····'} size={34} tone="amber" stagger={70} style={{ marginTop: 8 }} />
-            {s.hostIp ? (
-              <Text variant="data" tone="tertiary" style={{ marginTop: 10 }}>
-                {s.hostIp}
-              </Text>
-            ) : null}
-          </View>
-        ) : (
-          <View style={[styles.invite, { borderColor: t.palette.hairline, gap: 14 }]}>
-            <Text variant="cardTitle" style={{ textAlign: 'center' }}>
-              Turn on your hotspot
-            </Text>
-            <Text variant="caption" tone="tertiary" style={{ textAlign: 'center', paddingHorizontal: 20 }}>
-              No reachable address yet. Enable your hotspot, then refresh to show the invite code.
-            </Text>
-            <Button title="Refresh link" intent="cyan" height={52} onPress={s.refreshJoin} />
-          </View>
-        )}
+        {/* invite ticket — QR + join code (only once we have a reachable address) */}
+        {live ? (
+          <>
+            <InviteTicket joinUrl={s.joinUrl!} code={code} hostIp={s.hostIp} />
+            <Button
+              title="Share invite link"
+              subtitle="For friends who can't scan — they paste it on Join"
+              intent="neutral"
+              height={60}
+              icon={<Share2 size={20} color={t.palette.textPrimary} strokeWidth={2.25} />}
+              onPress={shareInvite}
+            />
+          </>
+        ) : null}
 
-        {/* hotspot step */}
-        <View style={[styles.step, { borderColor: t.palette.hairline }]}>
-          <Wifi size={20} color={t.palette.cyan} strokeWidth={2.25} />
-          <View style={{ flex: 1 }}>
-            <Text variant="cardTitle">Keep your hotspot on</Text>
-            <Text variant="caption" tone="tertiary">
-              Name it so friends recognize it, then they scan or paste the code.
-            </Text>
-          </View>
+        {/* guided steps: hotspot first, then friends join it, then they find the cabin */}
+        <View style={[styles.steps, { borderColor: t.palette.hairline }]}>
+          <Step
+            n={1}
+            done={live}
+            active={!live}
+            title={live ? 'Hotspot is on' : 'Turn on your hotspot'}
+            body={
+              live
+                ? 'Keep it on for the whole movie. Name it so friends recognize it.'
+                : 'No reachable address yet. Enable your hotspot, then refresh to show the invite.'}
+          >
+            {!live ? <Button title="Refresh link" intent="cyan" compact icon={<Wifi size={14} color={t.palette.cyan} strokeWidth={2.5} />} onPress={s.refreshJoin} /> : null}
+          </Step>
+          <Step
+            n={2}
+            title="Friends join your hotspot"
+            body="On their phones: Settings → WiFi → your hotspot's name. RailReel needs no internet."
+          />
+          <Step
+            n={3}
+            last
+            title={code ? `Then they pick cabin ${code}` : 'Then they pick your cabin'}
+            body="On Join they tap the cabin with the matching code, or scan the QR above."
+          />
         </View>
 
         <View style={styles.waiting}>
@@ -227,39 +229,74 @@ export function CreateSessionScreen() {
   )
 }
 
+/** One numbered step of the host's guided setup. `done` = amber check, `active` = the one to do now. */
+function Step({
+  n,
+  title,
+  body,
+  done = false,
+  active = false,
+  last = false,
+  children,
+}: {
+  n: number
+  title: string
+  body: string
+  done?: boolean
+  active?: boolean
+  last?: boolean
+  children?: React.ReactNode
+}) {
+  const t = useTheme()
+  const accent = done ? t.palette.amber : active ? t.palette.cyan : t.palette.hairline
+  return (
+    <View style={styles.stepRow} accessible accessibilityLabel={`Step ${n}. ${title}. ${body}${done ? ' Done.' : ''}`}>
+      <View style={styles.stepRail}>
+        <View
+          style={[
+            styles.stepBadge,
+            { borderColor: accent, backgroundColor: done ? t.palette.amber : 'transparent' },
+          ]}
+        >
+          {done ? (
+            <Check size={14} color={t.palette.onAmber} strokeWidth={3} />
+          ) : (
+            <Text variant="eyebrow" tone={active ? 'cyan' : 'muted'}>
+              {n}
+            </Text>
+          )}
+        </View>
+        {last ? null : <View style={[styles.stepLine, { backgroundColor: t.palette.hairline }]} />}
+      </View>
+      <View style={[styles.stepBody, last && { paddingBottom: 0 }]}>
+        <Text variant="cardTitle" tone={done || active ? 'primary' : 'secondary'}>
+          {title}
+        </Text>
+        <Text variant="caption" tone="muted">
+          {body}
+        </Text>
+        {children ? <View style={{ alignSelf: 'flex-start', marginTop: 8 }}>{children}</View> : null}
+      </View>
+    </View>
+  )
+}
+
 const styles = StyleSheet.create({
   body: { flex: 1, gap: 16, paddingTop: 8 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 18, paddingHorizontal: 24 },
-  movie: {
+  card: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 14,
     padding: 14,
     borderWidth: 1,
-    borderRadius: 16,
+    borderRadius: radii.lg,
   },
-  invite: {
-    alignItems: 'center',
-    paddingVertical: 24,
-    borderWidth: 1,
-    borderRadius: 22,
-  },
-  qrWrap: { padding: 16, backgroundColor: '#F5F3EC', borderRadius: 14 },
-  step: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    padding: 14,
-    borderWidth: 1,
-    borderRadius: 16,
-  },
+  steps: { borderWidth: 1, borderRadius: radii.lg, padding: 16 },
+  stepRow: { flexDirection: 'row', gap: 14 },
+  stepRail: { alignItems: 'center' },
+  stepBadge: { width: 28, height: 28, borderRadius: 14, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center' },
+  stepLine: { flex: 1, width: 1, marginVertical: 4 },
+  stepBody: { flex: 1, gap: 2, paddingBottom: 16 },
   waiting: { flexDirection: 'row', alignItems: 'center', gap: 10, justifyContent: 'center' },
-  smallBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
 })
