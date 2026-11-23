@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { encodeJoinUrl, PROTOCOL_VERSION } from '@/lib/protocol'
+import { encodeJoinUrl, PROTOCOL_VERSION, SUBTITLE_NAME_MAX } from '@/lib/protocol'
 import { findInviteUrl, isOtherVersionInvite, parseInvite } from '@/lib/links/invite'
 import { isValidGuestName, MAX_GUEST_NAME_LENGTH, normalizeGuestName } from '@/lib/social/name'
 import { MAX_SRT_CHARS, validateSrtFile } from '@/lib/subtitles/validate'
@@ -72,6 +72,16 @@ describe('subtitle validation', () => {
     expect(validateSrtFile('a.srt', 'this is not a subtitle file at all')).toMatchObject({ ok: false, reason: 'no-cues' })
     expect(validateSrtFile('a.txt', good)).toMatchObject({ ok: false, reason: 'not-srt' })
     expect(validateSrtFile('a.srt', good + 'x'.repeat(MAX_SRT_CHARS))).toMatchObject({ ok: false, reason: 'too-large' })
+  })
+
+  it('applies the receivers’ limits: UTF-8 bytes, not UTF-16 characters, and the name cap', () => {
+    // ~700k Devanagari characters: under 2M UTF-16 units, but ~2.1 MB of UTF-8 — guests would drop it.
+    const hindi = good + 'क'.repeat(700_000)
+    expect(hindi.length).toBeLessThan(MAX_SRT_CHARS)
+    expect(validateSrtFile('a.srt', hindi)).toMatchObject({ ok: false, reason: 'too-large' })
+    const longName = `${'x'.repeat(SUBTITLE_NAME_MAX)}.srt`
+    expect(validateSrtFile(longName, good)).toMatchObject({ ok: false, reason: 'name-too-long' })
+    expect(validateSrtFile(`${'x'.repeat(SUBTITLE_NAME_MAX - 4)}.srt`, good).ok).toBe(true)
   })
 })
 
