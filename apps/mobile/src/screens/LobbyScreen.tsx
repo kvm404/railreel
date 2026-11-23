@@ -28,7 +28,7 @@ import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { resumeExit } from '@/lib/nav/exitGuard'
 import { cleanupFailureMessage, hasReusableMovieCopy, movieIdentity, type ClearCacheResult } from '@/lib/storage'
 import { activeGuestCount, endSessionBody, needsEndConfirmation } from '@/lib/host/endSession'
-import { startWithoutCopy } from '@/lib/host/admission'
+import { startWithoutCopy, startWithoutSheetVisible, startWithoutVerdict } from '@/lib/host/admission'
 import { canJoinShow, decideStartGate, departureClock, type StartGateDecision } from '@/lib/sync/startGate'
 import { targetPositionSec } from '@/lib/sync/playback'
 import {
@@ -146,11 +146,17 @@ export function LobbyScreen() {
     if (pendingNames.length > 0) setConfirmStart(true)
     else openShow()
   }
-  // Everyone at the door was decided while the question was open: nothing left to confirm.
-  useEffect(() => {
-    if (pendingNames.length === 0) setConfirmStart(false)
-  }, [pendingNames.length])
   const startWithout = startWithoutCopy(pendingNames)
+  // The room can change while the question is open (a stall closes the gate; the last request is
+  // decided): withdraw the sheet, and re-check the live gate on confirm.
+  const startSheetUp = startWithoutSheetVisible({ asked: confirmStart, gateOpen: readyToDepart, pending: pendingNames.length })
+  useEffect(() => {
+    if (!startSheetUp) setConfirmStart(false)
+  }, [startSheetUp])
+  const confirmStartWithout = () => {
+    setConfirmStart(false)
+    if (startWithoutVerdict({ gateOpen: readyToDepart, pending: pendingNames.length }) === 'start') openShow()
+  }
 
   const [showCleanupSheet, setShowCleanupSheet] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
@@ -459,17 +465,14 @@ export function LobbyScreen() {
         onCancel={() => setConfirmEnd(false)}
       />
       <ConfirmSheet
-        visible={confirmStart && pendingNames.length > 0}
+        visible={startSheetUp}
         icon={<UserPlus size={32} color={t.palette.amber} strokeWidth={1.75} />}
         title={startWithout.title}
         body={startWithout.body}
         confirmLabel={isResuming ? 'Resume without them' : 'Start without them'}
         confirmIntent="amber"
         cancelLabel="Review requests"
-        onConfirm={() => {
-          setConfirmStart(false)
-          openShow()
-        }}
+        onConfirm={confirmStartWithout}
         onCancel={() => setConfirmStart(false)}
       />
     </Screen>

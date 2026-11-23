@@ -6,6 +6,8 @@ import {
   listNames,
   lobbyCtaLabel,
   startWithoutCopy,
+  startWithoutSheetVisible,
+  startWithoutVerdict,
 } from '@/lib/host/admission'
 import { decideStartGate } from '@/lib/sync/startGate'
 import { bucketRoster } from '@/lib/sync/readiness'
@@ -85,5 +87,19 @@ describe('joinRequestHeadline', () => {
   it('leads with the oldest request and counts the rest', () => {
     expect(joinRequestHeadline(['Sam'])).toEqual({ name: 'Sam', detail: 'wants to board' })
     expect(joinRequestHeadline(['Sam', 'Alex', 'Jo'])).toEqual({ name: 'Sam', detail: 'wants to board · 2 more waiting' })
+  })
+})
+
+describe('start without — revalidated', () => {
+  it('starts on confirm only while the gate is still open', () => {
+    expect(startWithoutVerdict({ gateOpen: true, pending: 2 })).toBe('start')
+    expect(startWithoutVerdict({ gateOpen: false, pending: 2 })).toBe('close')
+  })
+
+  it('withdraws the sheet when the gate closes or the door empties', () => {
+    expect(startWithoutSheetVisible({ asked: true, gateOpen: true, pending: 1 })).toBe(true)
+    expect(startWithoutSheetVisible({ asked: true, gateOpen: false, pending: 1 })).toBe(false)
+    expect(startWithoutSheetVisible({ asked: true, gateOpen: true, pending: 0 })).toBe(false)
+    expect(startWithoutSheetVisible({ asked: false, gateOpen: true, pending: 1 })).toBe(false)
   })
 })

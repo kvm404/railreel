@@ -59,6 +59,20 @@ export function startWithoutCopy(names: readonly string[]): { title: string; bod
   }
 }
 
+/**
+ * The "Start without …?" sheet can sit open while the room changes under it: a guest's download
+ * stalls, someone new is approved and starts boarding. Confirming re-checks the CURRENT start
+ * gate — a closed gate closes the sheet instead of starting — and the sheet is withdrawn as soon
+ * as the gate closes or nobody is left at the door.
+ */
+export function startWithoutVerdict(i: { gateOpen: boolean; pending: number }): 'start' | 'close' {
+  return i.gateOpen ? 'start' : 'close'
+}
+
+export function startWithoutSheetVisible(i: { asked: boolean; gateOpen: boolean; pending: number }): boolean {
+  return i.asked && i.gateOpen && i.pending > 0
+}
+
 /** The player's door notice: who is asking, and how many more are behind them. */
 export function joinRequestHeadline(names: readonly string[]): { name: string; detail: string } {
   const first = names[0] ?? ''
