@@ -2,6 +2,7 @@ import { StyleSheet, useWindowDimensions, View } from 'react-native'
 import QRCode from 'react-native-qrcode-svg'
 import { FlapText, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
+import { qrQuietZone } from '@/lib/qr'
 import { radii, sizes } from '@/theme/tokens'
 
 /**
@@ -10,8 +11,9 @@ import { radii, sizes } from '@/theme/tokens'
  * code as a large split-flap board.
  *
  * Scan reliability wins over style: the QR keeps DARK modules on a warm off-white field with a
- * full quiet zone (reverse/amber-on-dark codes are not reliably read by every camera stack). The
- * amber lives in the frame, the perforations and the code.
+ * full >= 4-module light quiet zone INSIDE the frame (the amber border sits outside it; reverse/
+ * amber-on-dark codes are not reliably read by every camera stack). The amber lives in the frame,
+ * the perforations and the code.
  */
 
 const SPROCKETS = 11
@@ -20,8 +22,10 @@ const SPROCKET_COL = 26
 export function InviteTicket({ joinUrl, code, hostIp }: { joinUrl: string; code: string | null; hostIp: string | null }) {
   const t = useTheme()
   const { width } = useWindowDimensions()
-  // Fit the QR inside the ticket on narrow phones (gutters + both sprocket columns + film-cell padding).
-  const qr = Math.max(120, Math.min(172, width - sizes.gutter * 2 - SPROCKET_COL * 2 - 32 - 24))
+  // Fit the QR inside the ticket on narrow phones (gutters + both sprocket columns + frame border).
+  // `qr` INCLUDES the quiet zone: the symbol itself is drawn smaller inside it.
+  const qr = Math.max(150, Math.min(200, width - sizes.gutter * 2 - SPROCKET_COL * 2 - 4 - 24))
+  const quietZone = qrQuietZone(qr, joinUrl.length)
 
   return (
     <View style={[styles.ticket, { borderColor: t.veils.amberBorder, backgroundColor: t.palette.raised }]}>
@@ -35,7 +39,7 @@ export function InviteTicket({ joinUrl, code, hostIp }: { joinUrl: string; code:
           accessibilityLabel="Invite QR code. Friends scan this with the Scan QR code button on the Join screen."
           style={[styles.cell, { backgroundColor: t.palette.ticket, borderColor: t.palette.amberDeep }]}
         >
-          <QRCode value={joinUrl} size={qr} color={t.palette.base} backgroundColor={t.palette.ticket} />
+          <QRCode value={joinUrl} size={qr} quietZone={quietZone} color={t.palette.base} backgroundColor={t.palette.ticket} />
         </View>
 
         {/* perforated tear line, notched into the ticket edges */}
@@ -77,7 +81,8 @@ function Sprockets({ side }: { side: 'left' | 'right' }) {
 const styles = StyleSheet.create({
   ticket: { borderWidth: 1, borderRadius: radii.lg, overflow: 'hidden', paddingHorizontal: SPROCKET_COL, paddingVertical: 20 },
   main: { alignItems: 'center' },
-  cell: { padding: 12, borderRadius: radii.sm, borderWidth: 2 },
+  // No padding: the light quiet zone is part of the QR itself, so the border never eats into it.
+  cell: { borderRadius: radii.sm, borderWidth: 2, overflow: 'hidden' },
   sprockets: { position: 'absolute', top: 0, bottom: 0, width: SPROCKET_COL, alignItems: 'center', justifyContent: 'space-evenly' },
   hole: { width: 8, height: 12, borderRadius: 3, borderWidth: StyleSheet.hairlineWidth },
   tear: { alignSelf: 'stretch', height: 24, marginVertical: 8, justifyContent: 'center' },
