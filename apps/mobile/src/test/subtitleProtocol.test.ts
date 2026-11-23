@@ -3,6 +3,9 @@ import {
   isSubtitleMeta,
   needsSubtitleFetch,
   parseSubtitlePayload,
+  recordSubtitlePull,
+  SUBTITLE_PULL_MAX_TRIES,
+  SUBTITLE_PULL_TIMEOUT_MS,
   SUBTITLE_MAX_BYTES,
   subtitleMeta,
   subtitleRev,
@@ -81,22 +84,35 @@ describe('parseSubtitlePayload', () => {
 describe('needsSubtitleFetch', () => {
   const meta = subtitleMeta('movie.srt', SRT)
 
+  const T0 = 1_000_000
+  const asked = recordSubtitlePull(null, meta.rev, T0)
+
   it('fetches a revision we do not have', () => {
-    expect(needsSubtitleFetch(null, meta, null)).toBe(true)
-    expect(needsSubtitleFetch('s1:old', meta, null)).toBe(true)
+    expect(needsSubtitleFetch(null, meta, null, T0)).toBe(true)
+    expect(needsSubtitleFetch('s1:old', meta, null, T0)).toBe(true)
   })
 
-  it('does not refetch what we have, or what we already asked for', () => {
-    expect(needsSubtitleFetch(meta.rev, meta, null)).toBe(false)
-    expect(needsSubtitleFetch(null, meta, meta.rev)).toBe(false)
+  it('does not refetch what we have, or what we just asked for', () => {
+    expect(needsSubtitleFetch(meta.rev, meta, null, T0)).toBe(false)
+    expect(needsSubtitleFetch(null, meta, asked, T0 + SUBTITLE_PULL_TIMEOUT_MS - 1)).toBe(false)
   })
 
-  it('asks again when the roster moves on to a newer revision', () => {
-    expect(needsSubtitleFetch(null, subtitleMeta('movie.srt', SRT + 'x'), meta.rev)).toBe(true)
+  it('re-asks an unanswered pull after the timeout, a bounded number of times', () => {
+    expect(needsSubtitleFetch(null, meta, asked, T0 + SUBTITLE_PULL_TIMEOUT_MS)).toBe(true)
+    let pull = asked
+    for (let i = 1; i < SUBTITLE_PULL_MAX_TRIES; i++) pull = recordSubtitlePull(pull, meta.rev, T0 + i)
+    expect(pull.tries).toBe(SUBTITLE_PULL_MAX_TRIES)
+    expect(needsSubtitleFetch(null, meta, pull, T0 + 999_999)).toBe(false)
+  })
+
+  it('asks again (fresh count) when the roster moves on to a newer revision', () => {
+    const newer = subtitleMeta('movie.srt', SRT + 'x')
+    expect(needsSubtitleFetch(null, newer, asked, T0)).toBe(true)
+    expect(recordSubtitlePull(asked, newer.rev, T0)).toEqual({ rev: newer.rev, at: T0, tries: 1 })
   })
 
   it('nothing to fetch when the roster carries no subtitle', () => {
-    expect(needsSubtitleFetch('s1:any', undefined, null)).toBe(false)
-    expect(needsSubtitleFetch(null, null, null)).toBe(false)
+    expect(needsSubtitleFetch('s1:any', undefined, null, T0)).toBe(false)
+    expect(needsSubtitleFetch(null, null, null, T0)).toBe(false)
   })
 })

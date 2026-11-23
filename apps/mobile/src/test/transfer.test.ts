@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
+  INITIAL_RESPONSE_GRACE_MS,
   isTransferStalled,
+  MAX_INTEGRITY_RETRIES,
   MAX_TRANSFER_RETRIES,
   resumeOffset,
   shouldAutoResume,
@@ -64,6 +66,7 @@ describe('shouldAutoResume', () => {
     transferring: false,
     reconnecting: false,
     retries: 0,
+    integrityFailures: 0,
   }
 
   it('resumes a failed, approved, unfinished transfer', () => {
@@ -87,6 +90,11 @@ describe('shouldAutoResume', () => {
     expect(shouldAutoResume({ ...base, retries: MAX_TRANSFER_RETRIES - 1 })).toBe(true)
     expect(shouldAutoResume({ ...base, retries: MAX_TRANSFER_RETRIES })).toBe(false)
   })
+
+  it('integrity failures have their own small budget (each one re-pulls the whole movie)', () => {
+    expect(shouldAutoResume({ ...base, integrityFailures: MAX_INTEGRITY_RETRIES })).toBe(true)
+    expect(shouldAutoResume({ ...base, integrityFailures: MAX_INTEGRITY_RETRIES + 1 })).toBe(false)
+  })
 })
 
 describe('transferRetryDelayMs', () => {
@@ -100,29 +108,45 @@ describe('transferRetryDelayMs', () => {
 })
 
 describe('isTransferStalled', () => {
-  it('flags a running transfer with no progress past the window', () => {
-    expect(isTransferStalled(true, 1000, 1000 + TRANSFER_STALL_MS)).toBe(true)
-    expect(isTransferStalled(true, 1000, 1000 + TRANSFER_STALL_MS - 1)).toBe(false)
+  const START = 1000
+
+  it('an established transfer is dead after the inactivity window', () => {
+    const last = START + 500
+    expect(isTransferStalled(true, START, last, last + TRANSFER_STALL_MS)).toBe(true)
+    expect(isTransferStalled(true, START, last, last + TRANSFER_STALL_MS - 1)).toBe(false)
   })
 
-  it('never flags an idle transfer or one with no progress sample yet', () => {
-    expect(isTransferStalled(false, 1000, 99_999)).toBe(false)
-    expect(isTransferStalled(true, 0, 99_999)).toBe(false)
+  it('before the first byte, a slow but valid response gets the longer initial grace', () => {
+    // 9s to first byte is a slow host, not a dead one.
+    expect(isTransferStalled(true, START, 0, START + 9000)).toBe(false)
+    expect(isTransferStalled(true, START, 0, START + INITIAL_RESPONSE_GRACE_MS - 1)).toBe(false)
+    expect(isTransferStalled(true, START, 0, START + INITIAL_RESPONSE_GRACE_MS)).toBe(true)
   })
 
-  it('stays under the proxy edge timeout (30s) and over a hotspot hiccup', () => {
+  it('never flags an idle transfer or one that has not started', () => {
+    expect(isTransferStalled(false, START, START, 99_999)).toBe(false)
+    expect(isTransferStalled(true, 0, 0, 99_999)).toBe(false)
+  })
+
+  it('both windows stay under the proxy edge timeout (30s) and OkHttp (60s)', () => {
     expect(TRANSFER_STALL_MS).toBeLessThan(30_000)
     expect(TRANSFER_STALL_MS).toBeGreaterThanOrEqual(5000)
-    expect(isTransferStalled(true, 1000, 3000, 2000)).toBe(true) // custom window
+    expect(INITIAL_RESPONSE_GRACE_MS).toBeGreaterThan(TRANSFER_STALL_MS)
+    expect(INITIAL_RESPONSE_GRACE_MS).toBeLessThan(60_000)
+    expect(isTransferStalled(true, START, START + 1, START + 2001, 2000)).toBe(true) // custom window
   })
 })
 
 describe('earnsRetryBudget', () => {
-  it('only real forward progress earns the budget back (never a mere WS reconnect)', () => {
-    expect(earnsRetryBudget(0)).toBe(false)
-    expect(earnsRetryBudget(MEANINGFUL_PROGRESS_BYTES - 1)).toBe(false)
-    expect(earnsRetryBudget(MEANINGFUL_PROGRESS_BYTES)).toBe(true)
-    expect(earnsRetryBudget(NaN)).toBe(false)
+  it('only real forward progress that was KEPT earns the budget back', () => {
+    expect(earnsRetryBudget(0, true)).toBe(false)
+    expect(earnsRetryBudget(MEANINGFUL_PROGRESS_BYTES - 1, true)).toBe(false)
+    expect(earnsRetryBudget(MEANINGFUL_PROGRESS_BYTES, true)).toBe(true)
+    expect(earnsRetryBudget(NaN, true)).toBe(false)
+  })
+
+  it('bytes an attempt discarded (failed fingerprint, bad status) earn nothing', () => {
+    expect(earnsRetryBudget(10 * MEANINGFUL_PROGRESS_BYTES, false)).toBe(false)
   })
 })
 

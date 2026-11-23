@@ -60,7 +60,16 @@ export interface AutoResumeInput {
   reconnecting: boolean
   /** Automatic retries already spent in this failure streak. */
   retries: number
+  /** Consecutive copies that downloaded fully but failed validation (fingerprint / size / status). */
+  integrityFailures: number
 }
+
+/**
+ * Integrity failures get their OWN, small budget: a host serving bytes that never match its own
+ * fingerprint will fail the same way every time, and each try re-pulls the whole movie over the
+ * shared hotspot. Bytes from such an attempt are discarded, so they never earn retry credit.
+ */
+export const MAX_INTEGRITY_RETRIES = 2
 
 /** Should the guest automatically restart its (failed) transfer now? */
 export function shouldAutoResume(i: AutoResumeInput): boolean {
@@ -70,42 +79,56 @@ export function shouldAutoResume(i: AutoResumeInput): boolean {
     !i.complete &&
     !i.transferring &&
     !i.reconnecting &&
-    i.retries < MAX_TRANSFER_RETRIES
+    i.retries < MAX_TRANSFER_RETRIES &&
+    i.integrityFailures <= MAX_INTEGRITY_RETRIES
   )
 }
 
 /**
- * A running transfer with no bytes for this long is presumed dead. Well under the playback
- * proxy's 30s silent-edge timeout (and OkHttp's 60s read timeout), well over a healthy hotspot's
- * gaps between progress events (~100ms) and the host's time to first byte.
+ * An ESTABLISHED transfer (bytes have flowed) with no new bytes for this long is presumed dead.
+ * Well under the playback proxy's 30s silent-edge timeout (and OkHttp's 60s read timeout), well
+ * over a healthy hotspot's gaps between progress events (~100ms).
  */
 export const TRANSFER_STALL_MS = 8000
 
 /**
+ * Before the FIRST byte the bar is lower: a busy host (several guests starting at once, a slow
+ * content:// source seeking) can take a while to answer, and cancelling a valid slow response
+ * just restarts the same wait. Still under OkHttp's 60s connect/read timeouts.
+ */
+export const INITIAL_RESPONSE_GRACE_MS = 20_000
+
+/**
  * Watchdog tick: is the transfer still "running" but silently dead (OkHttp's 60s read timeout
  * hasn't fired yet)? Then abort and resume it now rather than wait out the timeout — the
- * playback proxy gives up on a silent edge after 30s. `lastProgressAtMs` starts at the moment
- * the request was issued, which is the first-byte grace.
+ * playback proxy gives up on a silent edge after 30s.
+ * `startedAtMs`: when this attempt's request went out. `lastProgressAtMs`: its latest progress
+ * event, or 0 while no byte has arrived yet (the initial-response grace applies).
  */
 export function isTransferStalled(
   transferring: boolean,
+  startedAtMs: number,
   lastProgressAtMs: number,
   nowMs: number,
   stallMs = TRANSFER_STALL_MS,
+  graceMs = INITIAL_RESPONSE_GRACE_MS,
 ): boolean {
-  return transferring && lastProgressAtMs > 0 && nowMs - lastProgressAtMs >= stallMs
+  if (!transferring || !(startedAtMs > 0)) return false
+  if (lastProgressAtMs > 0) return nowMs - lastProgressAtMs >= stallMs
+  return nowMs - startedAtMs >= graceMs
 }
 
 /** Bytes of real progress in one attempt that earn back the automatic retry budget. */
 export const MEANINGFUL_PROGRESS_BYTES = 4 * 1024 * 1024
 
 /**
- * Reset the retry budget? Only on success or real forward progress — never merely because the
- * WS reconnected (WS handshakes can succeed while HTTP keeps failing; resetting on reconnect
- * would allow unlimited, un-backed-off attempts).
+ * Reset the retry budget? Only for real forward progress that was KEPT — bytes still in a
+ * resumable partial (a network failure) or a validated file. Never merely because the WS
+ * reconnected (handshakes can succeed while HTTP keeps failing), and never for bytes an attempt
+ * then discarded (failed fingerprint, bad status): those would refill the budget forever.
  */
-export function earnsRetryBudget(bytesThisAttempt: number): boolean {
-  return Number.isFinite(bytesThisAttempt) && bytesThisAttempt >= MEANINGFUL_PROGRESS_BYTES
+export function earnsRetryBudget(bytesThisAttempt: number, bytesRetained: boolean): boolean {
+  return bytesRetained && Number.isFinite(bytesThisAttempt) && bytesThisAttempt >= MEANINGFUL_PROGRESS_BYTES
 }
 
 /**

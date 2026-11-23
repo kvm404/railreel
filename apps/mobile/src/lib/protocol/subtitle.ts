@@ -87,16 +87,38 @@ export function parseSubtitlePayload(msg: unknown): SubtitlePayload | null {
   return { kind: 'load', name: o.name, content: o.content, rev: subtitleRev(o.content) }
 }
 
+/** A guest's outstanding pull for one revision. */
+export interface SubtitlePull {
+  rev: string
+  /** When the latest request for `rev` went out (ms). */
+  at: number
+  /** Requests sent for `rev` so far. */
+  tries: number
+}
+
+/** An unanswered pull is re-sent after this long (the reply can be lost with a dropped socket). */
+export const SUBTITLE_PULL_TIMEOUT_MS = 5000
+/** Requests per revision before giving up until the roster or the connection changes. */
+export const SUBTITLE_PULL_MAX_TRIES = 4
+
 /**
  * Should a guest ask the host for the subtitle body? Yes when the roster names a revision we
- * don't have and haven't already asked for on this connection.
+ * don't have and haven't asked for yet — or asked for, but got no answer within the timeout
+ * (bounded, so a host that never answers can't make it spin).
  */
 export function needsSubtitleFetch(
   localRev: string | null,
   roster: SubtitleMeta | null | undefined,
-  requestedRev: string | null,
+  pull: SubtitlePull | null,
+  nowMs: number,
 ): boolean {
   if (!roster) return false
   if (roster.rev === localRev) return false
-  return roster.rev !== requestedRev
+  if (!pull || pull.rev !== roster.rev) return true
+  return pull.tries < SUBTITLE_PULL_MAX_TRIES && nowMs - pull.at >= SUBTITLE_PULL_TIMEOUT_MS
+}
+
+/** Record one more request for `rev` (a new revision starts a fresh count). */
+export function recordSubtitlePull(pull: SubtitlePull | null, rev: string, nowMs: number): SubtitlePull {
+  return pull && pull.rev === rev ? { rev, at: nowMs, tries: pull.tries + 1 } : { rev, at: nowMs, tries: 1 }
 }
