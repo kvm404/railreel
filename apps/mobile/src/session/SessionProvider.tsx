@@ -2105,121 +2105,122 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const gen = ++connGenRef.current
       liveConnRef.current = gen
       const current = (): boolean => !disposedRef.current && epochRef.current === epoch && liveConnRef.current === gen
+      const opening = openSyncSession(
+        payload.host,
+        payload.wsPort,
+        payload.token,
+        (raw) => {
+          if (!current()) return // an abandoned / superseded socket (or a dead provider) must not act
+          const r = parseServerMsg(JSON.stringify(raw))
+          if (!r.ok) return
+          const m = r.msg
+          if (m.t === 'requestDecision' && m.id === myId) {
+            if (m.approved) {
+              // A re-delivered approval (reconnect, host double-tap) while we're already
+              // transferring or done must not restart: a fresh start would delete a good file.
+              if (approvedRef.current && (downloadingRef.current || completeRef.current)) return
+              approvedRef.current = true // from now on, reconnects resume silently (no re-join)
+              setClientPhase('approved')
+              clientPhaseRef.current = 'approved'
+              startDownload()
+              maybeFetchSubtitle() // the roster may already have named a subtitle revision
+            } else {
+              approvedRef.current = false
+              setClientPhase('denied')
+              resetTransfer()
+              clientRef.current?.session.close()
+              clientRef.current = null
+            }
+          } else if (m.t === 'roster' && Array.isArray(m.participants)) {
+            // The roster carries the movie's metadata — what our own buffer math needs.
+            if (isMediaInfo(m.media)) {
+              mediaRef.current = m.media
+              setMovie({
+                title: m.media.title,
+                sizeBytes: m.media.sizeBytes,
+                durationSec: m.media.durationSec,
+                fastStart: m.media.fastStart === true,
+              })
+              // Decode preflight: can THIS phone's hardware handle the movie's frame size?
+              // (PRD accepts H.264 only, so video/avc.) Warn here, and flag the host via beats.
+              const w = m.media.width ?? 0
+              const h = m.media.height ?? 0
+              const ok = w > 0 && h > 0 ? RailReelHost.canDecode(m.media.videoMime || 'video/avc', w, h) : true
+              decodeOkRef.current = ok
+              setDecodeCaution(decodeWarning(ok, h))
+            }
+            // Subtitles: the roster names the current revision; the body is pulled when ours
+            // differs (identity is the content revision, so a same-name replacement reloads).
+            if (isMediaInfo(m.media)) {
+              const meta = isSubtitleMeta(m.media.subtitle) ? m.media.subtitle : null
+              rosterSubtitleRef.current = meta
+              if (meta) maybeFetchSubtitle()
+              else if (subtitleRef.current) clearSubtitle()
+            }
+            const list: Participant[] = m.participants
+              .filter(isParticipantInfo)
+              .map((q) => ({
+                id: q.id,
+                name: q.id === myId ? 'You' : q.name,
+                status: q.status,
+                progress: clamp01(q.progress),
+                downloadMbps: Number.isFinite(q.downloadMbps) ? q.downloadMbps : 0,
+                bufferedAheadSec: Number.isFinite(q.bufferedAheadSec) ? q.bufferedAheadSec : 0,
+                stalled: false, // roster is a lobby-phase view; stall is host-tracked during playback
+                inShow: false,
+                decodeOk: q.decodeOk !== false,
+                lastBeatAt: Date.now(),
+              }))
+            participantsRef.current = list
+            publishParticipants() // coalesced when only numbers moved (roster storms while downloading)
+          } else if (m.t === 'state') {
+            setPlayback(m.state) // host's authoritative playback; the Player drift-corrects to it
+          } else if (m.t === 'chat') {
+            // The host's echo is the single source of ordering — we never append optimistically,
+            // so our own line arrives here too and gets relabelled.
+            if (typeof m.from === 'string' && typeof m.text === 'string' && Number.isFinite(m.at)) {
+              const displayName = (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
+              ingestChat(displayName, m.text.slice(0, 280), m.at)
+            }
+          } else if (m.t === 'reaction') {
+            if (typeof m.from === 'string' && isValidReaction(m.emoji)) {
+              const displayName = (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
+              ingestReaction(displayName, m.emoji)
+            }
+          } else if (m.t === 'subtitle') {
+            const sub = parseSubtitlePayload(m)
+            if (sub?.kind === 'load') {
+              if (subtitleRef.current?.rev !== sub.rev) loadSubtitle(sub.name, sub.content, sub.rev)
+            } else if (sub?.kind === 'clear') {
+              clearSubtitle()
+            }
+          } else if (m.t === 'playbackRequestDecision') {
+            // Only the decision for OUR live request: a late one for an expired request is moot.
+            if (m.requesterId === myId && m.requestId === activeRequestIdRef.current) {
+              showRequestOutcome(playbackRequestOutcome(m))
+            }
+          } else if (m.t === 'ended') {
+            // The host wrapped the show / left. leave() clears everything (incl. sessionEnd), so
+            // set the designed end-state right after — Home surfaces it.
+            leave()
+            setSessionEnd({
+              kind: 'host-ended',
+              eyebrow: 'THE SHOW HAS ENDED',
+              headline: 'The cabin went dark',
+              body: 'The host ended the session. Thanks for riding along.',
+            })
+          }
+        },
+        // Socket dropped after we were live: kick off a reconnect (unless we're deliberately leaving).
+        () => {
+          if (current() && !leavingRef.current && roleRef.current === 'client') reconnectRef.current()
+        },
+        undefined,
+        abort.signal,
+      )
       let session: SyncSession
       try {
-        session = await openSyncSession(
-          payload.host,
-          payload.wsPort,
-          payload.token,
-          (raw) => {
-            if (!current()) return // an abandoned / superseded socket (or a dead provider) must not act
-            const r = parseServerMsg(JSON.stringify(raw))
-            if (!r.ok) return
-            const m = r.msg
-            if (m.t === 'requestDecision' && m.id === myId) {
-              if (m.approved) {
-                // A re-delivered approval (reconnect, host double-tap) while we're already
-                // transferring or done must not restart: a fresh start would delete a good file.
-                if (approvedRef.current && (downloadingRef.current || completeRef.current)) return
-                approvedRef.current = true // from now on, reconnects resume silently (no re-join)
-                setClientPhase('approved')
-                clientPhaseRef.current = 'approved'
-                startDownload()
-                maybeFetchSubtitle() // the roster may already have named a subtitle revision
-              } else {
-                approvedRef.current = false
-                setClientPhase('denied')
-                resetTransfer()
-                clientRef.current?.session.close()
-                clientRef.current = null
-              }
-            } else if (m.t === 'roster' && Array.isArray(m.participants)) {
-              // The roster carries the movie's metadata — what our own buffer math needs.
-              if (isMediaInfo(m.media)) {
-                mediaRef.current = m.media
-                setMovie({
-                  title: m.media.title,
-                  sizeBytes: m.media.sizeBytes,
-                  durationSec: m.media.durationSec,
-                  fastStart: m.media.fastStart === true,
-                })
-                // Decode preflight: can THIS phone's hardware handle the movie's frame size?
-                // (PRD accepts H.264 only, so video/avc.) Warn here, and flag the host via beats.
-                const w = m.media.width ?? 0
-                const h = m.media.height ?? 0
-                const ok = w > 0 && h > 0 ? RailReelHost.canDecode(m.media.videoMime || 'video/avc', w, h) : true
-                decodeOkRef.current = ok
-                setDecodeCaution(decodeWarning(ok, h))
-              }
-              // Subtitles: the roster names the current revision; the body is pulled when ours
-              // differs (identity is the content revision, so a same-name replacement reloads).
-              if (isMediaInfo(m.media)) {
-                const meta = isSubtitleMeta(m.media.subtitle) ? m.media.subtitle : null
-                rosterSubtitleRef.current = meta
-                if (meta) maybeFetchSubtitle()
-                else if (subtitleRef.current) clearSubtitle()
-              }
-              const list: Participant[] = m.participants
-                .filter(isParticipantInfo)
-                .map((q) => ({
-                  id: q.id,
-                  name: q.id === myId ? 'You' : q.name,
-                  status: q.status,
-                  progress: clamp01(q.progress),
-                  downloadMbps: Number.isFinite(q.downloadMbps) ? q.downloadMbps : 0,
-                  bufferedAheadSec: Number.isFinite(q.bufferedAheadSec) ? q.bufferedAheadSec : 0,
-                  stalled: false, // roster is a lobby-phase view; stall is host-tracked during playback
-                  inShow: false,
-                  decodeOk: q.decodeOk !== false,
-                  lastBeatAt: Date.now(),
-                }))
-              participantsRef.current = list
-              publishParticipants() // coalesced when only numbers moved (roster storms while downloading)
-            } else if (m.t === 'state') {
-              setPlayback(m.state) // host's authoritative playback; the Player drift-corrects to it
-            } else if (m.t === 'chat') {
-              // The host's echo is the single source of ordering — we never append optimistically,
-              // so our own line arrives here too and gets relabelled.
-              if (typeof m.from === 'string' && typeof m.text === 'string' && Number.isFinite(m.at)) {
-                const displayName = (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
-                ingestChat(displayName, m.text.slice(0, 280), m.at)
-              }
-            } else if (m.t === 'reaction') {
-              if (typeof m.from === 'string' && isValidReaction(m.emoji)) {
-                const displayName = (m.fromId ? m.fromId === myId : m.from === name) ? 'You' : m.from
-                ingestReaction(displayName, m.emoji)
-              }
-            } else if (m.t === 'subtitle') {
-              const sub = parseSubtitlePayload(m)
-              if (sub?.kind === 'load') {
-                if (subtitleRef.current?.rev !== sub.rev) loadSubtitle(sub.name, sub.content, sub.rev)
-              } else if (sub?.kind === 'clear') {
-                clearSubtitle()
-              }
-            } else if (m.t === 'playbackRequestDecision') {
-              // Only the decision for OUR live request: a late one for an expired request is moot.
-              if (m.requesterId === myId && m.requestId === activeRequestIdRef.current) {
-                showRequestOutcome(playbackRequestOutcome(m))
-              }
-            } else if (m.t === 'ended') {
-              // The host wrapped the show / left. leave() clears everything (incl. sessionEnd), so
-              // set the designed end-state right after — Home surfaces it.
-              leave()
-              setSessionEnd({
-                kind: 'host-ended',
-                eyebrow: 'THE SHOW HAS ENDED',
-                headline: 'The cabin went dark',
-                body: 'The host ended the session. Thanks for riding along.',
-              })
-            }
-          },
-          // Socket dropped after we were live: kick off a reconnect (unless we're deliberately leaving).
-          () => {
-            if (current() && !leavingRef.current && roleRef.current === 'client') reconnectRef.current()
-          },
-          undefined,
-          abort.signal,
-        )
+        session = await opening
       } finally {
         if (handshakeAbortRef.current === abort) handshakeAbortRef.current = null
       }
