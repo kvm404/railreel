@@ -13,8 +13,13 @@ export interface ChatEntry {
   id: number
   from: string
   text: string
-  /** Host wall-clock ms stamp (ordering + ticker freshness). */
+  /** Host wall-clock ms stamp — the time shown next to the line (the room's one clock). */
   at: number
+  /**
+   * THIS phone's wall-clock ms when the line arrived — ticker freshness. Never compare `at`
+   * with the local clock: host and guest clocks can be tens of seconds apart.
+   */
+  receivedAt: number
 }
 
 /** A reaction event as the UI consumes it. */
@@ -44,14 +49,14 @@ export function appendCapped<T>(log: readonly T[], entry: T, cap: number): T[] {
 }
 
 /**
- * The subtitle ticker shows the last few FRESH lines: at most `max`, none older than `windowMs`.
- * Anything older belongs to the sheet, not the film.
+ * The subtitle ticker shows the last few FRESH lines: at most `max`, none received more than
+ * `windowMs` ago (`nowMs` is this phone's Date.now()). Anything older belongs to the sheet.
  */
 export function tickerWindow(log: readonly ChatEntry[], nowMs: number, windowMs = 6000, max = 3): ChatEntry[] {
   const fresh: ChatEntry[] = []
   for (let i = log.length - 1; i >= 0 && fresh.length < max; i--) {
     const entry = log[i]
-    if (!entry || nowMs - entry.at > windowMs) break // log is time-ordered — earlier is older
+    if (!entry || nowMs - entry.receivedAt > windowMs) break // log is arrival-ordered — earlier is older
     fresh.unshift(entry)
   }
   return fresh

@@ -568,10 +568,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // local sequence for animation keys + lane assignment; freshness is judged by local receipt
   // time so cross-device clock skew can't strand or fast-expire an animation.
   // Chat lines get a local monotonic id: stable list keys + the unread cursor (works past the cap).
+  // `at` stays the host's stamp (displayed time); the ticker ages a line by `receivedAt`, our
+  // own clock at arrival, so host/guest clock skew can't hide or strand it.
   const chatSeqRef = useRef(0)
   const ingestChat = useCallback((from: string, text: string, at: number) => {
     const id = ++chatSeqRef.current
-    setChatLog((log) => appendCapped(log, { id, from, text, at }, CHAT_LOG_CAP))
+    const receivedAt = Date.now()
+    setChatLog((log) => appendCapped(log, { id, from, text, at, receivedAt }, CHAT_LOG_CAP))
   }, [])
   const ingestReaction = useCallback((from: string, emoji: string) => {
     const seq = ++reactionSeqRef.current
