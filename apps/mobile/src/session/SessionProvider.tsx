@@ -19,6 +19,7 @@ import {
   isKeptMovieIntact,
   keptReuseDecision,
   parseKeptMovieMeta,
+  runExclusive,
   sweepOrphanCache,
   type CacheStatus,
   type ClearCacheResult,
@@ -975,30 +976,54 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return status
   }, [])
 
+  // Ownership: the purge belongs to the session it was called in. BEFORE its first await it
+  // cancels that session's transfer + detaches the player (resetTransfer) and takes its place in
+  // the module-level movieCacheOwner queue — so it waits for any writer still unwinding, and a
+  // newer session's download (queued after it) can't start until the delete is done. Nothing it
+  // does after yielding may reset, stop or clear what a newer session owns.
   const purgeCache = useCallback(
-    async (options?: { movie?: boolean; subtitles?: boolean }): Promise<ClearCacheResult> => {
-      const result = await clearSessionCache({
-        movie: options?.movie,
-        subtitles: options?.subtitles,
-        cacheDir: CACHE_DIR,
-        fs: fsAdapter,
-        hooks: {
-          detachMedia: async () => {
-            setMovieUri(null)
-            await RailReelHost.stopProxy().catch(() => {})
-          },
-          cancelDownloads: async () => {
-            resetTransfer()
-          },
+    (options?: { movie?: boolean; subtitles?: boolean }): Promise<ClearCacheResult> => {
+      const myEpoch = epochRef.current
+      const stale = (): boolean => disposedRef.current || epochRef.current !== myEpoch
+      const wantMovie = options?.movie !== false
+      const wantSubtitles = options?.subtitles !== false
+      resetTransfer() // synchronous: this session's download, retry timer, proxy and source
+      const unlink = runExclusive(
+        movieCacheOwner,
+        PREV_ATTEMPT_CEILING_MS,
+        sleep,
+        async (): Promise<ClearCacheResult> => {
+          // Let the proxy's fd go before unlinking — unless a newer session took over (then any
+          // proxy is its own; its download is queued behind us, so the file isn't in use yet).
+          if (!stale()) await RailReelHost.stopProxy().catch(() => {})
+          return clearSessionCache({
+            movie: wantMovie,
+            // The subtitle file isn't in the queue: a newer session may already have written it.
+            subtitles: wantSubtitles && !stale(),
+            cacheDir: CACHE_DIR,
+            fs: fsAdapter,
+          })
         },
+        (): ClearCacheResult => ({
+          cleared: [],
+          failed: [
+            ...(wantMovie ? [MOVIE_CACHE] : []),
+            ...(wantSubtitles ? [SUBTITLE_CACHE] : []),
+          ].map((path) => ({ path, error: 'the previous transfer is still shutting down' })),
+          remainingBytes: 0,
+          ok: false,
+        }),
+      )
+      return unlink.then(async (result) => {
+        if (wantSubtitles && !stale()) {
+          subtitleRef.current = null
+          setSubtitle(null)
+        }
+        if (!disposedRef.current) await getCacheInfo().catch(() => {})
+        return result
       })
-      if (options?.subtitles !== false) {
-        await clearSubtitle()
-      }
-      await getCacheInfo()
-      return result
     },
-    [clearSubtitle, getCacheInfo, resetTransfer],
+    [getCacheInfo, resetTransfer],
   )
 
   useEffect(() => {

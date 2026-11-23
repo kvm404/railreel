@@ -52,3 +52,19 @@ export async function awaitOwnership(
   if (!prev) return true
   return Promise.race([prev.then(() => true), sleep(ceilingMs).then(() => false)])
 }
+
+/**
+ * Queue exclusive work on the file (a cache purge): registered in `queue` SYNCHRONOUSLY — so
+ * anything queued after this call (a newer session's download) waits for it — then run once
+ * everything before it has settled. If a predecessor is still running past `ceilingMs`,
+ * `onBusy` reports why instead (the file is never touched under a live writer).
+ */
+export function runExclusive<T>(
+  queue: OwnershipQueue,
+  ceilingMs: number,
+  sleep: (ms: number) => Promise<void>,
+  work: () => Promise<T>,
+  onBusy: () => T,
+): Promise<T> {
+  return queue.run(async (prev) => ((await awaitOwnership(prev, ceilingMs, sleep)) ? work() : onBusy()))
+}
