@@ -4,13 +4,14 @@ import Animated, {
   Easing,
   runOnJS,
   useAnimatedStyle,
-  useReducedMotion,
   useSharedValue,
   withTiming,
 } from 'react-native-reanimated'
 import { WindowAtmosphere } from '@/components/WindowAtmosphere'
-import { motion } from '@/theme/tokens'
+import { useReduceMotion } from '@/hooks/useReduceMotion'
+import { motion, palette } from '@/theme/tokens'
 import { createBackRegistry } from '@/lib/nav/backStack'
+import { ENTER_SHIFT, LEAVE_SHIFT, retainsOutgoing, stagedAtmosphere } from '@/lib/nav/transition'
 import { BackRegistryContext, NavContext, RouteKeyContext, type NavParams, type RouteName } from './context'
 
 export type ScreenComponent = ComponentType<{ params?: NavParams }>
@@ -25,21 +26,26 @@ const makeEntry = (name: RouteName, params?: NavParams): Entry => ({
 })
 
 /**
- * Custom stack navigator. Renders the top screen over a persistent WindowAtmosphere;
- * each navigation slides the new screen in (direction-aware) and respects reduce-motion.
+ * Custom stack navigator. Renders the top screen over a persistent WindowAtmosphere; each
+ * navigation is a ~420ms horizontal parallax: the incoming screen slides in (direction-aware) while
+ * the outgoing one stays on stage, drifting the other way and fading, so the window behind visibly
+ * connects the two. Under reduce-motion (read live) it is an instant swap. The window's strength
+ * follows the route (off behind the opaque Player) — see lib/nav/transition.
  * Android Back is routed through the top screen's `useBackHandler` registrations, so hardware
- * Back runs the same exit logic as the on-screen back button.
+ * Back runs the same exit logic as the on-screen back button; an outgoing screen is untouchable,
+ * hidden from TalkBack and never receives Back.
  *
- * v1 note: only the top route is mounted — going back remounts the previous screen
- * (Home replays its intro; no form/discovery state is retained). Fine while screens are
- * stateless/mock; revisit when a screen needs to preserve state across navigation.
+ * v1 note: only the top route stays mounted once a transition settles — going back remounts the
+ * previous screen (Home replays its intro; no form/discovery state is retained).
  */
 export function Navigator({ routes, initial }: { routes: Routes; initial: RouteName }) {
   const [stack, setStack] = useState<Entry[]>(() => [makeEntry(initial)])
   // Mirror of the stack, updated synchronously on every change: two navigation calls in the same
   // tick (e.g. a leave() handler and a role-loss redirect) must see each other's result.
   const stackRef = useRef(stack)
-  const reduced = useReducedMotion()
+  // The screen on its way out, kept on stage until the transition settles (null: none / swapped).
+  const [leaving, setLeaving] = useState<Entry | null>(null)
+  const reduced = useReduceMotion()
   const anim = useSharedValue(1)
   const dirSv = useSharedValue<1 | -1>(1) // 1 = forward (push), -1 = back (pop)
   const transitioning = useRef(false)
@@ -50,16 +56,20 @@ export function Navigator({ routes, initial }: { routes: Routes; initial: RouteN
 
   const commit = useCallback(
     (next: Entry[], d: 1 | -1) => {
+      const prevTop = stackRef.current[stackRef.current.length - 1]
       transitioning.current = true
       dirSv.value = d
       if (!reduced) anim.value = 0 // reset BEFORE the new screen paints (no flash)
       stackRef.current = next
       setStack(next)
+      // A reset mid-transition hands the stage to the half-arrived screen; the older one just goes.
+      setLeaving(prevTop && retainsOutgoing(prevTop.name, reduced) ? prevTop : null)
     },
     [reduced, anim, dirSv],
   )
   const endTransition = useCallback(() => {
     transitioning.current = false
+    setLeaving(null)
   }, [])
 
   // One navigation at a time — blocks double-tap double-push and rapid multi-pop.
@@ -114,6 +124,7 @@ export function Navigator({ routes, initial }: { routes: Routes; initial: RouteN
     if (reduced) {
       anim.value = 1
       transitioning.current = false
+      setLeaving(null)
       return
     }
     anim.value = 0
@@ -126,27 +137,45 @@ export function Navigator({ routes, initial }: { routes: Routes; initial: RouteN
     )
   }, [top.key, reduced, anim, endTransition])
 
-  const screenStyle = useAnimatedStyle(() => ({
+  const enterStyle = useAnimatedStyle(() => ({
     opacity: anim.value,
-    transform: [{ translateX: (1 - anim.value) * 28 * dirSv.value }],
+    transform: [{ translateX: (1 - anim.value) * ENTER_SHIFT * dirSv.value }],
+  }))
+  // The outgoing screen drifts the other way at half the distance (it is "further away").
+  const leaveStyle = useAnimatedStyle(() => ({
+    opacity: 1 - anim.value,
+    transform: [{ translateX: -anim.value * LEAVE_SHIFT * dirSv.value }],
   }))
 
   const api = useMemo(
     () => ({ navigate, replace, reset, goBack, canGoBack }),
     [navigate, replace, reset, goBack, canGoBack],
   )
-  const Screen = routes[top.name]
+  // Keyed by entry, so the screen that was on top keeps its instance as it becomes the outgoing one.
+  const stage = leaving && leaving.key !== top.key ? [leaving, top] : [top]
+  const atmosphere = stagedAtmosphere(top.name, stage.length > 1 ? leaving!.name : null)
 
   return (
     <NavContext.Provider value={api}>
       <BackRegistryContext.Provider value={backRegistry}>
         <View style={styles.root}>
-          <WindowAtmosphere intensity={1} />
-          <Animated.View key={top.key} style={[StyleSheet.absoluteFill, screenStyle]}>
-            <RouteKeyContext.Provider value={top.key}>
-              <Screen params={top.params} />
-            </RouteKeyContext.Provider>
-          </Animated.View>
+          {atmosphere > 0 ? <WindowAtmosphere intensity={atmosphere} /> : null}
+          {stage.map((entry) => {
+            const isTop = entry.key === top.key
+            const Screen = routes[entry.name]
+            return (
+              <Animated.View
+                key={entry.key}
+                style={[StyleSheet.absoluteFill, isTop ? enterStyle : leaveStyle]}
+                pointerEvents={isTop ? 'auto' : 'none'}
+                importantForAccessibility={isTop ? 'auto' : 'no-hide-descendants'}
+              >
+                <RouteKeyContext.Provider value={entry.key}>
+                  <Screen params={entry.params} />
+                </RouteKeyContext.Provider>
+              </Animated.View>
+            )
+          })}
         </View>
       </BackRegistryContext.Provider>
     </NavContext.Provider>
@@ -154,5 +183,6 @@ export function Navigator({ routes, initial }: { routes: Routes; initial: RouteN
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
+  // The window's own base colour, for the moments it is unmounted (behind the Player).
+  root: { flex: 1, backgroundColor: palette.base },
 })
