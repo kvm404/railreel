@@ -24,6 +24,15 @@ export default defineConfig([
     },
   },
   {
+    // Config files and Expo config plugins run in Node, not the app runtime.
+    files: ['**/*.{js,cjs,mjs}'],
+    extends: [js.configs.recommended],
+    languageOptions: {
+      ecmaVersion: 2022,
+      globals: { ...globals.node },
+    },
+  },
+  {
     files: ['apps/mobile/**/*.{ts,tsx}'],
     languageOptions: {
       globals: { ...globals.browser, ...globals.node },

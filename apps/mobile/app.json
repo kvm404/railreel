@@ -10,7 +10,6 @@
     "newArchEnabled": true,
     "android": {
       "package": "com.kvm404.railreel",
-      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "backgroundColor": "#0B0B0F",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -47,7 +46,8 @@
           "imageWidth": 180
         }
       ],
-      "expo-video"
+      "expo-video",
+      "./plugins/withCleartextTraffic"
     ],
     "platforms": [
       "android"
