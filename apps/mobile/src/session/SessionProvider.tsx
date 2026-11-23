@@ -158,6 +158,25 @@ const REACTION_SEND_GAP_MS = 250
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 export type Role = 'none' | 'host' | 'client'
+
+/** The movie as the UI needs it (from the host's probe, or the roster's media on a guest). */
+export type MovieSummary = {
+  title: string
+  sizeBytes: number
+  durationSec: number
+  fastStart: boolean
+  /** The host's integrity fingerprint ("qf1:…"), '' until it lands — moments after hosting
+   *  starts. With sizeBytes it identifies the movie (lib/storage movieIdentity: quick rejoin). */
+  hash: string
+}
+
+const sameMovie = (a: MovieSummary | null, b: MovieSummary): boolean =>
+  a !== null &&
+  a.title === b.title &&
+  a.sizeBytes === b.sizeBytes &&
+  a.durationSec === b.durationSec &&
+  a.fastStart === b.fastStart &&
+  a.hash === b.hash
 export type { HostNetwork, HostNetworkKind } from '@/lib/net/hostNetwork'
 
 /** A person in the lobby, as the UI needs them (grant stays host-side only, never in state). */
@@ -195,7 +214,7 @@ export interface SessionStore {
   role: Role
   error: string | null
   /** durationSec 0 (probe failed) or fastStart false degrade the start gate to full pre-cache. */
-  movie: { title: string; sizeBytes: number; durationSec: number; fastStart: boolean } | null
+  movie: MovieSummary | null
   participants: Participant[]
 
   // host
@@ -358,7 +377,7 @@ type GrantMap = Map<string, string>
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [role, setRole] = useState<Role>('none')
   const [error, setError] = useState<string | null>(null)
-  const [movie, setMovie] = useState<{ title: string; sizeBytes: number; durationSec: number; fastStart: boolean } | null>(null)
+  const [movie, setMovie] = useState<MovieSummary | null>(null)
   const [participants, setParticipants] = useState<Participant[]>([])
 
   const [hostPhase, setHostPhase] = useState<HostPhase>('idle')
@@ -1276,7 +1295,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         // Metadata only — the body never rides the roster (see attachSubtitle / sendSubtitleTo).
         ...(subtitleRef.current ? { subtitle: subtitleMeta(subtitleRef.current.name, subtitleRef.current.content) } : {}),
       }
-      setMovie({ title, sizeBytes, durationSec, fastStart })
+      setMovie({ title, sizeBytes, durationSec, fastStart, hash: '' })
       setMovieUri(asset.uri) // the host plays the same source it shares
 
       // Seed the roster with the host (it already has the file).
@@ -1300,6 +1319,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           .then((hash) => {
             if (epochRef.current !== hostEpoch || !mediaRef.current) return // session changed — drop
             mediaRef.current = { ...mediaRef.current, hash }
+            setMovie((m) => (m ? { ...m, hash } : m))
             if (roleRef.current === 'host') broadcastRoster(participantsRef.current)
           })
           .catch(() => {})
@@ -2135,12 +2155,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             // The roster carries the movie's metadata — what our own buffer math needs.
             if (isMediaInfo(m.media)) {
               mediaRef.current = m.media
-              setMovie({
+              const summary: MovieSummary = {
                 title: m.media.title,
                 sizeBytes: m.media.sizeBytes,
                 durationSec: m.media.durationSec,
                 fastStart: m.media.fastStart === true,
-              })
+                hash: typeof m.media.hash === 'string' ? m.media.hash : '',
+              }
+              // Rosters arrive on every download percent: keep the same object when nothing changed.
+              setMovie((prev) => (sameMovie(prev, summary) ? prev : summary))
               // Decode preflight: can THIS phone's hardware handle the movie's frame size?
               // (PRD accepts H.264 only, so video/avc.) Warn here, and flag the host via beats.
               const w = m.media.width ?? 0
