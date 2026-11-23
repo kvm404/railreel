@@ -15,7 +15,7 @@ import { motion } from '@/theme/tokens'
  * manifest. A warm amber fill glides across a cold track and glows brighter as it ignites toward
  * 100%. Static under reduce-motion. See docs/design-language.md.
  */
-export function FilamentBar({ progress, height = 8 }: { progress: number; height?: number }) {
+export function FilamentBar({ progress, height = 8, label = 'Download progress' }: { progress: number; height?: number; label?: string }) {
   const t = useTheme()
   const reduced = useReduceMotion()
   const p = useSharedValue(clamp01(progress))
@@ -29,7 +29,13 @@ export function FilamentBar({ progress, height = 8 }: { progress: number; height
   const tipStyle = useAnimatedStyle(() => ({ opacity: 0.35 + 0.65 * p.value }))
 
   return (
-    <View style={[styles.track, { height, borderRadius: height, backgroundColor: t.palette.base, borderColor: t.palette.hairline }]}>
+    <View
+      accessible
+      accessibilityRole="progressbar"
+      accessibilityLabel={label}
+      accessibilityValue={{ min: 0, max: 100, now: Math.round(clamp01(progress) * 100) }}
+      style={[styles.track, { height, borderRadius: height, backgroundColor: t.palette.base, borderColor: t.palette.hairline }]}
+    >
       <Animated.View style={[styles.fill, { borderRadius: height }, fillStyle]}>
         <LinearGradient
           colors={[t.palette.amberDeep, t.palette.amber, t.palette.amberGlow]}
