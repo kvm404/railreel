@@ -1,24 +1,27 @@
 import { useRef, useState } from 'react'
-import { Linking, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native'
+import { Linking, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native'
 import { CameraView, useCameraPermissions } from 'expo-camera'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { X } from 'lucide-react-native'
 import { Button, Text } from '@/ui'
+import { IconButton } from '@/ui/IconButton'
 import { useTheme } from '@/theme/ThemeProvider'
 import { radii, sizes } from '@/theme/tokens'
+import { BOTTOM_PAD, CLOSE_STRIP, SCANNER_GAP, SIDE_PAD, scannerReticle } from '@/lib/layout/scanner'
 import { decodeJoinUrl, isVersionMismatch, VERSION_MISMATCH_MESSAGE } from '@/lib/protocol'
 import { useBackHandler } from '@/navigation/context'
 
 /**
  * Full-screen QR scanner overlay. Reads the host's join QR and hands back the raw railreel://
  * link. Non-RailReel codes are ignored so a stray QR can't hijack the flow. See JoinSessionScreen.
+ *
+ * The reticle is sized after the instruction and any action have their room (lib/layout/scanner),
+ * inside the safe area; if even the smallest reticle doesn't fit, the overlay scrolls.
  */
 export function QrScanner({ onScan, onClose }: { onScan: (data: string) => void; onClose: () => void }) {
   const t = useTheme()
   const insets = useSafeAreaInsets()
-  const { width, height } = useWindowDimensions()
-  // Keep the reticle (and the text under it) on-screen in landscape / split-screen.
-  const reticleSize = Math.max(140, Math.min(240, Math.floor(Math.min(width, height) * 0.55)))
+  const { width, height, fontScale } = useWindowDimensions()
   const [permission, requestPermission] = useCameraPermissions()
   const [hint, setHint] = useState(false)
   // A real RailReel code from another app version: say so (and how to fix it), don't call it junk.
@@ -49,6 +52,8 @@ export function QrScanner({ onScan, onClose }: { onScan: (data: string) => void;
 
   const granted = permission?.granted ?? false
   const blocked = permission != null && !permission.granted && !permission.canAskAgain
+  const hasAction = !granted || versionMismatch
+  const reticleSize = scannerReticle({ width, height, insets, fontScale, hasAction })
 
   return (
     <View style={[styles.fill, { backgroundColor: t.palette.void }]}>
@@ -62,7 +67,19 @@ export function QrScanner({ onScan, onClose }: { onScan: (data: string) => void;
       ) : null}
 
       {/* dim + framing reticle */}
-      <View style={styles.overlay}>
+      <ScrollView
+        style={StyleSheet.absoluteFill}
+        contentContainerStyle={[
+          styles.overlay,
+          {
+            paddingTop: insets.top + CLOSE_STRIP,
+            paddingBottom: insets.bottom + BOTTOM_PAD,
+            paddingLeft: insets.left + SIDE_PAD,
+            paddingRight: insets.right + SIDE_PAD,
+          },
+        ]}
+        showsVerticalScrollIndicator={false}
+      >
         {granted ? <View style={[styles.reticle, { width: reticleSize, height: reticleSize, borderColor: t.palette.amber }]} /> : null}
         <Text variant="data" tone="primary" style={[styles.caption, { backgroundColor: t.veils.scrim }]}>
           {granted
@@ -93,37 +110,28 @@ export function QrScanner({ onScan, onClose }: { onScan: (data: string) => void;
             <Button title="Allow camera" intent="amber" height={56} onPress={requestPermission} />
           )
         ) : null}
-      </View>
+      </ScrollView>
 
-      <Pressable
-        onPress={onClose}
-        hitSlop={12}
-        accessibilityRole="button"
+      {/* The shared control: pressed wash/scale, focus ring, a real 44dp target. Clears the status
+          bar / cutout / gesture bar in any orientation. */}
+      <IconButton
+        variant="glass"
+        size={sizes.touch}
+        minTouch={sizes.touch}
+        haptic="none"
+        icon={(c) => <X size={22} color={c} strokeWidth={2.25} />}
         accessibilityLabel="Close scanner"
-        style={[
-          styles.close,
-          // Clear the status bar / cutout / gesture bar in any orientation.
-          { top: insets.top + 12, right: insets.right + 16, borderColor: t.palette.hairline, backgroundColor: t.palette.raised },
-        ]}
-      >
-        <X size={22} color={t.palette.textSecondary} strokeWidth={2.25} />
-      </Pressable>
+        onPress={onClose}
+        style={[styles.close, { top: insets.top + 12, right: insets.right + 16 }]}
+      />
     </View>
   )
 }
 
 const styles = StyleSheet.create({
   fill: { ...StyleSheet.absoluteFill, zIndex: 10 },
-  overlay: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 22, paddingHorizontal: 32 },
-  reticle: { width: 240, height: 240, borderWidth: 2, borderRadius: radii.xl },
+  overlay: { flexGrow: 1, alignItems: 'center', justifyContent: 'center', gap: SCANNER_GAP },
+  reticle: { borderWidth: 2, borderRadius: radii.xl },
   caption: { textAlign: 'center', paddingHorizontal: 14, paddingVertical: 8, borderRadius: radii.md, overflow: 'hidden' },
-  close: {
-    position: 'absolute',
-    width: sizes.touch,
-    height: sizes.touch,
-    borderRadius: sizes.touch / 2,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  close: { position: 'absolute' },
 })
