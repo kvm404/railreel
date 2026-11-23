@@ -50,7 +50,7 @@ export function PlayerScreen() {
   const isHost = s.role === 'host'
   // Stable handles: the session object's identity changes on every roster/heartbeat, so depending on
   // `s` directly would tear down and rebuild our effects/listeners constantly.
-  const { setHostPlayback, reportPlayback, hostNowMs } = s
+  const { setHostPlayback, reportPlayback, hostNowMs, getCacheInfo } = s
   const playback = s.playback
   const playbackRef = useRef(playback)
   playbackRef.current = playback // always read the latest host state without re-creating `correct`
@@ -77,12 +77,11 @@ export function PlayerScreen() {
   const [showCleanupSheet, setShowCleanupSheet] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
 
-  // Query cache status when playback concludes
+  // Query cache status once when playback concludes. Depend on the stable callback, not `s`: the
+  // query itself sets a fresh cacheStatus (a new `s`), which would otherwise re-run this forever.
   useEffect(() => {
-    if (ended) {
-      s.getCacheInfo().catch(() => {})
-    }
-  }, [ended, s])
+    if (ended) getCacheInfo().catch(() => {})
+  }, [ended, getCacheInfo])
 
   // Back (header or hardware): after The End, offer the cache cleanup; otherwise step out to the
   // Lobby (the session stays). A follower marks itself out of the show in the SAME update as the
