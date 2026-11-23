@@ -35,13 +35,21 @@ phones, stop: that's the wrong direction. See `docs/architecture.md` §5.
   - `src/net/` — host servers (http + ws + mDNS) and client (discovery + download + ws).
   - `src/data/` — local persistence; `src/types/` — shared types.
   - `apps/mobile/modules/` — native modules (mDNS, embedded servers) where no good lib exists.
-- `docs/` — PRD (`docs/prd/`) and architecture.
+- `docs/` — PRD (`docs/prd/`), architecture, native-module notes, design language.
+- `CONTRIBUTING.md` — setup, checks, PR flow, device testing, releases.
 
 ## Tooling
 
 - **bun** is the package manager and workspace runner. Use `bun`, not npm/yarn/pnpm.
 - **Expo custom dev client** (`expo-dev-client`) — Expo Go is NOT sufficient (native modules).
-- React Native 0.81 / React 19 / Expo SDK 54, **TypeScript strict**.
+- React Native 0.85 / React 19.2 / Expo SDK 56, **TypeScript strict** (mobile app on TS 6.0).
+- **Releases** are cut by **release-please** (Conventional Commits → release PR → tag → draft
+  release); the `build-apk` workflow then builds and attaches a universal (arm64-v8a +
+  armeabi-v7a) APK. See `CONTRIBUTING.md`.
+- **CI** (`.github/workflows/ci.yml`) runs lint, typecheck and tests on every PR, plus a
+  **native (Android compile)** job that compiles the Kotlin of `modules/railreel-host` whenever
+  native paths change. Kotlin can't be compiled on a laptop here — CI is the check; native changes
+  also need an APK rebuild to test on a device.
 - **Android-only.** The app is designed exclusively for Android devices.
 
 ## Testing

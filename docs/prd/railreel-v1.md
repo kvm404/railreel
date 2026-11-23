@@ -17,7 +17,7 @@ So shared, on-the-go movie watching doesn't happen — even though the desire cl
 
 One person (the **host**) already has a movie file on their phone. Friends connect to the
 host's **WiFi hotspot** (no internet). The app distributes the movie to each phone and then
-keeps everyone's playback **perfectly in sync**, each on their own screen and headphones —
+keeps everyone's playback **in sync**, each on their own screen and headphones —
 with live reactions and chat so it still feels like watching *together*.
 
 ## 3. Target users & scale
@@ -65,7 +65,7 @@ This still fixes the real-world risks, with honest framing:
 | --- | --- |
 | Hotspot bandwidth | Transfer is decoupled from frame timing; for high bitrate × big groups we pre-cache before play and surface an ETA rather than promising real-time. |
 | Host battery/heat | Host isn't transcoding or re-encoding; it serves bytes (native data plane) + sends clock pings. Host must stay foreground/awake/charged (see §8). |
-| Sync precision | Sync is clock alignment, not pixel delivery → tight *perceived* sync (target ~sub-100ms), actuated with scheduled start + ready-ACKs (see architecture §5). |
+| Sync precision | Sync is clock alignment, not pixel delivery → tight *perceived* sync (target ~sub-100ms), kept together by the host's authoritative state plus guest-side drift correction (see architecture §5). |
 
 See [`docs/architecture.md`](../architecture.md) for the full networking, sync, and buffering design.
 
@@ -81,25 +81,35 @@ See [`docs/architecture.md`](../architecture.md) for the full networking, sync, 
 - **Native** HTTP data-plane server with `Range` support (not a JS-bridge server) → file
   transfer; **all WS + HTTP access requires the session token**, bytes served only to approved
   clients.
-- Local playback fed through a **caching player source** (ExoPlayer `CacheDataSource` or a
-  local proxy) — never point the player at a partially-written file.
+- Local playback fed through a **localhost playback proxy** (`ProxyServer`) so the player never
+  opens a partially-written file; `expo-video` is the player.
 - **Adaptive start gate** (aggregate-throughput aware) + **group buffer floor with hysteresis
-  & a host "continue without client" / evict option** (§7).
-- Clock sync from **monotonic** clocks; resume actuated by **scheduling a future host time +
-  ready-ACKs**; tight perceived sync (~sub-100ms target), likely with native timing help.
-- **Host-only controls**; participants send requests to host (no delegation in v1).
+  & a host "Play without {name}" override** (§7).
+- Clock sync from **monotonic** clocks (host side answered natively); the host plays and
+  broadcasts state immediately and each guest drift-corrects toward it; tight *perceived* sync (measured ~50-80 ms
+  steady-state drift on test devices; not frame-accurate).
+- **Host-only controls**; participants send **playback requests** (pause, rewind 15 s) that the
+  host allows with one tap (no delegation in v1). The host starts the show, then presses Play.
+- **Subtitles (SRT)**: the host attaches a `.srt`; guests receive it (revisioned, pulled on
+  demand) and can toggle captions.
+- **Transfer resilience**: downloads resume via HTTP Range after a hotspot drop and auto-retry
+  after reconnect; "Keep & Leave" keeps the movie and reuses it later via a content fingerprint.
+- **Protocol version gate**: phones on different versions refuse to join with a clear message.
 - **Floating emoji reactions** over the video + group chat.
-- Media: **already-compatible H.264 (AVC) + AAC MP4 only**, with a verified `moov`/fragment
-  layout. Container remux and any transcoding are **deferred** (too many edge cases for v1:
-  MKV+AC3/DTS, multi-track, Annex B, VFR, edit lists, storage). Reject others with a clear msg.
-- **Preflight checks:** measure real aggregate throughput with all clients connected; host
-  battery/thermal/storage check; pick progressive-start vs. full pre-cache accordingly.
+- Media: **H.264 (AVC) video in MP4/MOV, with AAC audio or none**, validated against the real container and track
+  codecs **before** any server starts. Container remux and any transcoding are **deferred** (too
+  many edge cases for v1: MKV+AC3/DTS, multi-track, Annex B, VFR, edit lists, storage). Others
+  are rejected with a clear message and a conversion hint. A fast-start layout enables
+  progressive start; otherwise guests pre-cache fully.
+- **Preflight checks:** the start gate uses each guest's measured throughput to pick
+  progressive-start vs. full pre-cache; the host sees battery warnings while hosting, and each guest checks free space before downloading (neither blocks startup).
 - Reconnection: a dropped client rejoins and resyncs to the host's timestamp.
-- Android.
+- Android 10+; universal APK (arm64-v8a + armeabi-v7a).
 
 **Out of scope (later versions)**
 
-- Subtitles (bundled SRT) — *planned next*.
+- Subtitle formats other than SRT; styling/positioning.
+- Scheduled (future-timestamp) resume and seek-complete ACKs; today the host plays immediately and guests drift-correct.
 - On-device transcoding / companion pre-trip converter.
 - Control delegation (host handing the remote to a friend).
 - More than ~6 participants.
@@ -114,13 +124,12 @@ Not a flat preload. Two mechanisms:
    catches the download edge: `remainingBytes / clientMbps < remainingPlayTime − margin`. If
    that doesn't hold for high-bitrate × big groups, switch to **full pre-cache before play**
    (show ETA). Clears in seconds on a good hotspot; waits (with a friendly reason) otherwise.
-2. **Group buffer floor (with hysteresis)** — the host polls each client's "seconds buffered
-   ahead" a few times per second. If any client drops below ~15s, the host **auto-pauses
+2. **Group buffer floor (with hysteresis)** — each guest reports its "seconds buffered ahead"
+   to the host in regular heartbeats. If any client drops below ~15s, the host **auto-pauses
    everyone** ("Waiting for {name}…"); it **auto-resumes** only after the laggard recovers to a
-   higher mark (~30s) and ACKs ready — hysteresis prevents pause/resume flapping. A persistently
-   slow client triggers a host choice: **keep waiting** or **continue without them** (they
-   rejoin in catch-up mode once they reach target + lead). One bad device can't hold the group
-   hostage indefinitely.
+   higher mark (~30s) — hysteresis prevents pause/resume flapping. While the room is held, the host can tap **"Play without {name}"** to override the hold
+   until that guest recovers. Guests that join late enter the running show only once they have
+   enough buffer.
 
 ## 8. Constraints & non-functional requirements
 
@@ -130,11 +139,13 @@ Not a flat preload. Two mechanisms:
 - **Android focus.** Both host and client roles work on Android.
 - **Host is the session's lifeline (explicit v1 constraint).** While hosting, the host phone
   must stay **foreground, awake (keep-awake on), powered enough, and on the hotspot**. The app
-  does a battery/thermal/storage preflight and states clearly: *if the host leaves/locks/kills
+  shows battery warnings while hosting (and guests check free storage before downloading), and states clearly: *if the host leaves/locks/kills
   the app or the hotspot drops, the session ends.* No background-hosting reliability promise.
-- **Security.** Each session has a high-entropy secret; WS control and HTTP byte-serving both
-  require it, and bytes go only to host-approved clients. Anyone merely on the hotspot can't
-  pull the movie. Include file hash/size metadata so clients verify integrity.
+- **Security.** Each session has a high-entropy token that is published on the hotspot (mDNS
+  and QR) so tap-to-join works: anyone on the hotspot can *request* to join. The host approves
+  each person, and file bytes and room traffic go only to approved, connection-bound guests.
+  File hash/size metadata lets guests verify integrity. Traffic is plaintext on the LAN (no TLS);
+  see `docs/architecture.md` §10 for the full model and its limits.
 - **Polished, production-grade UX.** This is a portfolio-grade, open-source app — invest in
   edge cases (reconnection, errors, empty/loading states) and a genuinely impressive UI.
 - **Storage:** clients need ~1–4 GB free for the local movie copy; surface this up front.
@@ -158,6 +169,8 @@ Not a flat preload. Two mechanisms:
 | **3** | Sync | Clock handshake, host controls, start gate + buffer floor, auto-pause. |
 | **4** | Social | Group chat, floating reactions, request-to-host actions. |
 | **5** | Polish | Reconnection, error/empty states, full WOW UI pass, docs for OSS. |
+
+Phases 0-5 are complete for v1; the app ships as a universal APK through GitHub releases.
 
 UI design direction is captured separately and confirmed with the user **before** the UI
 build begins.
