@@ -91,3 +91,16 @@ export function isPlaybackRequestDecision(
     (m.seconds === undefined || (typeof m.seconds === 'number' && Number.isFinite(m.seconds) && m.seconds >= 0))
   )
 }
+
+/** How a decided playback request ended, from the guest's side. */
+export type PlaybackRequestOutcome = 'approved' | 'declined' | 'expired'
+
+/**
+ * Read a decision's outcome. Only an explicit `reason: 'expired'` (the host's auto-dismiss)
+ * counts as a timeout; anything else not approved — including older hosts, which send no
+ * reason — is the host saying no.
+ */
+export function playbackRequestOutcome(m: { approved: unknown; reason?: unknown }): PlaybackRequestOutcome {
+  if (m.approved === true) return 'approved'
+  return m.reason === 'expired' ? 'expired' : 'declined'
+}

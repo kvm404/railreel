@@ -13,7 +13,14 @@ import {
   type ReactionEvent,
 } from '@/lib/social/feed'
 
-const line = (at: number, text = 'hi', id = at): ChatEntry => ({ id, from: 'asha', text, at })
+/** A line received locally at `receivedAt`; the host stamp defaults to the same instant. */
+const line = (receivedAt: number, text = 'hi', id = receivedAt, at = receivedAt): ChatEntry => ({
+  id,
+  from: 'asha',
+  text,
+  at,
+  receivedAt,
+})
 const rx = (seq: number, at: number): ReactionEvent => ({ seq, from: 'ben', emoji: '❤️', at })
 
 describe('sanitizeChatText', () => {
@@ -62,10 +69,20 @@ describe('tickerWindow', () => {
   it('is empty when everything has faded', () => {
     expect(tickerWindow([line(1000)], 60_000)).toEqual([])
   })
+
+  it('ages lines by local receipt, never by the host clock (clock skew between phones)', () => {
+    const now = 100_000
+    // Host clock 30s AHEAD of ours: a line that just arrived must still show.
+    expect(tickerWindow([line(now - 500, 'ahead', 1, now + 30_000)], now).map((l) => l.text)).toEqual(['ahead'])
+    // Host clock 30s BEHIND: a line that just arrived still shows, although its stamp is 30s old.
+    expect(tickerWindow([line(now - 500, 'behind', 2, now - 30_500)], now).map((l) => l.text)).toEqual(['behind'])
+    // A line received 10s ago is gone, however fresh (even future) its host stamp looks.
+    expect(tickerWindow([line(now - 10_000, 'stale', 3, now + 20_000)], now)).toEqual([])
+  })
 })
 
 describe('unread cursor', () => {
-  const entry = (id: number, from = 'asha'): ChatEntry => ({ id, from, text: `m${id}`, at: id })
+  const entry = (id: number, from = 'asha'): ChatEntry => ({ id, from, text: `m${id}`, at: id, receivedAt: id })
 
   it('counts lines newer than the cursor', () => {
     const log = [entry(1), entry(2), entry(3)]

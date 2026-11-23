@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { PermissionsAndroid, Platform } from 'react-native'
+import { AppState, PermissionsAndroid, Platform } from 'react-native'
 import * as DocumentPicker from 'expo-document-picker'
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
 import * as LegacyFS from 'expo-file-system/legacy'
@@ -19,6 +19,7 @@ import {
   isKeptMovieIntact,
   keptReuseDecision,
   parseKeptMovieMeta,
+  runExclusive,
   sweepOrphanCache,
   type CacheStatus,
   type ClearCacheResult,
@@ -26,8 +27,10 @@ import {
 } from '@/lib/storage'
 
 import RailReelHost from '../../modules/railreel-host'
-import { openSyncSession, type SyncSession } from '@/net/syncClient'
+import { openSyncSession, SyncCancelledError, type SyncSession } from '@/net/syncClient'
 import { reconnectDelayMs } from '@/lib/net/backoff'
+import { pickHostNetwork, sameHostNetwork, type HostNetwork } from '@/lib/net/hostNetwork'
+import { PROGRESS_PUBLISH_MS, ROSTER_TELEMETRY_PUBLISH_MS, rosterChange, shouldPublishProgress } from '@/lib/net/telemetry'
 import {
   isTransferStalled,
   MAX_INTEGRITY_RETRIES,
@@ -65,6 +68,7 @@ import {
   parseClientMsg,
   parseServerMsg,
   parseSubtitlePayload,
+  playbackRequestOutcome,
   recordSubtitlePull,
   SUBTITLE_PULL_TIMEOUT_MS,
   PROTOCOL_VERSION,
@@ -83,13 +87,15 @@ import {
   approvalTicket,
   approveWithTicket,
   bind,
+  cleanJoinName,
   createHostIdentity,
   decideFrame,
   decideJoin,
+  departConnection,
+  departedOverflow,
   forget,
   isApproved,
   openConnection,
-  releaseConnection,
   resetHostIdentity,
   ticketValid,
   type HostIdentity,
@@ -138,6 +144,9 @@ const SUBTITLE_PULL_GAP_MS = 2000
 /** A stalled follower that hasn't sent a heartbeat in this long is treated as gone — clear its
  *  stall so it can't hang the room (followers beat every ~500ms during playback). */
 const STALE_BEAT_MS = 4000
+/** Host: how often the invite's address is re-checked while the app is in the foreground (the
+ *  hotspot can come up, or the phone hop networks, without the app hearing about it). */
+const HOST_NETWORK_POLL_MS = 3000
 /** Give up reconnecting (and tear down) after this many failed attempts. */
 const MAX_RECONNECT_ATTEMPTS = 8
 /** Chat history cap (older lines scroll off; this is a cabin, not an archive). */
@@ -149,6 +158,26 @@ const REACTION_SEND_GAP_MS = 250
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 export type Role = 'none' | 'host' | 'client'
+
+/** The movie as the UI needs it (from the host's probe, or the roster's media on a guest). */
+export type MovieSummary = {
+  title: string
+  sizeBytes: number
+  durationSec: number
+  fastStart: boolean
+  /** The host's integrity fingerprint ("qf1:…"), '' until it lands — moments after hosting
+   *  starts. With sizeBytes it identifies the movie (lib/storage movieIdentity: quick rejoin). */
+  hash: string
+}
+
+const sameMovie = (a: MovieSummary | null, b: MovieSummary): boolean =>
+  a !== null &&
+  a.title === b.title &&
+  a.sizeBytes === b.sizeBytes &&
+  a.durationSec === b.durationSec &&
+  a.fastStart === b.fastStart &&
+  a.hash === b.hash
+export type { HostNetwork, HostNetworkKind } from '@/lib/net/hostNetwork'
 
 /** A person in the lobby, as the UI needs them (grant stays host-side only, never in state). */
 export type Participant = {
@@ -185,7 +214,7 @@ export interface SessionStore {
   role: Role
   error: string | null
   /** durationSec 0 (probe failed) or fastStart false degrade the start gate to full pre-cache. */
-  movie: { title: string; sizeBytes: number; durationSec: number; fastStart: boolean } | null
+  movie: MovieSummary | null
   participants: Participant[]
 
   // host
@@ -193,6 +222,14 @@ export interface SessionStore {
   joinUrl: string | null
   joinCode: string | null
   hostIp: string | null
+  /**
+   * Host: the address the invite (joinUrl/QR) carries and what kind of link it is — 'hotspot'
+   * (this phone's SoftAP: the normal case), 'wifi' (a Wi-Fi network this phone is a client of;
+   * only guests on that same network can reach it) or 'other' (USB tether, ethernet…). null when
+   * no reachable address exists (then joinUrl is null too). Re-read on foreground, every few
+   * seconds while hosting, and by refreshJoin(); joinUrl is rebuilt whenever it changes.
+   */
+  hostNetwork: HostNetwork | null
 
   // client
   clientPhase: ClientPhase
@@ -231,7 +268,7 @@ export interface SessionStore {
 
   // actions
   startHost: () => Promise<void>
-  /** Recompute the join link from the current device IP (call after enabling the hotspot). */
+  /** Re-read the host network now and rebuild the join link (also runs automatically). */
   refreshJoin: () => void
   /** Host: publish a new playback state (play/pause/seek), stamped + broadcast to clients. */
   setHostPlayback: (positionSec: number, isPlaying: boolean, rate?: number, ended?: boolean) => void
@@ -275,7 +312,24 @@ export interface SessionStore {
   purgeCache: (options?: { movie?: boolean; subtitles?: boolean }) => Promise<ClearCacheResult>
 }
 
-export type PlaybackRequestStatus = 'idle' | 'pending' | 'approved' | 'dismissed'
+/**
+ * A guest's playback request, from sending to its outcome (outcomes show ~3s, then 'idle'):
+ *  - 'approved' — the host said yes;
+ *  - 'declined' — the host said no;
+ *  - 'expired'  — no decision in time (the host let it time out, or its answer never came);
+ *  - 'lost'     — the connection dropped while waiting, so any answer went with it.
+ */
+export type PlaybackRequestStatus =
+  | 'idle'
+  | 'pending'
+  | 'approved'
+  | 'declined'
+  | 'expired'
+  | 'lost'
+  /** @deprecated Never set any more (split into 'declined' | 'expired' | 'lost'). */
+  | 'dismissed'
+/** The terminal request states the store actually emits. */
+export type PlaybackRequestOutcomeStatus = 'approved' | 'declined' | 'expired' | 'lost'
 
 export interface PendingPlaybackRequest {
   requestId: string
@@ -323,13 +377,15 @@ type GrantMap = Map<string, string>
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [role, setRole] = useState<Role>('none')
   const [error, setError] = useState<string | null>(null)
-  const [movie, setMovie] = useState<{ title: string; sizeBytes: number; durationSec: number; fastStart: boolean } | null>(null)
+  const [movie, setMovie] = useState<MovieSummary | null>(null)
   const [participants, setParticipants] = useState<Participant[]>([])
 
   const [hostPhase, setHostPhase] = useState<HostPhase>('idle')
   const [joinUrl, setJoinUrl] = useState<string | null>(null)
   const [joinCode, setJoinCode] = useState<string | null>(null)
   const [hostIp, setHostIp] = useState<string | null>(null)
+  const [hostNetwork, setHostNetwork] = useState<HostNetwork | null>(null)
+  const hostNetworkRef = useRef<HostNetwork | null>(null)
 
   const [clientPhase, setClientPhase] = useState<ClientPhase>('idle')
   const [progress, setProgress] = useState(0)
@@ -380,6 +436,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const reconnectRef = useRef<() => void>(() => {})
   const approvedRef = useRef(false) // host has approved us — a reconnect must NOT re-join (that would reset us to 'requested')
   const epochRef = useRef(0) // bumps on every connect()/leave() so an in-flight reconnect loop can detect it's stale and bail
+  // Client control channel ownership: every openClient() takes a fresh generation and claims
+  // the channel (liveConnRef). A socket's callbacks act only while its epoch AND generation are
+  // still current, so a handshake abandoned by Back can never drive a newer session.
+  const connGenRef = useRef(0)
+  const liveConnRef = useRef(0)
+  const handshakeAbortRef = useRef<AbortController | null>(null) // the handshake in flight, if any
   // Epoch of the startHost() attempt still in flight (null when none). During startup the native
   // servers can be up while roleRef is still 'none', so leave() needs this to know to stop them.
   const hostStartRef = useRef<number | null>(null)
@@ -449,6 +511,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       disposedRef.current = true
       leavingRef.current = true // no reconnect loop may start (or continue) from a dead provider
       reconnectingRef.current = false
+      handshakeAbortRef.current?.abort()
+      handshakeAbortRef.current = null
       if (clientRef.current) {
         clientRef.current.session.close()
         clientRef.current = null
@@ -502,6 +566,62 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(id)
   }, [role])
 
+  // ── throttled UI views of fast telemetry (lib/net/telemetry) ───────────────
+  // The exact values live in refs (progressRef, participantsRef) for heartbeats and gate math;
+  // React state — and with it the whole context every screen re-renders on — follows at a few
+  // Hz. Boundaries and structural changes still land at once; a held-back value is flushed by a
+  // trailing timer, so the last one before a pause is never lost.
+  const shownProgressRef = useRef(0)
+  const shownProgressAtRef = useRef(0)
+  const progressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const publishProgress = useCallback((frac: number) => {
+    const now = Date.now()
+    const show = (v: number) => {
+      if (progressTimerRef.current) clearTimeout(progressTimerRef.current)
+      progressTimerRef.current = null
+      shownProgressRef.current = v
+      shownProgressAtRef.current = Date.now()
+      setProgress(v)
+    }
+    if (shouldPublishProgress(frac, shownProgressRef.current, shownProgressAtRef.current, now)) return show(frac)
+    if (frac === shownProgressRef.current || progressTimerRef.current) return
+    progressTimerRef.current = setTimeout(
+      () => {
+        progressTimerRef.current = null
+        if (!disposedRef.current && progressRef.current !== shownProgressRef.current) show(progressRef.current)
+      },
+      Math.max(0, PROGRESS_PUBLISH_MS - (now - shownProgressAtRef.current)),
+    )
+  }, [])
+
+  const shownParticipantsRef = useRef<Participant[]>([])
+  const participantsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** Show participantsRef's current list: now if it changed structurally, coalesced if only numbers moved. */
+  const publishParticipants = useCallback(() => {
+    const flush = () => {
+      if (participantsTimerRef.current) clearTimeout(participantsTimerRef.current)
+      participantsTimerRef.current = null
+      shownParticipantsRef.current = participantsRef.current
+      setParticipants(participantsRef.current)
+    }
+    const change = rosterChange(shownParticipantsRef.current, participantsRef.current)
+    if (change === 'structural') flush()
+    else if (change === 'telemetry' && !participantsTimerRef.current) {
+      participantsTimerRef.current = setTimeout(() => {
+        participantsTimerRef.current = null
+        if (!disposedRef.current) flush()
+      }, ROSTER_TELEMETRY_PUBLISH_MS)
+    }
+  }, [])
+  useEffect(
+    () => () => {
+      // mount-only: unmount drops any pending trailing publish
+      if (progressTimerRef.current) clearTimeout(progressTimerRef.current)
+      if (participantsTimerRef.current) clearTimeout(participantsTimerRef.current)
+    },
+    [],
+  )
+
   // ── host roster helpers ─────────────────────────────────────────────────────
   const rosterJson = useCallback((list: Participant[]): string => {
     const payload: ParticipantInfo[] = list.map((p) => ({
@@ -532,20 +652,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     (fn: (prev: Participant[]) => Participant[], broadcast = true) => {
       const next = fn(participantsRef.current)
       participantsRef.current = next
-      setParticipants(next)
+      publishParticipants()
       if (broadcast && roleRef.current === 'host') broadcastRoster(next)
     },
-    [broadcastRoster],
+    [broadcastRoster, publishParticipants],
   )
 
   // Fold an incoming, already-validated chat line / reaction into local state. Reactions get a
   // local sequence for animation keys + lane assignment; freshness is judged by local receipt
   // time so cross-device clock skew can't strand or fast-expire an animation.
   // Chat lines get a local monotonic id: stable list keys + the unread cursor (works past the cap).
+  // `at` stays the host's stamp (displayed time); the ticker ages a line by `receivedAt`, our
+  // own clock at arrival, so host/guest clock skew can't hide or strand it.
   const chatSeqRef = useRef(0)
   const ingestChat = useCallback((from: string, text: string, at: number) => {
     const id = ++chatSeqRef.current
-    setChatLog((log) => appendCapped(log, { id, from, text, at }, CHAT_LOG_CAP))
+    const receivedAt = Date.now()
+    setChatLog((log) => appendCapped(log, { id, from, text, at, receivedAt }, CHAT_LOG_CAP))
   }, [])
   const ingestReaction = useCallback((from: string, emoji: string) => {
     const seq = ++reactionSeqRef.current
@@ -666,12 +789,28 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       pendingPlaybackRequestsRef.current = pendingPlaybackRequestsRef.current.filter((r) => r.requesterId !== id)
       setPendingPlaybackRequests(pendingPlaybackRequestsRef.current)
     }
+    // Forget a participant for good: revoke its data-plane grant (queued after any in-flight
+    // approve() on the serial native queue, like deny), drop identity, requests and row.
+    const dropParticipants = (drop: readonly string[]) => {
+      if (drop.length === 0) return
+      const ids = hostIds()
+      for (const id of drop) {
+        const grant = ids.grants.get(id)
+        if (grant) RailReelHost.revoke(grant).catch(() => {})
+        const conn = forget(ids, id)
+        if (conn) RailReelHost.dropConnection(conn).catch(() => {})
+        dropRequestsOf(id)
+      }
+      updateParticipants((prev) => prev.filter((p) => !drop.includes(p.id)), true)
+    }
     const markLeft = (id: string) => {
       dropRequestsOf(id)
       updateParticipants(
         (prev) => prev.map((p) => (p.id === id ? { ...p, status: 'left', stalled: false, inShow: false } : p)),
         true,
       )
+      // Departed rows are kept for a silent resume — but only so many (lib/host/identity).
+      dropParticipants(departedOverflow(participantsRef.current))
     }
     // Admit a grant-proven frame on `conn` acting for `id`. Everything a guest does once inside
     // needs APPROVAL (not merely a non-"requested" row): a never-approved guest that dropped and
@@ -702,21 +841,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           msg.token !== hostTokenRef.current ||
           !isValidSecret(msg.grant, 22) ||
           typeof msg.id !== 'string' ||
-          msg.id.length === 0 ||
-          msg.id === 'host' ||
-          typeof msg.name !== 'string' ||
-          msg.name.length === 0
+          cleanJoinName(msg.name).length === 0
         ) {
           return
         }
         const ids = hostIds()
-        // A join can't re-claim an id under a different grant, nor switch this socket's identity.
+        // A join can't re-claim an id under a different grant, nor switch this socket's identity;
+        // over-long ids and requests beyond the pending cap are refused (lib/host/identity).
         const d = decideJoin(ids, conn, msg.id, msg.grant)
-        if (d.kind === 'reject') return
+        if (d.kind === 'reject') {
+          // A refused NEW socket would otherwise idle until the unbound timeout — close it now.
+          if (!ids.idOf.has(conn)) RailReelHost.dropConnection(conn).catch(() => {})
+          return
+        }
         applyJoin(ids, conn, msg.id, msg.grant, d)
         if (d.supersedes) RailReelHost.dropConnection(d.supersedes).catch(() => {})
         const joinId = msg.id
-        const name = msg.name.slice(0, 40)
+        const name = cleanJoinName(msg.name)
         if (d.kind === 'resume') {
           // Approved while it was away and it missed the decision: re-admit this socket, repeat
           // the decision to it alone, and keep its row (no reset to "requested"). Roster (movie
@@ -800,7 +941,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setPendingPlaybackRequests(pendingPlaybackRequestsRef.current)
 
         const timer = setTimeout(() => {
-          handlePlaybackRequestRef.current(req.requestId, false)
+          handlePlaybackRequestRef.current(req.requestId, false, 'expired') // nobody decided
         }, 10_000)
         autoDismissTimersRef.current.set(req.requestId, timer)
       } else if (msg.t === 'leave') {
@@ -855,15 +996,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       )
     })
     // A close affects only the participant bound to THAT connection (never an id a frame claimed).
-    // Grant + approval survive it, so an approved guest resumes silently on reconnect.
+    // An approved guest keeps grant + approval and resumes silently on reconnect; a requester
+    // that was never approved is forgotten with its row (it re-asks when it comes back).
     const onClose = RailReelHost.addListener('onWsClose', ({ conn }) => {
       const t = unboundTimers.get(conn)
       if (t) {
         clearTimeout(t)
         unboundTimers.delete(conn)
       }
-      const id = releaseConnection(hostIds(), conn) // always: keeps the live set exact
-      if (id && roleRef.current === 'host') markLeft(id)
+      const gone = departConnection(hostIds(), conn) // always: keeps the live set exact
+      if (!gone || roleRef.current !== 'host') return
+      if (gone.forgotten) {
+        if (gone.grant) RailReelHost.revoke(gone.grant).catch(() => {})
+        dropRequestsOf(gone.id)
+        updateParticipants((prev) => prev.filter((p) => p.id !== gone.id), true)
+      } else {
+        markLeft(gone.id)
+      }
     })
     return () => {
       onMessage.remove()
@@ -928,9 +1077,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     positionRef.current = 0
     stalledRef.current = false
     inShowRef.current = false
-    setProgress(0)
+    publishProgress(0)
     setMovieUri(null)
-  }, [clearRetryTimer])
+  }, [clearRetryTimer, publishProgress])
 
   // ── cache management ────────────────────────────────────────────────────────
   const getCacheInfo = useCallback(async (): Promise<CacheStatus> => {
@@ -939,30 +1088,54 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return status
   }, [])
 
+  // Ownership: the purge belongs to the session it was called in. BEFORE its first await it
+  // cancels that session's transfer + detaches the player (resetTransfer) and takes its place in
+  // the module-level movieCacheOwner queue — so it waits for any writer still unwinding, and a
+  // newer session's download (queued after it) can't start until the delete is done. Nothing it
+  // does after yielding may reset, stop or clear what a newer session owns.
   const purgeCache = useCallback(
-    async (options?: { movie?: boolean; subtitles?: boolean }): Promise<ClearCacheResult> => {
-      const result = await clearSessionCache({
-        movie: options?.movie,
-        subtitles: options?.subtitles,
-        cacheDir: CACHE_DIR,
-        fs: fsAdapter,
-        hooks: {
-          detachMedia: async () => {
-            setMovieUri(null)
-            await RailReelHost.stopProxy().catch(() => {})
-          },
-          cancelDownloads: async () => {
-            resetTransfer()
-          },
+    (options?: { movie?: boolean; subtitles?: boolean }): Promise<ClearCacheResult> => {
+      const myEpoch = epochRef.current
+      const stale = (): boolean => disposedRef.current || epochRef.current !== myEpoch
+      const wantMovie = options?.movie !== false
+      const wantSubtitles = options?.subtitles !== false
+      resetTransfer() // synchronous: this session's download, retry timer, proxy and source
+      const unlink = runExclusive(
+        movieCacheOwner,
+        PREV_ATTEMPT_CEILING_MS,
+        sleep,
+        async (): Promise<ClearCacheResult> => {
+          // Let the proxy's fd go before unlinking — unless a newer session took over (then any
+          // proxy is its own; its download is queued behind us, so the file isn't in use yet).
+          if (!stale()) await RailReelHost.stopProxy().catch(() => {})
+          return clearSessionCache({
+            movie: wantMovie,
+            // The subtitle file isn't in the queue: a newer session may already have written it.
+            subtitles: wantSubtitles && !stale(),
+            cacheDir: CACHE_DIR,
+            fs: fsAdapter,
+          })
         },
+        (): ClearCacheResult => ({
+          cleared: [],
+          failed: [
+            ...(wantMovie ? [MOVIE_CACHE] : []),
+            ...(wantSubtitles ? [SUBTITLE_CACHE] : []),
+          ].map((path) => ({ path, error: 'the previous transfer is still shutting down' })),
+          remainingBytes: 0,
+          ok: false,
+        }),
+      )
+      return unlink.then(async (result) => {
+        if (wantSubtitles && !stale()) {
+          subtitleRef.current = null
+          setSubtitle(null)
+        }
+        if (!disposedRef.current) await getCacheInfo().catch(() => {})
+        return result
       })
-      if (options?.subtitles !== false) {
-        await clearSubtitle()
-      }
-      await getCacheInfo()
-      return result
     },
-    [clearSubtitle, getCacheInfo, resetTransfer],
+    [getCacheInfo, resetTransfer],
   )
 
   useEffect(() => {
@@ -1077,7 +1250,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (stale()) return abandon()
 
       joinMetaRef.current = { sessionId, token, httpPort: ports.httpPort, wsPort: ports.wsPort }
-      const ip = RailReelHost.getHostIpAddress()
+      const net = currentHostNetwork()
+      const ip = net?.ip ?? null
+      hostNetworkRef.current = net
+      setHostNetwork(net)
       setHostIp(ip)
 
       // Tap-to-join: advertise the session on mDNS. The TXT mirrors the QR payload (the host IP
@@ -1119,7 +1295,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         // Metadata only — the body never rides the roster (see attachSubtitle / sendSubtitleTo).
         ...(subtitleRef.current ? { subtitle: subtitleMeta(subtitleRef.current.name, subtitleRef.current.content) } : {}),
       }
-      setMovie({ title, sizeBytes, durationSec, fastStart })
+      setMovie({ title, sizeBytes, durationSec, fastStart, hash: '' })
       setMovieUri(asset.uri) // the host plays the same source it shares
 
       // Seed the roster with the host (it already has the file).
@@ -1143,6 +1319,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           .then((hash) => {
             if (epochRef.current !== hostEpoch || !mediaRef.current) return // session changed — drop
             mediaRef.current = { ...mediaRef.current, hash }
+            setMovie((m) => (m ? { ...m, hash } : m))
             if (roleRef.current === 'host') broadcastRoster(participantsRef.current)
           })
           .catch(() => {})
@@ -1157,15 +1334,37 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [updateParticipants, resetTransfer, broadcastRoster, clearSubtitle])
 
-  // Re-read the device IP and rebuild the join link — call after enabling the hotspot, when the
-  // reachable address may have changed (or only just appeared).
+  // Re-read the host network and rebuild the join link when it changed — the hotspot coming up
+  // after the session was created, or the phone hopping networks, must never leave the QR
+  // pointing at a dead address. Cheap (an interface scan), and a no-op render-wise when nothing
+  // changed, so it runs on foreground + on a short poll while hosting (below) and on demand.
   const refreshJoin = useCallback(() => {
     const meta = joinMetaRef.current
     if (!meta) return
-    const ip = RailReelHost.getHostIpAddress()
-    setHostIp(ip)
-    setJoinUrl(ip ? encodeJoinUrl(buildJoinPayload(meta, ip)) : null)
+    const net = currentHostNetwork()
+    if (sameHostNetwork(net, hostNetworkRef.current)) return
+    hostNetworkRef.current = net
+    setHostNetwork(net)
+    setHostIp(net?.ip ?? null)
+    setJoinUrl(net ? encodeJoinUrl(buildJoinPayload(meta, net.ip)) : null)
   }, [])
+
+  // There is no connectivity event for "this phone's hotspot came up" short of a native
+  // callback; returning from Settings (foreground) plus a light poll covers it.
+  useEffect(() => {
+    if (role !== 'host') return
+    refreshJoin()
+    const poll = setInterval(() => {
+      if (AppState.currentState === 'active') refreshJoin()
+    }, HOST_NETWORK_POLL_MS)
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') refreshJoin()
+    })
+    return () => {
+      clearInterval(poll)
+      sub.remove()
+    }
+  }, [role, refreshJoin])
 
   // Host: publish playback. Stamp it with the host's monotonic clock (the timebase clients sync
   // against) so a follower can compute where the playhead should be right now.
@@ -1243,8 +1442,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [updateParticipants, hostIds],
   )
 
+  // `reason` tells the requester why a request wasn't approved: the host's own "no" (default)
+  // or the auto-dismiss timing out ('expired').
   const handlePlaybackRequest = useCallback(
-    (requestId: string, approved: boolean) => {
+    (requestId: string, approved: boolean, reason: 'declined' | 'expired' = 'declined') => {
       const timer = autoDismissTimersRef.current.get(requestId)
       if (timer) {
         clearTimeout(timer)
@@ -1300,6 +1501,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             approved: false,
             action: req.action,
             seconds: req.seconds,
+            reason,
           }),
         ).catch(() => {})
       }
@@ -1323,7 +1525,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   // Show a request's outcome briefly, then return the controls to idle.
   const showRequestOutcome = useCallback(
-    (status: 'approved' | 'dismissed') => {
+    (status: PlaybackRequestOutcomeStatus) => {
       clearRequestDeadline()
       setPlaybackRequestStatus(status)
       if (dismissToastTimerRef.current) clearTimeout(dismissToastTimerRef.current)
@@ -1352,7 +1554,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       clearRequestDeadline()
       requestDeadlineRef.current = setTimeout(() => {
         requestDeadlineRef.current = null
-        if (activeRequestIdRef.current === requestId) showRequestOutcome('dismissed')
+        if (activeRequestIdRef.current === requestId) showRequestOutcome(reconnectingRef.current ? 'lost' : 'expired')
       }, PLAYBACK_REQUEST_DEADLINE_MS)
       c.session.send({
         t: 'playbackRequest',
@@ -1624,7 +1826,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         integrityFailuresRef.current = 0
         completeRef.current = true // the ONLY place completion is claimed: after validation
         progressRef.current = 1
-        setProgress(1)
+        publishProgress(1)
         // If the proxy is serving the show (or about to — its handler sets the source), leave it
         // alone: swapping the source mid-playback would rebuffer. Otherwise open the file directly.
         if (proxyStateRef.current === 'idle' || proxyStateRef.current === 'failed') setMovieUri(MOVIE_CACHE)
@@ -1687,7 +1889,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             if (stale()) return
             partialEpochRef.current = null
             progressRef.current = 0
-            setProgress(0)
+            publishProgress(0)
             mbpsRef.current = 0
             // The kept-copy record describes the file we're about to replace — drop it first.
             await LegacyFS.deleteAsync(MOVIE_META, { idempotent: true }).catch(() => {})
@@ -1731,7 +1933,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               // treats 1 as ready, and the last read can still fail its write or fingerprint.
               const frac = unvalidatedProgress(p.totalBytesWritten, size > 0 ? size : total)
               progressRef.current = frac
-              setProgress(frac)
+              publishProgress(frac) // throttled: the ring needn't move 10×/s
               attemptBytesRef.current = Math.max(0, p.totalBytesWritten - resumedFrom)
 
               // Measured throughput (smoothed) — the number the host's start gate reasons about.
@@ -1864,7 +2066,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           const retained = partialEpochRef.current === myEpoch
           if (!retained) {
             progressRef.current = 0
-            setProgress(0)
+            publishProgress(0)
           }
           // Real forward progress that is still on disk earns back the automatic retry budget
           // (a WS reconnect doesn't; bytes we just discarded don't either).
@@ -1885,7 +2087,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // (if this attempt gives up on a wedged predecessor, that predecessor still guards the file).
       return movieCacheOwner.run(run)
     },
-    [sendBeat, getCacheInfo, clearRetryTimer, detachProgressive, reuseKeptCopy, scheduleTransferRetry, abortStalledTransfer],
+    [sendBeat, getCacheInfo, clearRetryTimer, detachProgressive, reuseKeptCopy, scheduleTransferRetry, abortStalledTransfer, publishProgress],
   )
   startDownloadRef.current = startDownload
 
@@ -1908,16 +2110,27 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Open a client WS session (clock handshake + handlers). On the FIRST connect we send `join`;
   // on a reconnect we don't — the host still has our approved grant and our cached file, so we just
   // resume the same `id` (a fresh join would reset us to "requested" and force re-approval).
+  //
+  // Ownership: the session belongs to `epoch` and a fresh connection generation. Starting it
+  // cancels any handshake still in flight; leave()/connect() cancel this one. Every callback
+  // (message, drop) re-checks both, and a handshake that resolves after its session moved on
+  // is closed and rejected with SyncCancelledError — it never reaches the newer session.
   type ClientParams = { payload: JoinPayload; myId: string; grant: string; name: string }
   const openClient = useCallback(
-    async (p: ClientParams, initial: boolean): Promise<SyncSession> => {
+    async (p: ClientParams, initial: boolean, epoch: number): Promise<SyncSession> => {
       const { payload, myId, grant, name } = p
-      const session = await openSyncSession(
+      handshakeAbortRef.current?.abort()
+      const abort = new AbortController()
+      handshakeAbortRef.current = abort
+      const gen = ++connGenRef.current
+      liveConnRef.current = gen
+      const current = (): boolean => !disposedRef.current && epochRef.current === epoch && liveConnRef.current === gen
+      const opening = openSyncSession(
         payload.host,
         payload.wsPort,
         payload.token,
         (raw) => {
-          if (disposedRef.current) return // a dead provider's socket must not restart anything
+          if (!current()) return // an abandoned / superseded socket (or a dead provider) must not act
           const r = parseServerMsg(JSON.stringify(raw))
           if (!r.ok) return
           const m = r.msg
@@ -1942,12 +2155,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             // The roster carries the movie's metadata — what our own buffer math needs.
             if (isMediaInfo(m.media)) {
               mediaRef.current = m.media
-              setMovie({
+              const summary: MovieSummary = {
                 title: m.media.title,
                 sizeBytes: m.media.sizeBytes,
                 durationSec: m.media.durationSec,
                 fastStart: m.media.fastStart === true,
-              })
+                hash: typeof m.media.hash === 'string' ? m.media.hash : '',
+              }
+              // Rosters arrive on every download percent: keep the same object when nothing changed.
+              setMovie((prev) => (sameMovie(prev, summary) ? prev : summary))
               // Decode preflight: can THIS phone's hardware handle the movie's frame size?
               // (PRD accepts H.264 only, so video/avc.) Warn here, and flag the host via beats.
               const w = m.media.width ?? 0
@@ -1979,7 +2195,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 lastBeatAt: Date.now(),
               }))
             participantsRef.current = list
-            setParticipants(list)
+            publishParticipants() // coalesced when only numbers moved (roster storms while downloading)
           } else if (m.t === 'state') {
             setPlayback(m.state) // host's authoritative playback; the Player drift-corrects to it
           } else if (m.t === 'chat') {
@@ -2004,7 +2220,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           } else if (m.t === 'playbackRequestDecision') {
             // Only the decision for OUR live request: a late one for an expired request is moot.
             if (m.requesterId === myId && m.requestId === activeRequestIdRef.current) {
-              showRequestOutcome(m.approved ? 'approved' : 'dismissed')
+              showRequestOutcome(playbackRequestOutcome(m))
             }
           } else if (m.t === 'ended') {
             // The host wrapped the show / left. leave() clears everything (incl. sessionEnd), so
@@ -2020,13 +2236,25 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         },
         // Socket dropped after we were live: kick off a reconnect (unless we're deliberately leaving).
         () => {
-          if (!disposedRef.current && !leavingRef.current && roleRef.current === 'client') reconnectRef.current()
+          if (current() && !leavingRef.current && roleRef.current === 'client') reconnectRef.current()
         },
+        undefined,
+        abort.signal,
       )
+      let session: SyncSession
+      try {
+        session = await opening
+      } finally {
+        if (handshakeAbortRef.current === abort) handshakeAbortRef.current = null
+      }
+      if (!current()) {
+        session.close() // resolved after its session moved on — never let it speak for the new one
+        throw new SyncCancelledError()
+      }
       if (initial) session.send({ t: 'join', id: myId, name, token: payload.token, grant })
       return session
     },
-    [startDownload, ingestChat, ingestReaction, loadSubtitle, clearSubtitle, maybeFetchSubtitle, showRequestOutcome],
+    [startDownload, ingestChat, ingestReaction, loadSubtitle, clearSubtitle, maybeFetchSubtitle, showRequestOutcome, publishParticipants],
   )
 
   // Reconnect loop: re-handshake with exponential backoff, then resume the same session identity.
@@ -2041,28 +2269,35 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const rejoin = !approvedRef.current
     reconnectingRef.current = true
     setReconnecting(true)
+    // A playback request still waiting died with the socket — its decision is never replayed.
+    if (requestDeadlineRef.current) showRequestOutcome('lost')
+    // Release the reconnecting flag only while it is still OURS: leave()/connect() reset it
+    // themselves, and a newer session's loop may own it by the time a stale one notices.
+    const release = () => {
+      if (epochRef.current !== myEpoch) return
+      reconnectingRef.current = false
+      setReconnecting(false)
+    }
     for (let attempt = 0; attempt < MAX_RECONNECT_ATTEMPTS; attempt++) {
       await sleep(reconnectDelayMs(attempt))
       if (stale()) {
-        reconnectingRef.current = false
-        setReconnecting(false)
+        release()
         return
       }
       try {
-        const session = await openClient({ payload: c.payload, myId: c.myId, grant: c.grant, name: c.name }, rejoin)
+        const session = await openClient({ payload: c.payload, myId: c.myId, grant: c.grant, name: c.name }, rejoin, myEpoch)
         if (stale()) {
           session.close() // we were torn down / re-connected while handshaking — drop this socket
-          reconnectingRef.current = false
-          setReconnecting(false)
+          release()
           return
         }
         clientRef.current = { ...c, session }
         reconnectingRef.current = false
         setReconnecting(false)
         sendBeat()
-        // A pending playback request's decision may have been lost with the old socket and is
-        // never replayed — release the request controls.
-        if (requestDeadlineRef.current) clearPlaybackRequestStatus()
+        // A request sent while the old socket was already dying (after the drop was noticed)
+        // can't have been answered either.
+        if (requestDeadlineRef.current) showRequestOutcome('lost')
         // Anything we asked for on the dead socket may be lost too: re-evaluate the subtitle
         // against the latest roster (a replacement may have gone out while we were away).
         resetSubtitlePull()
@@ -2070,12 +2305,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         // The HTTP transfer died with the hotspot too — bring it back (no retry UI mid-show).
         recoverTransfer()
         return
-      } catch {
-        // keep retrying until the attempt budget runs out
+      } catch (e) {
+        // Cancelled = this loop's session is over (leave / a newer connect): stop, quietly.
+        if (e instanceof SyncCancelledError || stale()) {
+          release()
+          return
+        }
+        // otherwise keep retrying until the attempt budget runs out
       }
     }
-    reconnectingRef.current = false
-    setReconnecting(false)
+    release()
     if (!stale()) {
       leave() // tear down first — leave() clears state, so surface the end-state afterwards
       setSessionEnd({
@@ -2085,7 +2324,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         body: "Couldn't reach the host — they may have left, or the hotspot dropped.",
       })
     }
-  }, [openClient, sendBeat, clearPlaybackRequestStatus, maybeFetchSubtitle, recoverTransfer, resetSubtitlePull])
+  }, [openClient, sendBeat, showRequestOutcome, maybeFetchSubtitle, recoverTransfer, resetSubtitlePull])
 
   useEffect(() => {
     reconnectRef.current = reconnect
@@ -2112,6 +2351,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       approvedRef.current = false
       epochRef.current++ // a fresh session — invalidate any reconnect loop left over from a prior one
       const myEpoch = epochRef.current
+      reconnectingRef.current = false // the old session's loop (now stale) no longer owns the flag
+      setReconnecting(false)
       // A fresh join must not inherit ANYTHING from a previous session: no zombie download feeding
       // the gate a dying transfer rate, no stale playback state yanking us straight into the
       // Player, no leftover roster/media.
@@ -2123,14 +2364,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       resetSubtitlePull()
       setPlayback(null)
       participantsRef.current = []
-      setParticipants([])
+      publishParticipants()
       setMovie(null)
       setChatLog([])
       setReactions([])
       setDecodeCaution(null)
       decodeOkRef.current = true
       try {
-        const session = await openClient({ payload, myId, grant, name }, true)
+        const session = await openClient({ payload, myId, grant, name }, true, myEpoch)
         if (epochRef.current !== myEpoch || leavingRef.current) {
           session.close()
           return
@@ -2141,6 +2382,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         roleRef.current = 'client'
         setClientPhase('requested')
       } catch (e) {
+        // A cancelled / superseded attempt must not touch the session that replaced it.
+        if (e instanceof SyncCancelledError || epochRef.current !== myEpoch || disposedRef.current) return
         setError(String(e))
         setClientPhase('idle')
       }
@@ -2153,6 +2396,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     reconnectingRef.current = false
     approvedRef.current = false
     epochRef.current++ // invalidate any in-flight reconnect loop so it can't resurrect this session
+    handshakeAbortRef.current?.abort() // a join still clock-handshaking is abandoned, socket and all
+    handshakeAbortRef.current = null
     setUserLeftShow(false)
     inShowRef.current = false
     downloadingRef.current = false
@@ -2202,11 +2447,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     joinMetaRef.current = null
     grantsRef.current.clear()
     participantsRef.current = []
-    setParticipants([])
+    publishParticipants()
     setMovie(null)
     setJoinUrl(null)
     setJoinCode(null)
     setHostIp(null)
+    hostNetworkRef.current = null
+    setHostNetwork(null)
     setHostPhase('idle')
     setClientPhase('idle')
     setPlayback(null)
@@ -2281,6 +2528,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       joinUrl,
       joinCode,
       hostIp,
+      hostNetwork,
       clientPhase,
       progress,
       hostName,
@@ -2322,7 +2570,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       getCacheInfo,
       purgeCache,
     }),
-    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, userLeftShow, exitShow, enterShow, retryDownload, dismissEnd, subtitle, attachSubtitle, removeSubtitle, pendingPlaybackRequests, handlePlaybackRequest, playbackRequestStatus, sendPlaybackRequest, clearPlaybackRequestStatus, registerHostTransport, cacheStatus, getCacheInfo, purgeCache],
+    [role, error, movie, participants, hostPhase, joinUrl, joinCode, hostIp, hostNetwork, clientPhase, progress, hostName, reconnecting, decodeCaution, hostWarning, sessionEnd, movieUri, playback, waitingFor, chatLog, reactions, sendChat, sendReaction, startHost, refreshJoin, setHostPlayback, reportPlayback, hostNowMs, approve, deny, connect, leave, userLeftShow, exitShow, enterShow, retryDownload, dismissEnd, subtitle, attachSubtitle, removeSubtitle, pendingPlaybackRequests, handlePlaybackRequest, playbackRequestStatus, sendPlaybackRequest, clearPlaybackRequestStatus, registerHostTransport, cacheStatus, getCacheInfo, purgeCache],
   )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
@@ -2333,6 +2581,18 @@ const clamp01 = (n: number): number => (!Number.isFinite(n) || n < 0 ? 0 : n > 1
 /** Client monotonic clock — must match openSyncSession's timebase so the offset maps correctly. */
 const nowMs = (): number =>
   typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
+
+/** The invite's address right now (lib/net/hostNetwork ranks what the native side reports). */
+function currentHostNetwork(): HostNetwork | null {
+  try {
+    if (typeof RailReelHost.getNetworkCandidates === 'function') return pickHostNetwork(RailReelHost.getNetworkCandidates())
+    // A dev-client binary from before getNetworkCandidates: the address, kind unknown.
+    const ip = RailReelHost.getHostIpAddress()
+    return ip ? { ip, kind: 'other', iface: '' } : null
+  } catch {
+    return null
+  }
+}
 
 /** Build the join payload from the session meta + the currently-reachable IP. */
 function buildJoinPayload(

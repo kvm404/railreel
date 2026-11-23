@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { awaitOwnership, createOwnershipQueue } from '@/lib/storage/ownership'
+import { awaitOwnership, createOwnershipQueue, runExclusive } from '@/lib/storage/ownership'
 
 /** A promise you settle by hand (a native download that hasn't stopped writing yet). */
 function deferred() {
@@ -81,5 +81,60 @@ describe('ownership queue', () => {
     nativeWriter.resolve()
     await sweep
     expect(swept).toBe(true)
+  })
+})
+
+describe('runExclusive (cache purge)', () => {
+  const never = () => new Promise<void>(() => {})
+
+  it('waits for the running writer, and a writer queued after it waits for the purge', async () => {
+    const q = createOwnershipQueue()
+    const oldWriter = deferred()
+    q.run(() => oldWriter.promise)
+    const order: string[] = []
+    const unlink = deferred()
+    const purge = runExclusive(
+      q,
+      30_000,
+      never,
+      async () => {
+        order.push('purge')
+        await unlink.promise
+        return 'deleted'
+      },
+      () => 'busy',
+    )
+    // A newer session's download is queued right after (before the purge got to run).
+    const newer = q.run(async (prev) => {
+      await prev
+      order.push('newer')
+    })
+    await tick()
+    expect(order).toEqual([]) // the old writer is still alive: nobody touches the file
+    oldWriter.resolve()
+    await tick()
+    expect(order).toEqual(['purge'])
+    unlink.resolve()
+    expect(await purge).toBe('deleted')
+    await newer
+    expect(order).toEqual(['purge', 'newer'])
+  })
+
+  it('gives up (onBusy) past the ceiling without running the work', async () => {
+    const q = createOwnershipQueue()
+    q.run(() => new Promise<void>(() => {})) // wedged writer
+    let ran = false
+    const r = await runExclusive(
+      q,
+      10,
+      () => Promise.resolve(),
+      async () => {
+        ran = true
+        return 'deleted'
+      },
+      () => 'busy',
+    )
+    expect(r).toBe('busy')
+    expect(ran).toBe(false)
   })
 })

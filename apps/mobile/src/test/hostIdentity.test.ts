@@ -4,13 +4,20 @@ import {
   approvalTicket,
   approveWithTicket,
   bind,
+  cleanJoinName,
   createHostIdentity,
   decideFrame,
   decideJoin,
+  departConnection,
+  departedOverflow,
   forget,
   isApproved,
   markApproved,
+  MAX_DEPARTED_ROWS,
+  MAX_PARTICIPANT_ID_LENGTH,
+  MAX_PENDING_REQUESTS,
   openConnection,
+  pendingCount,
   releaseConnection,
   resetHostIdentity,
   ticketValid,
@@ -265,5 +272,98 @@ describe('host identity — async approval tickets', () => {
   it('no ticket for an unknown id or the host', () => {
     expect(approvalTicket(s, 'nobody')).toBeNull()
     expect(approvalTicket(s, 'host')).toBeNull()
+  })
+})
+
+describe('host identity — bounded admission state', () => {
+  let s: HostIdentity
+  beforeEach(() => {
+    s = opened()
+  })
+
+  it('rejects an over-long id before it is stored', () => {
+    const long = 'x'.repeat(MAX_PARTICIPANT_ID_LENGTH + 1)
+    expect(decideJoin(s, 'c1', long, ALICE_GRANT)).toEqual({ kind: 'reject', reason: 'bad-id' })
+    expect(decideJoin(s, 'c1', 'x'.repeat(MAX_PARTICIPANT_ID_LENGTH), ALICE_GRANT).kind).toBe('request')
+  })
+
+  it('caps the number of requests waiting for a decision', () => {
+    for (let i = 0; i < MAX_PENDING_REQUESTS; i++) {
+      openConnection(s, `p${i}`)
+      expect(join(s, `p${i}`, `guest-${i}`, `grant-${i}-0123456789abcdef`).kind).toBe('request')
+    }
+    expect(pendingCount(s)).toBe(MAX_PENDING_REQUESTS)
+    openConnection(s, 'late')
+    expect(decideJoin(s, 'late', 'late-id', 'late-grant-0123456789abc')).toEqual({ kind: 'reject', reason: 'too-many-pending' })
+    // A pending requester re-joining on a new socket already holds its slot.
+    openConnection(s, 'p0b')
+    expect(decideJoin(s, 'p0b', 'guest-0', 'grant-0-0123456789abcdef').kind).toBe('request')
+    // Approving one frees a slot.
+    markApproved(s, 'guest-1')
+    expect(decideJoin(s, 'late', 'late-id', 'late-grant-0123456789abc').kind).toBe('request')
+  })
+
+  it('a never-approved requester is forgotten when its socket closes', () => {
+    join(s, 'c1', ALICE, ALICE_GRANT)
+    expect(departConnection(s, 'c1')).toEqual({ id: ALICE, forgotten: true, grant: ALICE_GRANT })
+    expect(s.grants.has(ALICE)).toBe(false)
+    expect(s.gens.has(ALICE)).toBe(false)
+    expect(pendingCount(s)).toBe(0)
+    // It may ask again from a new socket.
+    expect(join(s, 'c2', ALICE, ALICE_GRANT).kind).toBe('request')
+  })
+
+  it('an approved guest survives its socket closing (silent resume)', () => {
+    join(s, 'c1', ALICE, ALICE_GRANT)
+    markApproved(s, ALICE)
+    expect(departConnection(s, 'c1')).toEqual({ id: ALICE, forgotten: false })
+    expect(isApproved(s, ALICE)).toBe(true)
+  })
+
+  it('a superseded or never-bound connection departs as nobody', () => {
+    expect(departConnection(s, 'c1')).toBeNull()
+    join(s, 'c1', ALICE, ALICE_GRANT)
+    join(s, 'c2', ALICE, ALICE_GRANT) // re-join on a new socket supersedes c1
+    expect(departConnection(s, 'c1')).toBeNull()
+    expect(s.grants.get(ALICE)).toBe(ALICE_GRANT)
+  })
+
+  it('join/disconnect churn by unapproved peers leaves nothing behind', () => {
+    for (let i = 0; i < 500; i++) {
+      const conn = `churn${i}`
+      openConnection(s, conn)
+      join(s, conn, `spam-${i}`, `spam-grant-${i}-0123456789`)
+      departConnection(s, conn)
+    }
+    expect(s.grants.size).toBe(0)
+    expect(s.gens.size).toBe(0)
+    expect(s.connOf.size).toBe(0)
+    expect(s.idOf.size).toBe(0)
+  })
+
+  it('a ticket issued before a forget-on-close is void after a same-grant re-join', () => {
+    join(s, 'c1', ALICE, ALICE_GRANT)
+    const t = approvalTicket(s, ALICE)!
+    departConnection(s, 'c1')
+    join(s, 'c2', ALICE, ALICE_GRANT)
+    expect(approveWithTicket(s, t)).toBe(false)
+  })
+
+  it('cleans join names: collapses whitespace, trims, caps length', () => {
+    expect(cleanJoinName('  Asha \n  K ')).toBe('Asha K')
+    expect(cleanJoinName('   ')).toBe('')
+    expect(cleanJoinName(42)).toBe('')
+    expect(cleanJoinName('n'.repeat(500))).toHaveLength(40)
+  })
+
+  it('departedOverflow names the oldest departed rows beyond the cap', () => {
+    const rows = [
+      { id: 'host', status: 'left', lastBeatAt: 0 },
+      { id: 'live', status: 'ready', lastBeatAt: 1 },
+      ...Array.from({ length: MAX_DEPARTED_ROWS + 2 }, (_, i) => ({ id: `gone${i}`, status: 'left', lastBeatAt: 100 - i })),
+    ]
+    // The two with the oldest last heartbeat go; the host and live rows never do.
+    expect(departedOverflow(rows).sort()).toEqual([`gone${MAX_DEPARTED_ROWS}`, `gone${MAX_DEPARTED_ROWS + 1}`].sort())
+    expect(departedOverflow(rows.slice(0, 5))).toEqual([])
   })
 })

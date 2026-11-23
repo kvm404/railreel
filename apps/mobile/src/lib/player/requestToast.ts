@@ -23,6 +23,9 @@ export function requestToastCopy(status: string): RequestToastCopy | null {
       return { message: 'The host passed on that one', tone: 'neutral', terminal: true }
     case 'expired':
       return { message: 'No answer yet — you can ask again', tone: 'neutral', terminal: true }
+    case 'lost':
+      // The connection dropped while waiting: any answer went with it — nobody decided.
+      return { message: "Connection dropped — ask again once you're back", tone: 'neutral', terminal: true }
     case 'dismissed':
       // Older status covering both a host dismissal and a timeout — claim neither.
       return { message: 'Request closed — you can ask again', tone: 'neutral', terminal: true }

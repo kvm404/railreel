@@ -26,9 +26,21 @@ const isFiniteNum = (v: unknown): v is number => typeof v === 'number' && Number
 const KEEPALIVE_MS = 10000
 const ROLLING_WINDOW_SIZE = 8
 
+/** The handshake was abandoned through its AbortSignal (the caller moved on). */
+export class SyncCancelledError extends Error {
+  constructor() {
+    super('sync cancelled')
+    this.name = 'SyncCancelledError'
+  }
+}
+
 /**
  * Open a WS session: do `rounds` ping/pong exchanges, resolve with the best clock estimate,
  * then forward any later messages to `onMessage`. Reject on connect/handshake failure.
+ *
+ * `signal` cancels a handshake still in flight: the socket is closed, the promise rejects with
+ * SyncCancelledError, and neither callback ever fires for it. Once resolved, the returned
+ * session's `close()` is the only off switch (and a deliberate close never calls `onClose`).
  */
 export function openSyncSession(
   host: string,
@@ -38,9 +50,21 @@ export function openSyncSession(
   /** Called once if the socket drops AFTER the session was established (host stop, WiFi loss). */
   onClose?: () => void,
   rounds = 6,
+  signal?: AbortSignal,
 ): Promise<SyncSession> {
+  if (signal?.aborted) return Promise.reject(new SyncCancelledError())
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://${host}:${wsPort}/?tk=${encodeURIComponent(token)}`)
+    // Silenced: cancelled mid-handshake, or closed on purpose — nothing more reaches the caller.
+    let silenced = false
+    // We asked for the socket to close. React Native's Android module only registers a socket in
+    // its native onOpen, so a close() issued while still CONNECTING is a native no-op and the
+    // connection would open anyway — onopen re-issues the close (now it lands) instead of pinging.
+    let closeWanted = false
+    const shut = () => {
+      closeWanted = true
+      ws.close()
+    }
     const samples: ClockSample[] = []
     const rollingSamples: ClockSample[] = []
     let currentEstimate: ClockEstimate | null = null
@@ -58,6 +82,7 @@ export function openSyncSession(
     // Clear timers from every terminal path (resolve/close, error, close, timeout) so the
     // keepalive or handshake retry interval can never outlive the socket (host stop, WiFi loss, server timeout).
     const clearTimers = () => {
+      signal?.removeEventListener('abort', onAbort)
       clearTimeout(timeout)
       if (pingTimeout) {
         clearTimeout(pingTimeout)
@@ -72,14 +97,32 @@ export function openSyncSession(
     const timeout = setTimeout(() => {
       if (!settled) {
         settled = true
-        ws.close()
+        shut()
         reject(new Error('sync timed out'))
       }
     }, 8000)
 
-    ws.onopen = () => ping()
+    // Declared as a function so clearTimers (above) can unregister it before this line runs.
+    function onAbort() {
+      if (settled) return // resolved first: the caller owns the session (and closes it)
+      settled = true
+      silenced = true
+      clearTimers()
+      shut()
+      reject(new SyncCancelledError())
+    }
+    signal?.addEventListener('abort', onAbort)
+
+    ws.onopen = () => {
+      if (closeWanted) {
+        ws.close() // cancelled / timed out before the socket opened: close it for real now
+        return
+      }
+      ping()
+    }
 
     ws.onmessage = (e) => {
+      if (silenced) return
       let msg: Record<string, unknown>
       try {
         msg = JSON.parse(String((e as MessageEvent).data))
@@ -136,8 +179,9 @@ export function openSyncSession(
               }
             },
             close: () => {
+              silenced = true // deliberate: not a drop, so no onClose (and no late messages)
               clearTimers()
-              ws.close()
+              shut()
             },
           })
         } else {
@@ -161,7 +205,8 @@ export function openSyncSession(
       if (!settled) {
         settled = true
         reject(new Error('WebSocket closed'))
-      } else {
+      } else if (!silenced) {
+        silenced = true // once
         onClose?.() // session was live; let the caller tear down its UI/state
       }
     }
