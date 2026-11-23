@@ -22,7 +22,22 @@
  *
  * The host's approve() is async (native grant first), so it holds an approval TICKET that deny /
  * leave / reset invalidate — a stale continuation can't re-approve.
+ *
+ * Memory is bounded by what an unapproved peer can make the host keep: ids and names have a
+ * length cap, at most MAX_PENDING_REQUESTS requests wait at once, and a requester that was never
+ * approved is forgotten entirely when its socket closes (it simply asks again on reconnect).
+ * Only approved guests survive a close (silent resume), and the roster keeps at most
+ * MAX_DEPARTED_ROWS of them (departedOverflow).
  */
+
+/** Longest participant id accepted (real ids are ~12 base64url chars). */
+export const MAX_PARTICIPANT_ID_LENGTH = 64
+/** Display names are cut to this many characters. */
+export const MAX_PARTICIPANT_NAME_LENGTH = 40
+/** Join requests that may wait for the host's decision at once (a cabin seats 4–6). */
+export const MAX_PENDING_REQUESTS = 12
+/** Approved guests whose socket is gone that the roster keeps for a silent resume. */
+export const MAX_DEPARTED_ROWS = 16
 
 export type HostIdentity = {
   /** participant id → the grant it joined with (the secret proving the id). */
@@ -35,8 +50,12 @@ export type HostIdentity = {
   idOf: Map<string, string>
   /** Connections that are open and still allowed to act (see the module doc). */
   live: Set<string>
-  /** participant id → bumped whenever the id is forgotten (leave/deny), voiding its tickets. */
-  epochs: Map<string, number>
+  /**
+   * participant id → generation of the grant it holds, fresh (from `seq`) whenever a grant is
+   * first stored. Forgetting an id deletes it, so a same-grant re-join gets a NEW generation and
+   * every ticket issued before is void — without remembering forgotten ids forever.
+   */
+  gens: Map<string, number>
   /** Bumped on every reset (session boundary), voiding every ticket. */
   session: number
   seq: number
@@ -51,7 +70,7 @@ export function createHostIdentity(grants: Map<string, string> = new Map()): Hos
     connOf: new Map(),
     idOf: new Map(),
     live: new Set(),
-    epochs: new Map(),
+    gens: new Map(),
     session: 0,
     seq: 0,
   }
@@ -63,7 +82,7 @@ export function resetHostIdentity(s: HostIdentity): void {
   s.connOf.clear()
   s.idOf.clear()
   s.live.clear()
-  s.epochs.clear()
+  s.gens.clear()
   s.session++
 }
 
@@ -82,7 +101,26 @@ function grantMatches(s: HostIdentity, id: unknown, grant: unknown): id is strin
   )
 }
 
-export type Rejection = 'bad-id' | 'grant-mismatch' | 'conn-is-someone-else' | 'not-approved' | 'not-live'
+export type Rejection =
+  | 'bad-id'
+  | 'grant-mismatch'
+  | 'conn-is-someone-else'
+  | 'not-approved'
+  | 'not-live'
+  | 'too-many-pending'
+
+/** Requests currently waiting for a decision (a grant with no approval for it). */
+export function pendingCount(s: HostIdentity): number {
+  let n = 0
+  for (const id of s.grants.keys()) if (!isApproved(s, id)) n++
+  return n
+}
+
+/** A join's display name, normalised and bounded; '' means "no usable name" (reject the join). */
+export function cleanJoinName(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  return raw.replace(/\s+/g, ' ').trim().slice(0, MAX_PARTICIPANT_NAME_LENGTH)
+}
 
 export type JoinDecision =
   | { kind: 'reject'; reason: Rejection }
@@ -96,7 +134,7 @@ export type JoinDecision =
  * was bound to this id and should be dropped once the new binding is applied.
  */
 export function decideJoin(s: HostIdentity, conn: string, id: string, grant: string): JoinDecision {
-  if (id.length === 0 || id === HOST_ID) return { kind: 'reject', reason: 'bad-id' }
+  if (id.length === 0 || id.length > MAX_PARTICIPANT_ID_LENGTH || id === HOST_ID) return { kind: 'reject', reason: 'bad-id' }
   if (!s.live.has(conn)) return { kind: 'reject', reason: 'not-live' }
   const bound = s.idOf.get(conn)
   if (bound !== undefined && bound !== id) return { kind: 'reject', reason: 'conn-is-someone-else' }
@@ -104,6 +142,8 @@ export function decideJoin(s: HostIdentity, conn: string, id: string, grant: str
   // A join can only (re)claim an id with the grant it already holds — otherwise anyone who saw
   // an id in the roster could reset that guest to "requested" and steal its approval.
   if (stored !== undefined && stored !== grant) return { kind: 'reject', reason: 'grant-mismatch' }
+  // A NEW requester needs a free slot; a pending one re-joining (same grant) already holds one.
+  if (stored === undefined && pendingCount(s) >= MAX_PENDING_REQUESTS) return { kind: 'reject', reason: 'too-many-pending' }
   const prev = s.connOf.get(id)
   const supersedes = prev !== undefined && prev !== conn ? prev : undefined
   return isApproved(s, id) ? { kind: 'resume', supersedes } : { kind: 'request', supersedes }
@@ -144,22 +184,25 @@ export function decideFrame(
 export function applyJoin(s: HostIdentity, conn: string, id: string, grant: string, d: JoinDecision): void {
   if (d.kind === 'reject') return
   if (d.kind === 'request') s.approved.delete(id)
+  if (s.grants.get(id) === undefined || !s.gens.has(id)) s.gens.set(id, ++s.seq)
   s.grants.set(id, grant)
   bind(s, conn, id)
 }
 
-export type ApprovalTicket = { id: string; grant: string; epoch: number; session: number }
+export type ApprovalTicket = { id: string; grant: string; gen: number; session: number }
 
 /** Start approving `id`'s current request; null if there is none. */
 export function approvalTicket(s: HostIdentity, id: string): ApprovalTicket | null {
   const grant = s.grants.get(id)
   if (grant === undefined || id === HOST_ID) return null
-  return { id, grant, epoch: s.epochs.get(id) ?? 0, session: s.session }
+  let gen = s.gens.get(id)
+  if (gen === undefined) s.gens.set(id, (gen = ++s.seq)) // a grant stored outside applyJoin
+  return { id, grant, gen, session: s.session }
 }
 
 /** Is the request this ticket was issued for still the live one (no deny/leave/reset since)? */
 export function ticketValid(s: HostIdentity, t: ApprovalTicket): boolean {
-  return t.session === s.session && (s.epochs.get(t.id) ?? 0) === t.epoch && s.grants.get(t.id) === t.grant
+  return t.session === s.session && s.gens.get(t.id) === t.gen && s.grants.get(t.id) === t.grant
 }
 
 /** Record the approval — only if its ticket is still valid. */
@@ -215,6 +258,42 @@ export function forget(s: HostIdentity, id: string): string | undefined {
   s.connOf.delete(id)
   s.approved.delete(id)
   s.grants.delete(id)
-  s.epochs.set(id, ++s.seq)
+  s.gens.delete(id)
   return conn
+}
+
+export type Departure =
+  /** Approved: keep grant + approval (silent resume); the row becomes `left`. */
+  | { id: string; forgotten: false }
+  /** Never approved: forgotten entirely — revoke `grant` natively and drop the row. */
+  | { id: string; forgotten: true; grant: string | undefined }
+
+/**
+ * A connection closed (see releaseConnection). A requester that was never approved is forgotten
+ * on the spot: otherwise every connect-join-disconnect would leave a row + grant behind that
+ * enlarges every later roster broadcast. It re-asks with a fresh join if it comes back.
+ */
+export function departConnection(s: HostIdentity, conn: string): Departure | null {
+  const id = releaseConnection(s, conn)
+  if (id === null) return null
+  if (isApproved(s, id)) return { id, forgotten: false }
+  const grant = s.grants.get(id)
+  forget(s, id)
+  return { id, forgotten: true, grant }
+}
+
+/**
+ * Departed (`left`) roster rows beyond `cap`, oldest last-heartbeat first: these should be
+ * forgotten (grant revoked, row dropped) so a long session's churn can't grow the roster forever.
+ */
+export function departedOverflow(
+  rows: readonly { id: string; status: string; lastBeatAt: number }[],
+  cap = MAX_DEPARTED_ROWS,
+): string[] {
+  const left = rows.filter((r) => r.status === 'left' && r.id !== HOST_ID)
+  if (left.length <= cap) return []
+  return [...left]
+    .sort((a, b) => a.lastBeatAt - b.lastBeatAt)
+    .slice(0, left.length - cap)
+    .map((r) => r.id)
 }

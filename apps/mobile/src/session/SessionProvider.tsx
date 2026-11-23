@@ -83,13 +83,15 @@ import {
   approvalTicket,
   approveWithTicket,
   bind,
+  cleanJoinName,
   createHostIdentity,
   decideFrame,
   decideJoin,
+  departConnection,
+  departedOverflow,
   forget,
   isApproved,
   openConnection,
-  releaseConnection,
   resetHostIdentity,
   ticketValid,
   type HostIdentity,
@@ -666,12 +668,28 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       pendingPlaybackRequestsRef.current = pendingPlaybackRequestsRef.current.filter((r) => r.requesterId !== id)
       setPendingPlaybackRequests(pendingPlaybackRequestsRef.current)
     }
+    // Forget a participant for good: revoke its data-plane grant (queued after any in-flight
+    // approve() on the serial native queue, like deny), drop identity, requests and row.
+    const dropParticipants = (drop: readonly string[]) => {
+      if (drop.length === 0) return
+      const ids = hostIds()
+      for (const id of drop) {
+        const grant = ids.grants.get(id)
+        if (grant) RailReelHost.revoke(grant).catch(() => {})
+        const conn = forget(ids, id)
+        if (conn) RailReelHost.dropConnection(conn).catch(() => {})
+        dropRequestsOf(id)
+      }
+      updateParticipants((prev) => prev.filter((p) => !drop.includes(p.id)), true)
+    }
     const markLeft = (id: string) => {
       dropRequestsOf(id)
       updateParticipants(
         (prev) => prev.map((p) => (p.id === id ? { ...p, status: 'left', stalled: false, inShow: false } : p)),
         true,
       )
+      // Departed rows are kept for a silent resume — but only so many (lib/host/identity).
+      dropParticipants(departedOverflow(participantsRef.current))
     }
     // Admit a grant-proven frame on `conn` acting for `id`. Everything a guest does once inside
     // needs APPROVAL (not merely a non-"requested" row): a never-approved guest that dropped and
@@ -702,21 +720,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           msg.token !== hostTokenRef.current ||
           !isValidSecret(msg.grant, 22) ||
           typeof msg.id !== 'string' ||
-          msg.id.length === 0 ||
-          msg.id === 'host' ||
-          typeof msg.name !== 'string' ||
-          msg.name.length === 0
+          cleanJoinName(msg.name).length === 0
         ) {
           return
         }
         const ids = hostIds()
-        // A join can't re-claim an id under a different grant, nor switch this socket's identity.
+        // A join can't re-claim an id under a different grant, nor switch this socket's identity;
+        // over-long ids and requests beyond the pending cap are refused (lib/host/identity).
         const d = decideJoin(ids, conn, msg.id, msg.grant)
-        if (d.kind === 'reject') return
+        if (d.kind === 'reject') {
+          // A refused NEW socket would otherwise idle until the unbound timeout — close it now.
+          if (!ids.idOf.has(conn)) RailReelHost.dropConnection(conn).catch(() => {})
+          return
+        }
         applyJoin(ids, conn, msg.id, msg.grant, d)
         if (d.supersedes) RailReelHost.dropConnection(d.supersedes).catch(() => {})
         const joinId = msg.id
-        const name = msg.name.slice(0, 40)
+        const name = cleanJoinName(msg.name)
         if (d.kind === 'resume') {
           // Approved while it was away and it missed the decision: re-admit this socket, repeat
           // the decision to it alone, and keep its row (no reset to "requested"). Roster (movie
@@ -855,15 +875,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       )
     })
     // A close affects only the participant bound to THAT connection (never an id a frame claimed).
-    // Grant + approval survive it, so an approved guest resumes silently on reconnect.
+    // An approved guest keeps grant + approval and resumes silently on reconnect; a requester
+    // that was never approved is forgotten with its row (it re-asks when it comes back).
     const onClose = RailReelHost.addListener('onWsClose', ({ conn }) => {
       const t = unboundTimers.get(conn)
       if (t) {
         clearTimeout(t)
         unboundTimers.delete(conn)
       }
-      const id = releaseConnection(hostIds(), conn) // always: keeps the live set exact
-      if (id && roleRef.current === 'host') markLeft(id)
+      const gone = departConnection(hostIds(), conn) // always: keeps the live set exact
+      if (!gone || roleRef.current !== 'host') return
+      if (gone.forgotten) {
+        if (gone.grant) RailReelHost.revoke(gone.grant).catch(() => {})
+        dropRequestsOf(gone.id)
+        updateParticipants((prev) => prev.filter((p) => p.id !== gone.id), true)
+      } else {
+        markLeft(gone.id)
+      }
     })
     return () => {
       onMessage.remove()
