@@ -179,6 +179,42 @@ export function nextCompaction(level: ChromeCompaction, overflowPx: number): Chr
   return (level + 1) as ChromeCompaction
 }
 
+/**
+ * The situation a compaction level belongs to; the Player resets to 0 whenever it changes. Built
+ * ONLY from inputs the squeeze cannot change — which notice and banner are up, orientation, text
+ * scale, captions on, and the cue on screen — never from measured heights, so squeezing the chrome
+ * can't reset itself (no oscillation), while a new cue, a resolved banner or a cleared hold
+ * releases a squeeze that is no longer needed.
+ */
+export interface CompactionContext {
+  notice: string
+  banner: string
+  wide: boolean
+  fontScale: number
+  captionsOn: boolean
+  /** Identity of the last cue set shown (a gap between cues keeps the previous one). */
+  cueKey: string
+}
+
+export function compactionKey(c: CompactionContext): string {
+  return [c.notice, c.banner, c.wide ? 'w' : 'n', c.fontScale, c.captionsOn ? 'c' : '-', c.cueKey].join('|')
+}
+
+/**
+ * The host's prompts over the film, one at a time: a playback request first (it expires within
+ * seconds), then join requests. Two stacked banners in landscape leave no room for even one
+ * caption line under them; the one shown says how many more are queued.
+ */
+export function hostBannerQueue(playbackRequests: number, joinRequests: number): {
+  show: 'playback' | 'join' | null
+  /** Prompts waiting behind the one shown that it does not already count itself. */
+  queued: number
+} {
+  if (playbackRequests > 0) return { show: 'playback', queued: playbackRequests - 1 + joinRequests }
+  if (joinRequests > 0) return { show: 'join', queued: 0 } // the join banner counts its own queue
+  return { show: null, queued: 0 }
+}
+
 export function playerLayout(i: PlayerLayoutInput): PlayerLayout {
   const fontScale = i.fontScale && i.fontScale > 0 ? i.fontScale : 1
   const wide = i.width > i.height

@@ -38,6 +38,8 @@ import {
   COMPACT_CAPTIONS,
   COMPACT_CONTROLS,
   COMPACT_NOTICE,
+  compactionKey,
+  hostBannerQueue,
   nextCompaction,
   playerLayout,
   TOP_FADE,
@@ -759,6 +761,28 @@ export function PlayerScreen() {
   const captionsOn = subtitlesEnabled && cues.length > 0
   const chromeOpen = showControls || ended
 
+  // Host prompts over the film, one at a time (lib/player/layout hostBannerQueue): a playback
+  // request first, then someone asking to board — the door is the host's call wherever it is.
+  const playbackRequests = isHost ? s.pendingPlaybackRequests : []
+  const moderation = playbackRequests[0] ?? null
+  const participants = s.participants
+  const joinRequests = useMemo(() => (isHost ? admission(participants).pending : []), [isHost, participants])
+  const bannerQueue = hostBannerQueue(playbackRequests.length, joinRequests.length)
+  const bannersUp = bannerQueue.show != null
+  // The banner's measured height is part of the overlay budget (lib/player/layout).
+  const onBannerLayout = useCallback((h: number) => {
+    setBannerH((prev) => (Math.abs(prev - h) > 1 ? Math.round(h) : prev))
+  }, [])
+  useEffect(() => {
+    if (!bannersUp) setBannerH(0)
+  }, [bannersUp])
+  // The cue on screen, for the compaction context; a gap between cues keeps the last one, so the
+  // chrome doesn't unfold and refold around every pause in the dialogue.
+  const [cueKey, setCueKey] = useState('')
+  const onCuesChange = useCallback((key: string) => {
+    if (key) setCueKey(key)
+  }, [])
+
   // Captions must clear the top controls (lib/player/layout). When a tall cue over a crowded
   // curtain can't, squeeze the chrome one measured step at a time; the level only resets when the
   // situation itself changes, so the curtain never flaps between a squeezed and a full layout.
@@ -772,10 +796,17 @@ export function PlayerScreen() {
         ? 'paused'
         : 'none'
   const [compaction, setCompaction] = useState<ChromeCompaction>(0)
-  const compactionKey = `${noticeKind}|${width > height}|${captionsOn}|${fontScale}|${bannerH > 0}`
+  const context = compactionKey({
+    notice: noticeKind,
+    banner: bannerQueue.show ?? 'none',
+    wide: width > height,
+    fontScale,
+    captionsOn,
+    cueKey,
+  })
   useEffect(() => {
     setCompaction(0)
-  }, [compactionKey])
+  }, [context])
   const capCaptions = compaction >= COMPACT_CAPTIONS
   const layout = useMemo(
     () =>
@@ -850,18 +881,6 @@ export function PlayerScreen() {
 
   const requestPending = s.playbackRequestStatus === 'pending'
   const cacheBytes = s.cacheStatus?.totalBytes ?? 0
-  const moderation = isHost ? (s.pendingPlaybackRequests[0] ?? null) : null
-  // Someone asking to board mid-show: the door is the host's call wherever the host is.
-  const participants = s.participants
-  const joinRequests = useMemo(() => (isHost ? admission(participants).pending : []), [isHost, participants])
-  const bannersUp = moderation != null || joinRequests.length > 0
-  // The banner stack's measured height is part of the overlay budget (lib/player/layout).
-  const onBannerLayout = useCallback((h: number) => {
-    setBannerH((prev) => (Math.abs(prev - h) > 1 ? Math.round(h) : prev))
-  }, [])
-  useEffect(() => {
-    if (!bannersUp) setBannerH(0)
-  }, [bannersUp])
 
   // The line above the filament: the end, a hold for stragglers, or the host's pause. Compacted
   // (a caption needs the room): one line, inline, its action a compact pill.
@@ -1011,6 +1030,7 @@ export function PlayerScreen() {
           lift={lift}
           onHeight={onCaptionHeight}
           maxLines={layout.captionMaxLines}
+          onCuesChange={onCuesChange}
         />
         {!chatOpen && band.ticker && (
           <ChatTicker
@@ -1105,12 +1125,21 @@ export function PlayerScreen() {
       {/* Time-boxed host prompt and guest feedback sit above even the chat: they expire on their own. */}
       {bannersUp ? (
         <View
-          style={[styles.topLayer, styles.bannerStack, sidePad, { top: layout.bannerTop }]}
+          style={[styles.topLayer, sidePad, { top: layout.bannerTop }]}
           pointerEvents="box-none"
           onLayout={(e) => onBannerLayout(e.nativeEvent.layout.height)}
         >
-          {moderation ? <ModerationBanner request={moderation} onApprove={approveRequest} onDismiss={dismissRequest} /> : null}
-          <JoinRequestBanner requests={joinRequests} onApprove={approve} onDeny={deny} wide={layout.wide} />
+          {bannerQueue.show === 'playback' ? (
+            <ModerationBanner
+              request={moderation}
+              onApprove={approveRequest}
+              onDismiss={dismissRequest}
+              wide={layout.wide}
+              queued={bannerQueue.queued}
+            />
+          ) : (
+            <JoinRequestBanner requests={joinRequests} onApprove={approve} onDeny={deny} wide={layout.wide} />
+          )}
         </View>
       ) : null}
       {!isHost && s.playbackRequestStatus !== 'idle' ? (
@@ -1151,6 +1180,5 @@ const styles = StyleSheet.create({
   requests: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, flexWrap: 'wrap' },
   wideRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 16 },
   topLayer: { position: 'absolute', left: 0, right: 0, zIndex: 110, elevation: 110 },
-  bannerStack: { gap: 8 },
   centered: { alignItems: 'center' },
 })

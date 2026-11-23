@@ -17,6 +17,10 @@ export interface ModerationBannerProps {
   onDismiss: (requestId: string) => void
   /** The store's auto-dismiss window (it owns the timer; this only displays it). Defaults to 10s. */
   autoDismissMs?: number
+  /** Landscape: one row (icon · who · countdown · actions) so the banner takes the least height. */
+  wide?: boolean
+  /** Other host prompts queued behind this one (the Player shows one banner at a time). */
+  queued?: number
 }
 
 const TICK_MS = 250
@@ -33,6 +37,8 @@ export const ModerationBanner = memo(function ModerationBanner({
   onApprove,
   onDismiss,
   autoDismissMs = 10_000,
+  wide = false,
+  queued = 0,
 }: ModerationBannerProps) {
   const t = useTheme()
   const reduced = useReduceMotion()
@@ -67,11 +73,11 @@ export const ModerationBanner = memo(function ModerationBanner({
 
   return (
     <View
-      style={[styles.container, { backgroundColor: t.palette.raised, borderColor: t.palette.hairline }]}
+      style={[styles.container, wide && styles.containerWide, { backgroundColor: t.palette.raised, borderColor: t.palette.hairline }]}
       accessibilityRole="alert"
       accessibilityLabel={`${request.requesterName} ${actionText}`}
     >
-      <View style={styles.contentRow}>
+      <View style={[styles.contentRow, wide && styles.contentRowWide]}>
         <View style={[styles.iconContainer, { backgroundColor: withAlpha(t.palette.amber, 0.15), borderColor: t.palette.amber }]}>
           {isRewind ? (
             <RotateCcw size={18} color={t.palette.amber} strokeWidth={2.2} />
@@ -89,12 +95,17 @@ export const ModerationBanner = memo(function ModerationBanner({
           </Text>
         </View>
 
+        {queued > 0 ? (
+          <Text variant="eyebrow" tone="amber" accessibilityLabel={`${queued} more waiting`}>
+            {`+${queued} MORE`}
+          </Text>
+        ) : null}
         <Text variant="eyebrow" tone="secondary" accessibilityLabel={`${left} seconds left`}>
           {`${left}s`}
         </Text>
       </View>
 
-      <View style={styles.actionRow}>
+      <View style={[styles.actionRow, wide && styles.actionRowWide]}>
         <IconButton
           variant="ghost"
           size={40}
@@ -131,7 +142,18 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     elevation: 6,
   },
+  // Landscape: one row, and no wider than it needs to be over the film.
+  containerWide: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingVertical: spacing.sm,
+    alignSelf: 'center',
+    maxWidth: 560,
+    width: '100%',
+  },
   contentRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
+  contentRowWide: { flex: 1, minWidth: 0 },
   iconContainer: {
     width: 36,
     height: 36,
@@ -142,6 +164,7 @@ const styles = StyleSheet.create({
   },
   textContainer: { flex: 1 },
   actionRow: { flexDirection: 'row', gap: spacing.sm, justifyContent: 'flex-end', marginTop: 2 },
+  actionRowWide: { marginTop: 0 },
   fuse: {
     position: 'absolute',
     left: 0,

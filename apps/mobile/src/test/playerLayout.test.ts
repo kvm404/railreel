@@ -8,6 +8,10 @@ import {
   COMPACT_CAPTIONS,
   COMPACT_CONTROLS,
   COMPACT_NOTICE,
+  compactionKey,
+  hostBannerQueue,
+  type ChromeCompaction,
+  type CompactionContext,
   railWidth,
   reactionLanes,
   LANE_STEP_Y,
@@ -277,6 +281,80 @@ describe('caption ceiling', () => {
     expect(cramped.captionMaxLines).toBe(1)
     const roomy = playerLayout({ ...portrait, capCaptionLines: 'open' })
     expect(roomy.captionMaxLines!).toBeGreaterThan(3)
+  })
+})
+
+describe('host banners over a crowded landscape hold', () => {
+  // Codex P2: a playback request AND a join request stacked (≈190dp) left no room for even one
+  // caption line, so level 3 still overflowed. One banner at a time, one row in landscape.
+  const crowded: PlayerLayoutInput = { ...landscape, bottomCurtainHeight: 190, captionHeight: 110 }
+  const ONE_ROW_BANNER = 58 // 8 + 40dp actions + 8 + border
+  const FOLDED_CURTAIN = 190 - 54 // compaction 'controls' folds the 44dp notice row (+10 gap) away
+
+  it('stacked banners cannot fit a caption line even fully squeezed (why they are queued)', () => {
+    const l = playerLayout({ ...crowded, bottomCurtainHeight: FOLDED_CURTAIN, bannerHeight: 190, capCaptionLines: 'open' })
+    expect(l.captionMaxLines).toBe(1)
+    expect(l.captionOverflow).toBeGreaterThan(0)
+  })
+
+  it('queued to one row: fully squeezed, at least one caption line genuinely fits', () => {
+    const squeezed = { ...crowded, bottomCurtainHeight: FOLDED_CURTAIN, bannerHeight: ONE_ROW_BANNER, capCaptionLines: 'open' as const }
+    const l = playerLayout(squeezed)
+    expect(l.captionMaxLines).toBeGreaterThanOrEqual(1)
+    const reported = { ...squeezed, captionHeight: captionBlockHeight(l.captionMaxLines!) }
+    expectCaptionsClear(reported, playerLayout(reported))
+  })
+})
+
+describe('hostBannerQueue', () => {
+  it('shows one prompt at a time, the expiring playback request first, and counts the rest', () => {
+    expect(hostBannerQueue(0, 0)).toEqual({ show: null, queued: 0 })
+    expect(hostBannerQueue(1, 0)).toEqual({ show: 'playback', queued: 0 })
+    expect(hostBannerQueue(1, 2)).toEqual({ show: 'playback', queued: 2 })
+    expect(hostBannerQueue(2, 1)).toEqual({ show: 'playback', queued: 2 })
+    expect(hostBannerQueue(0, 3)).toEqual({ show: 'join', queued: 0 }) // the join banner counts its own
+  })
+})
+
+describe('compaction settles and releases', () => {
+  const ctx: CompactionContext = { notice: 'hold', banner: 'none', wide: true, fontScale: 1, captionsOn: true, cueKey: '41' }
+  // The Player's loop, with the curtain each level actually renders (folded from 'controls' on).
+  const layoutAt = (level: ChromeCompaction, captionHeight: number) =>
+    playerLayout({
+      ...landscape,
+      bottomCurtainHeight: level >= COMPACT_CONTROLS ? 136 : 190,
+      captionHeight,
+      capCaptionLines: level >= COMPACT_CAPTIONS ? 'open' : undefined,
+    })
+  const settle = (start: ChromeCompaction, captionHeight: number, steps = 12) => {
+    const levels: ChromeCompaction[] = []
+    let level = start
+    const key = compactionKey(ctx)
+    for (let i = 0; i < steps; i++) {
+      level = nextCompaction(level, layoutAt(level, captionHeight).captionOverflow)
+      // the context is built from inputs the squeeze cannot change: it never resets itself
+      expect(compactionKey(ctx)).toBe(key)
+      levels.push(level)
+    }
+    return levels
+  }
+
+  it('a tall cue squeezes to the first level that fits, then holds there (no oscillation)', () => {
+    const levels = settle(0, 110)
+    const final = levels[levels.length - 1]!
+    expect(final).toBe(COMPACT_CONTROLS)
+    expect(layoutAt(final, 110).captionOverflow).toBe(0)
+    expect(new Set(levels.slice(3))).toEqual(new Set([final])) // steady, no flapping back
+  })
+
+  it('the next cue resets the context, and a short cue then needs no squeeze', () => {
+    expect(compactionKey({ ...ctx, cueKey: '42' })).not.toBe(compactionKey(ctx))
+    expect(settle(0, 0).every((l) => l === 0)).toBe(true)
+  })
+
+  it('a resolved banner or a cleared hold resets it too', () => {
+    expect(compactionKey({ ...ctx, banner: 'join' })).not.toBe(compactionKey(ctx))
+    expect(compactionKey({ ...ctx, notice: 'none' })).not.toBe(compactionKey(ctx))
   })
 })
 

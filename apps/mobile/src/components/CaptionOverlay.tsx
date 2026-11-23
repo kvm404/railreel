@@ -29,6 +29,8 @@ export interface CaptionOverlayProps {
    * many lines, ellipsizing the rest (lib/player/captions captionLineBudget). Unset = in full.
    */
   maxLines?: number
+  /** The active cue set's identity ('' when none shown), whenever it changes. */
+  onCuesChange?: (key: string) => void
 }
 
 /**
@@ -72,6 +74,7 @@ export const CaptionOverlay = memo(function CaptionOverlay({
   lift,
   onHeight,
   maxLines,
+  onCuesChange,
 }: CaptionOverlayProps) {
   const fallbackMs = positionMs ?? (currentTimeSec !== undefined ? currentTimeSec * 1000 : 0)
   const activeCues = useActiveCues(visible ? cues : EMPTY, playhead, fallbackMs)
@@ -81,6 +84,11 @@ export const CaptionOverlay = memo(function CaptionOverlay({
     () => captionLineBudget(activeCues.map((c) => (c.lines && c.lines.length > 0 ? c.lines.length : 1)), maxLines),
     [activeCues, maxLines],
   )
+
+  const cueKey = shown ? activeCues.map((c) => String(c.id)).join(',') : ''
+  useEffect(() => {
+    onCuesChange?.(cueKey)
+  }, [cueKey, onCuesChange])
 
   // Nothing on screen → nothing to reserve beyond the Player's default floor.
   useEffect(() => {
