@@ -30,6 +30,7 @@ import RailReelHost from '../../modules/railreel-host'
 import { openSyncSession, SyncCancelledError, type SyncSession } from '@/net/syncClient'
 import { reconnectDelayMs } from '@/lib/net/backoff'
 import { pickHostNetwork, sameHostNetwork, type HostNetwork } from '@/lib/net/hostNetwork'
+import { PROGRESS_PUBLISH_MS, ROSTER_TELEMETRY_PUBLISH_MS, rosterChange, shouldPublishProgress } from '@/lib/net/telemetry'
 import {
   isTransferStalled,
   MAX_INTEGRITY_RETRIES,
@@ -546,6 +547,62 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(id)
   }, [role])
 
+  // ── throttled UI views of fast telemetry (lib/net/telemetry) ───────────────
+  // The exact values live in refs (progressRef, participantsRef) for heartbeats and gate math;
+  // React state — and with it the whole context every screen re-renders on — follows at a few
+  // Hz. Boundaries and structural changes still land at once; a held-back value is flushed by a
+  // trailing timer, so the last one before a pause is never lost.
+  const shownProgressRef = useRef(0)
+  const shownProgressAtRef = useRef(0)
+  const progressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const publishProgress = useCallback((frac: number) => {
+    const now = Date.now()
+    const show = (v: number) => {
+      if (progressTimerRef.current) clearTimeout(progressTimerRef.current)
+      progressTimerRef.current = null
+      shownProgressRef.current = v
+      shownProgressAtRef.current = Date.now()
+      setProgress(v)
+    }
+    if (shouldPublishProgress(frac, shownProgressRef.current, shownProgressAtRef.current, now)) return show(frac)
+    if (frac === shownProgressRef.current || progressTimerRef.current) return
+    progressTimerRef.current = setTimeout(
+      () => {
+        progressTimerRef.current = null
+        if (!disposedRef.current && progressRef.current !== shownProgressRef.current) show(progressRef.current)
+      },
+      Math.max(0, PROGRESS_PUBLISH_MS - (now - shownProgressAtRef.current)),
+    )
+  }, [])
+
+  const shownParticipantsRef = useRef<Participant[]>([])
+  const participantsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** Show participantsRef's current list: now if it changed structurally, coalesced if only numbers moved. */
+  const publishParticipants = useCallback(() => {
+    const flush = () => {
+      if (participantsTimerRef.current) clearTimeout(participantsTimerRef.current)
+      participantsTimerRef.current = null
+      shownParticipantsRef.current = participantsRef.current
+      setParticipants(participantsRef.current)
+    }
+    const change = rosterChange(shownParticipantsRef.current, participantsRef.current)
+    if (change === 'structural') flush()
+    else if (change === 'telemetry' && !participantsTimerRef.current) {
+      participantsTimerRef.current = setTimeout(() => {
+        participantsTimerRef.current = null
+        if (!disposedRef.current) flush()
+      }, ROSTER_TELEMETRY_PUBLISH_MS)
+    }
+  }, [])
+  useEffect(
+    () => () => {
+      // mount-only: unmount drops any pending trailing publish
+      if (progressTimerRef.current) clearTimeout(progressTimerRef.current)
+      if (participantsTimerRef.current) clearTimeout(participantsTimerRef.current)
+    },
+    [],
+  )
+
   // ── host roster helpers ─────────────────────────────────────────────────────
   const rosterJson = useCallback((list: Participant[]): string => {
     const payload: ParticipantInfo[] = list.map((p) => ({
@@ -576,10 +633,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     (fn: (prev: Participant[]) => Participant[], broadcast = true) => {
       const next = fn(participantsRef.current)
       participantsRef.current = next
-      setParticipants(next)
+      publishParticipants()
       if (broadcast && roleRef.current === 'host') broadcastRoster(next)
     },
-    [broadcastRoster],
+    [broadcastRoster, publishParticipants],
   )
 
   // Fold an incoming, already-validated chat line / reaction into local state. Reactions get a
@@ -1001,9 +1058,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     positionRef.current = 0
     stalledRef.current = false
     inShowRef.current = false
-    setProgress(0)
+    publishProgress(0)
     setMovieUri(null)
-  }, [clearRetryTimer])
+  }, [clearRetryTimer, publishProgress])
 
   // ── cache management ────────────────────────────────────────────────────────
   const getCacheInfo = useCallback(async (): Promise<CacheStatus> => {
@@ -1749,7 +1806,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         integrityFailuresRef.current = 0
         completeRef.current = true // the ONLY place completion is claimed: after validation
         progressRef.current = 1
-        setProgress(1)
+        publishProgress(1)
         // If the proxy is serving the show (or about to — its handler sets the source), leave it
         // alone: swapping the source mid-playback would rebuffer. Otherwise open the file directly.
         if (proxyStateRef.current === 'idle' || proxyStateRef.current === 'failed') setMovieUri(MOVIE_CACHE)
@@ -1812,7 +1869,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             if (stale()) return
             partialEpochRef.current = null
             progressRef.current = 0
-            setProgress(0)
+            publishProgress(0)
             mbpsRef.current = 0
             // The kept-copy record describes the file we're about to replace — drop it first.
             await LegacyFS.deleteAsync(MOVIE_META, { idempotent: true }).catch(() => {})
@@ -1856,7 +1913,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               // treats 1 as ready, and the last read can still fail its write or fingerprint.
               const frac = unvalidatedProgress(p.totalBytesWritten, size > 0 ? size : total)
               progressRef.current = frac
-              setProgress(frac)
+              publishProgress(frac) // throttled: the ring needn't move 10×/s
               attemptBytesRef.current = Math.max(0, p.totalBytesWritten - resumedFrom)
 
               // Measured throughput (smoothed) — the number the host's start gate reasons about.
@@ -1989,7 +2046,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           const retained = partialEpochRef.current === myEpoch
           if (!retained) {
             progressRef.current = 0
-            setProgress(0)
+            publishProgress(0)
           }
           // Real forward progress that is still on disk earns back the automatic retry budget
           // (a WS reconnect doesn't; bytes we just discarded don't either).
@@ -2010,7 +2067,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // (if this attempt gives up on a wedged predecessor, that predecessor still guards the file).
       return movieCacheOwner.run(run)
     },
-    [sendBeat, getCacheInfo, clearRetryTimer, detachProgressive, reuseKeptCopy, scheduleTransferRetry, abortStalledTransfer],
+    [sendBeat, getCacheInfo, clearRetryTimer, detachProgressive, reuseKeptCopy, scheduleTransferRetry, abortStalledTransfer, publishProgress],
   )
   startDownloadRef.current = startDownload
 
@@ -2117,7 +2174,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                   lastBeatAt: Date.now(),
                 }))
               participantsRef.current = list
-              setParticipants(list)
+              publishParticipants() // coalesced when only numbers moved (roster storms while downloading)
             } else if (m.t === 'state') {
               setPlayback(m.state) // host's authoritative playback; the Player drift-corrects to it
             } else if (m.t === 'chat') {
@@ -2173,7 +2230,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (initial) session.send({ t: 'join', id: myId, name, token: payload.token, grant })
       return session
     },
-    [startDownload, ingestChat, ingestReaction, loadSubtitle, clearSubtitle, maybeFetchSubtitle, showRequestOutcome],
+    [startDownload, ingestChat, ingestReaction, loadSubtitle, clearSubtitle, maybeFetchSubtitle, showRequestOutcome, publishParticipants],
   )
 
   // Reconnect loop: re-handshake with exponential backoff, then resume the same session identity.
@@ -2283,7 +2340,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       resetSubtitlePull()
       setPlayback(null)
       participantsRef.current = []
-      setParticipants([])
+      publishParticipants()
       setMovie(null)
       setChatLog([])
       setReactions([])
@@ -2366,7 +2423,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     joinMetaRef.current = null
     grantsRef.current.clear()
     participantsRef.current = []
-    setParticipants([])
+    publishParticipants()
     setMovie(null)
     setJoinUrl(null)
     setJoinCode(null)
