@@ -10,6 +10,8 @@ import { CleanupSheet } from '@/components/CleanupSheet'
 import { Button, FlapText, Text } from '@/ui'
 import { useTheme } from '@/theme/ThemeProvider'
 import { useBackHandler, useNavigation } from '@/navigation/context'
+import { useMountedRef } from '@/hooks/useMountedRef'
+import { resumeExit } from '@/lib/nav/exitGuard'
 import { canJoinShow, decideStartGate, departureClock, type StartGateDecision } from '@/lib/sync/startGate'
 import { targetPositionSec } from '@/lib/sync/playback'
 import { useSession, type Participant } from '@/session/SessionProvider'
@@ -92,12 +94,25 @@ export function LobbyScreen() {
     nav.reset('Home')
   }
 
+  // Async exits resume only into the session they started from: if the host ended it meanwhile this
+  // board has already reset Home and unmounted, and the user may be in a NEW session by the time a
+  // slow purge settles — leave() then would tear that one down.
+  const mounted = useMountedRef()
+  const sessionRef = useRef(s)
+  sessionRef.current = s
+  const resumeExitSession = () => {
+    const step = resumeExit({ mounted: mounted.current, sessionActive: sessionRef.current.role !== 'none' })
+    if (step === 'leave') exitSession()
+    else if (step === 'reset') nav.reset('Home')
+  }
+
   const handleExitRequest = async () => {
     const info = await s.getCacheInfo()
+    if (!mounted.current) return
     if (info.totalBytes > 0) {
       setShowCleanupSheet(true)
     } else {
-      exitSession()
+      resumeExitSession()
     }
   }
 
@@ -108,7 +123,7 @@ export function LobbyScreen() {
     } finally {
       setIsDeleting(false)
       setShowCleanupSheet(false)
-      exitSession()
+      resumeExitSession()
     }
   }
 
