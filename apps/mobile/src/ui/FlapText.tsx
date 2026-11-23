@@ -95,7 +95,14 @@ function FlapCell({
   const mounted = useRef(false)
 
   useEffect(() => {
-    if (curr === char) return
+    if (curr === char) {
+      // Re-run with nothing to flip (e.g. reduce-motion toggled mid-flip, whose cleanup just
+      // cancelled the animation): settle, or the tile would freeze half-rotated.
+      cancelAnimation(progress)
+      progress.value = 1
+      setFlipping(false)
+      return
+    }
     setPrev(curr)
     setCurr(char)
 

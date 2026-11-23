@@ -24,7 +24,7 @@ import { useBackHandler, useNavigation } from '@/navigation/context'
 import { useMountedRef } from '@/hooks/useMountedRef'
 import { useReduceMotion } from '@/hooks/useReduceMotion'
 import { resumeExit } from '@/lib/nav/exitGuard'
-import { describeCleanupFailure } from '@/lib/storage'
+import { cleanupFailureMessage, type ClearCacheResult } from '@/lib/storage'
 import { canJoinShow, decideStartGate, departureClock, type StartGateDecision } from '@/lib/sync/startGate'
 import { targetPositionSec } from '@/lib/sync/playback'
 import {
@@ -105,11 +105,11 @@ export function LobbyScreen() {
 
   // One coordinated readiness event: rows ignite in turn → board flips ALL ABOARD → amber bloom
   // (+ the single success haptic) → Start lights.
-  const sessionKey = `${s.role}:${movie?.title ?? ''}:${movie?.sizeBytes ?? 0}`
+  // Keyed by the SESSION's identity (host: its join code; guest: its own per-connection id), so a
+  // second session of the same movie — even right after leaving — plays its own ignition.
+  const myId = !isHost ? people.find((p) => p.name === 'You')?.id : undefined
+  const sessionKey = isHost ? (s.joinCode ? `host:${s.joinCode}` : null) : myId ? `guest:${myId}` : null
   const seq = useReadinessSequence(phase === 'all-aboard', buckets.ready.length, sessionKey, reduced)
-  useEffect(() => {
-    if (s.role === 'none') milestones.reset()
-  }, [s.role])
   const schedule = useMemo(() => ignitionSchedule(buckets.ready.length, reduced), [buckets.ready.length, reduced])
   const igniteDelays = useMemo(() => {
     const m = new Map<string, number>()
@@ -171,26 +171,21 @@ export function LobbyScreen() {
     }
   }
 
-  // Leave only once the files are PROVABLY gone: purgeCache() swallows per-file errors, so verify
-  // the remaining bytes ourselves and keep the sheet open with a retry when anything survived.
+  // Leave only once the files are PROVABLY gone. purgeCache() reports what survived (it already
+  // detached the player and cancelled the transfer), so a failure keeps the sheet open with the
+  // reason and a retry — and, since the lobby can no longer be resumed, no way back into it.
   const handleDeleteAndLeave = async () => {
     setIsDeleting(true)
-    setDeleteError(null)
-    let threw = false
-    let remaining = 0
+    // (deleteError stays up during a retry so the sheet doesn't flicker back to its unlocked form)
+    let result: ClearCacheResult | null = null
     try {
-      await s.purgeCache()
+      result = await s.purgeCache()
     } catch {
-      threw = true
-    }
-    try {
-      remaining = (await s.getCacheInfo()).totalBytes
-    } catch {
-      threw = true
+      result = null
     }
     if (!mounted.current) return
     setIsDeleting(false)
-    const failure = describeCleanupFailure(remaining, threw)
+    const failure = cleanupFailureMessage(result)
     if (failure) {
       setDeleteError(failure)
       return
@@ -422,7 +417,7 @@ type Sequence = {
  * (latched), and a remounted Lobby (back from the Player) jumps straight to the settled end state
  * instead of replaying the ritual.
  */
-function useReadinessSequence(active: boolean, readyRows: number, key: string, reduced: boolean): Sequence {
+function useReadinessSequence(active: boolean, readyRows: number, key: string | null, reduced: boolean): Sequence {
   const [seq, setSeq] = useState<Sequence>({ stage: 0, animate: false })
   const rowsRef = useRef(readyRows)
   rowsRef.current = readyRows
@@ -432,7 +427,8 @@ function useReadinessSequence(active: boolean, readyRows: number, key: string, r
       setSeq({ stage: 0, animate: false })
       return
     }
-    if (milestones.has(key)) {
+    // No session identity yet: show the settled state, never a stray ritual.
+    if (key === null || milestones.has(key)) {
       setSeq({ stage: 4, animate: false })
       return
     }
