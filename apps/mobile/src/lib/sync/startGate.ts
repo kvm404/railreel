@@ -229,16 +229,15 @@ export function departureClock(etaSec: number | null): string {
 /** Lead a late joiner needs beyond the live playhead before it may enter the show (seconds). */
 export const CATCH_UP_LEAD_SEC = 30
 
-/** What a late joiner can actually play right now (defaults keep legacy 3-arg callers working). */
+/** What a late joiner can actually play right now. Required: no default may admit an empty player. */
 export interface JoinShowSource {
   /**
    * A partial copy is playable (faststart MP4 behind the local proxy). false → no progressive
-   * source exists (moov at EOF, or the proxy failed), so only a FINISHED file may enter.
-   * Default true.
+   * source exists (moov at EOF), so only a FINISHED file may enter.
    */
-  progressive?: boolean
-  /** The player has a source to open right now (the store's movieUri is set). Default true. */
-  hasSource?: boolean
+  progressive: boolean
+  /** The player has a source to open right now (the store's movieUri is set). */
+  hasSource: boolean
 }
 
 /**
@@ -251,12 +250,12 @@ export function canJoinShow(
   progress: number,
   durationSec: number,
   positionSec: number,
+  source: JoinShowSource,
   leadSec = CATCH_UP_LEAD_SEC,
-  source: JoinShowSource = {},
 ): boolean {
-  if (source.hasSource === false) return false
+  if (!source.hasSource) return false
   if (progress >= 1) return true
-  if (source.progressive === false) return false
+  if (!source.progressive) return false
   if (!(durationSec > 0)) return false // can't reason without a duration — wait for the full file
   const pos = Number.isFinite(positionSec) && positionSec > 0 ? positionSec : 0
   return conservativeCoverageSec(progress, durationSec) - pos >= leadSec

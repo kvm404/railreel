@@ -253,47 +253,49 @@ describe('smoothedMbps', () => {
 describe('canJoinShow', () => {
   // 2h movie
   const DUR = 7200
+  // A progressive source that is open (faststart behind the proxy).
+  const SRC = { hasSource: true, progressive: true }
 
   it('lets a finished download in immediately, wherever the playhead is', () => {
-    expect(canJoinShow(1, DUR, 6000)).toBe(true)
+    expect(canJoinShow(1, DUR, 6000, SRC)).toBe(true)
   })
 
   it('lets a late joiner in once its buffer covers the playhead plus the lead', () => {
     // 50% downloaded = 3600s cached; playhead at 3000s → 600s ahead ≥ 30s
-    expect(canJoinShow(0.5, DUR, 3000)).toBe(true)
+    expect(canJoinShow(0.5, DUR, 3000, SRC)).toBe(true)
   })
 
   it('holds a late joiner back when its download edge is behind the playhead', () => {
     // 10% = 720s cached; playhead already at 700s → only 20s ahead < 30s lead
-    expect(canJoinShow(0.1, DUR, 700)).toBe(false)
+    expect(canJoinShow(0.1, DUR, 700, SRC)).toBe(false)
   })
 
   it('waits for the whole file when the duration is unknown', () => {
-    expect(canJoinShow(0.9, 0, 0)).toBe(false)
-    expect(canJoinShow(1, 0, 0)).toBe(true) // finished still trumps
+    expect(canJoinShow(0.9, 0, 0, SRC)).toBe(false)
+    expect(canJoinShow(1, 0, 0, SRC)).toBe(true) // finished still trumps
   })
 
   it('a non-faststart file (no progressive source) only enters once the file is complete', () => {
     // The finding's case: 2h movie, playhead at 5 min, 5% downloaded. CBR math says 60s ahead,
     // but there is no proxy for a moov-at-EOF file — the player would have nothing to open.
-    expect(canJoinShow(0.05, DUR, 300, undefined, { progressive: false })).toBe(false)
-    expect(canJoinShow(0.99, DUR, 300, undefined, { progressive: false })).toBe(false)
-    expect(canJoinShow(1, DUR, 300, undefined, { progressive: false })).toBe(true)
+    expect(canJoinShow(0.05, DUR, 300, { hasSource: true, progressive: false })).toBe(false)
+    expect(canJoinShow(0.99, DUR, 300, { hasSource: true, progressive: false })).toBe(false)
+    expect(canJoinShow(1, DUR, 300, { hasSource: true, progressive: false })).toBe(true)
   })
 
   it('never enters without a usable source, even with the whole file', () => {
-    expect(canJoinShow(0.5, DUR, 0, undefined, { hasSource: false })).toBe(false)
-    expect(canJoinShow(1, DUR, 300, undefined, { hasSource: false })).toBe(false)
-    expect(canJoinShow(1, DUR, 300, undefined, { hasSource: true, progressive: false })).toBe(true)
+    expect(canJoinShow(0.5, DUR, 0, { hasSource: false, progressive: true })).toBe(false)
+    expect(canJoinShow(1, DUR, 300, { hasSource: false, progressive: true })).toBe(false)
+    expect(canJoinShow(1, DUR, 300, { hasSource: true, progressive: false })).toBe(true)
   })
 
   it('judges the lead with VBR-safe coverage, not the CBR estimate', () => {
     // 5% of 2h is 360s under CBR, but a front-loaded VBR file can cover far less. Playhead at
     // 300s: CBR says 60s ahead (would pass the 30s lead); the conservative coverage says no.
     expect(downloadBufferedAheadSec(0.05, DUR, 300)).toBeCloseTo(60)
-    expect(canJoinShow(0.05, DUR, 300)).toBe(false)
+    expect(canJoinShow(0.05, DUR, 300, SRC)).toBe(false)
     // A comfortable margin still gets in.
-    expect(canJoinShow(0.1, DUR, 300)).toBe(true)
+    expect(canJoinShow(0.1, DUR, 300, SRC)).toBe(true)
   })
 })
 
