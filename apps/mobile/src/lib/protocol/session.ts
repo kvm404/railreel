@@ -108,6 +108,8 @@ export interface ParticipantInfo {
  *  - 1: v0.1.0.
  *  - 2: subtitles distributed by revision — the roster carries only {name, sizeBytes, rev}, and
  *    the body is pushed once / pulled via `subtitleRequest`. A v1 guest would never pull it;
- *    a v2 guest would read a v1 roster (no `rev`) as "no subtitle".
+ *    a v2 guest would read a v1 roster (no `rev`) as "no subtitle". Ships alongside the
+ *    connection-bound host control plane (identity bound by `join`, approved-only broadcasts,
+ *    targeted sends), whose messages are unchanged on the wire.
  */
 export const PROTOCOL_VERSION = 2

@@ -108,6 +108,9 @@ const MOVIE_META = getMovieMetaPath(CACHE_DIR) // "Keep & Leave" identity record
 const SUBTITLE_CACHE = getSubtitleCachePath(CACHE_DIR)
 /** Kept-copy reuse: how long to wait for the roster carrying the host's fingerprint. */
 const KEPT_HASH_WAIT_MS = 3000
+/** A new transfer attempt waits this long for the previous one to settle before giving up (it
+ *  then errors + retries; it never shares MOVIE_CACHE with a possibly-live writer). */
+const PREV_ATTEMPT_CEILING_MS = 30_000
 /** A guest's playback request with no decision by now is shown as dismissed (decision lost). */
 const PLAYBACK_REQUEST_DEADLINE_MS = 12_000
 /** Host: ignore a guest's repeat pull of the same subtitle revision within this window. */
@@ -539,24 +542,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [loadSubtitle, broadcastRoster],
   )
 
-  // Host: deliver the current subtitle body to one guest — its pull (`subtitleRequest`, sent when
-  // the roster names a revision it lacks: just approved, or reconnected after a replacement).
-  // The native plane only broadcasts today, so this fans out to everyone (clients dedupe by
-  // revision); once a targeted send exists, swap the broadcast for it — the call sites stay.
-  // Each guest may pull a given revision once per SUBTITLE_PULL_GAP_MS.
-  const sendSubtitleTo = useCallback((id: string) => {
-    if (roleRef.current !== 'host') return
-    const guest = participantsRef.current.find((p) => p.id === id)
-    if (!guest || guest.status === 'requested' || guest.status === 'left') return
-    const sub = subtitleRef.current
-    if (!sub) return // nothing attached — the roster (no subtitle) already tells it to clear
-    const now = Date.now()
-    const last = subtitlePullsRef.current.get(id)
-    if (last && last.rev === sub.rev && now - last.at < SUBTITLE_PULL_GAP_MS) return
-    subtitlePullsRef.current.set(id, { rev: sub.rev, at: now })
-    RailReelHost.broadcast(JSON.stringify({ t: 'subtitle', name: sub.name, content: sub.content, rev: sub.rev })).catch(() => {})
-  }, [])
-  sendSubtitleToRef.current = sendSubtitleTo
 
   const removeSubtitle = useCallback(() => {
     clearSubtitle()
@@ -592,6 +577,28 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     },
     [rosterJson],
   )
+
+  // Host: deliver the current subtitle body to ONE guest, on the connection its identity is bound
+  // to — its pull (`subtitleRequest`, sent when the roster names a revision it lacks: just
+  // approved, or reconnected after a replacement). Only an approved, live guest gets it; each may
+  // pull a given revision once per SUBTITLE_PULL_GAP_MS.
+  const sendSubtitleTo = useCallback(
+    (id: string) => {
+      if (roleRef.current !== 'host' || id === 'host') return
+      const ids = hostIds()
+      const conn = ids.connOf.get(id)
+      if (!conn || !isApproved(ids, id)) return
+      const sub = subtitleRef.current
+      if (!sub) return // nothing attached — the roster (no subtitle) already tells it to clear
+      const now = Date.now()
+      const last = subtitlePullsRef.current.get(id)
+      if (last && last.rev === sub.rev && now - last.at < SUBTITLE_PULL_GAP_MS) return
+      subtitlePullsRef.current.set(id, { rev: sub.rev, at: now })
+      RailReelHost.sendTo(conn, JSON.stringify({ t: 'subtitle', name: sub.name, content: sub.content, rev: sub.rev })).catch(() => {})
+    },
+    [hostIds],
+  )
+  sendSubtitleToRef.current = sendSubtitleTo
 
   // ── WS event wiring (host side; registered once) ────────────────────────────
   useEffect(() => {
@@ -775,7 +782,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         RailReelHost.broadcast(JSON.stringify({ t: 'reaction', from: name, fromId: msg.id, emoji: msg.emoji, at: Date.now() })).catch(() => {})
         ingestReaction(name, msg.emoji)
       } else if (msg.t === 'subtitleRequest') {
-        if (ownsId(msg.id, msg.grant)) sendSubtitleToRef.current(msg.id)
+        // Approved, connection-bound senders only; the body goes back to that connection alone.
+        if (!admit(conn, msg.id, msg.grant, true)) return
+        sendSubtitleToRef.current(msg.id)
       }
     })
     // The session token is discoverable (mDNS TXT), so a socket must identify itself promptly — a
@@ -1547,10 +1556,29 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         try {
           // Exclusive ownership of MOVIE_CACHE: the previous attempt (and the startup sweep, which
           // seeds this chain) must have FULLY settled — cancelAsync only requests cancellation, and
-          // the native downloadAsync promise settles only once its writer has stopped. No timeout:
-          // starting early would let the old writer append behind our resume offset.
-          if (prev) await prev.catch(() => {})
-          if (stale()) return
+          // the native downloadAsync promise settles only once its writer has stopped. Starting
+          // early would let the old writer append behind our resume offset, so a wedged old
+          // attempt never gets "timed out" into sharing the file: past the ceiling we give up
+          // THIS attempt (error + the normal retry path) without touching the file, and the
+          // chain below keeps the old attempt in front of every later one.
+          if (prev) {
+            const settled = await Promise.race([
+              prev.then(
+                () => true,
+                () => true,
+              ),
+              sleep(PREV_ATTEMPT_CEILING_MS).then(() => false),
+            ])
+            if (stale()) return
+            if (!settled) {
+              setError('The previous transfer is still shutting down — trying again shortly.')
+              setClientPhase('approved')
+              clientPhaseRef.current = 'approved'
+              downloadingRef.current = false
+              scheduleTransferRetry()
+              return
+            }
+          }
 
           if (!opts.resume) {
             const reused = await reuseKeptCopy(stale)
@@ -1754,7 +1782,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }
 
       const task = run()
-      transferTaskRef.current = task
+      // The next attempt waits on this one AND everything before it: if this attempt gave up
+      // waiting on a wedged predecessor, that predecessor still guards the file.
+      transferTaskRef.current = prev ? Promise.allSettled([prev, task]).then(() => {}) : task
       return task
     },
     [sendBeat, getCacheInfo, clearRetryTimer, detachProgressive, reuseKeptCopy, scheduleTransferRetry, abortStalledTransfer],
