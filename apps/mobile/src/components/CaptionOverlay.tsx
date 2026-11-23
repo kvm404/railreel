@@ -2,6 +2,7 @@ import { memo, useEffect, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import Animated, { useAnimatedStyle, type SharedValue } from 'react-native-reanimated'
 import { findActiveCues, type SubtitleCue } from '@/lib/subtitles'
+import { sameActiveCues } from '@/lib/player/captions'
 import type { PlayheadStore } from '@/lib/player/playhead'
 import { withAlpha } from '@/ui/alpha'
 import { fonts, palette, radii } from '@/theme/tokens'
@@ -23,9 +24,10 @@ export interface CaptionOverlayProps {
   lift?: SharedValue<number>
 }
 
-const cueKey = (cues: SubtitleCue[]): string => cues.map((c) => c.id).join('|')
-
-/** Active cues at the playhead, as React state that changes only when the cue SET changes. */
+/**
+ * Active cues at the playhead, as React state that changes only when the cue SET changes. A new
+ * cue array (a replaced subtitle file) always resets it: its cues are fresh objects.
+ */
 function useActiveCues(cues: SubtitleCue[], playhead: PlayheadStore | undefined, fallbackMs: number): SubtitleCue[] {
   const [active, setActive] = useState<SubtitleCue[]>(() =>
     findActiveCues(cues, playhead ? playhead.get() * 1000 : fallbackMs),
@@ -33,7 +35,7 @@ function useActiveCues(cues: SubtitleCue[], playhead: PlayheadStore | undefined,
   useEffect(() => {
     const read = (sec: number) => {
       const next = findActiveCues(cues, sec * 1000)
-      setActive((prev) => (cueKey(prev) === cueKey(next) ? prev : next))
+      setActive((prev) => (sameActiveCues(prev, next) ? prev : next))
     }
     if (!playhead) {
       read(fallbackMs / 1000)
