@@ -8,7 +8,6 @@ import expo.modules.kotlin.exception.CodedException
 import fi.iki.elonen.NanoHTTPD
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
@@ -284,16 +283,6 @@ class RailReelHostModule : Module() {
         proxy?.let { runCatching { it.stop() } }
         proxy = null
       }
-    }
-
-    // DEV (M1): generate an N-MB test file in cache so we can measure throughput
-    // without a media picker. Replaced by real content:// sources in later milestones.
-    AsyncFunction("createTestFile") { sizeMb: Int ->
-      val dir = appContext.reactContext?.cacheDir ?: throw CodedException("No cache dir")
-      val f = File(dir, "railreel-test.bin")
-      val buf = ByteArray(1024 * 1024)
-      FileOutputStream(f).use { out -> repeat(sizeMb) { out.write(buf) } }
-      "file://${f.absolutePath}"
     }
 
     OnDestroy {
