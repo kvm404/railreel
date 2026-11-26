@@ -1001,14 +1001,19 @@ export function PlayerScreen() {
     <View style={styles.fill}>
       {/* Everything under the chat sheet / error card; hidden from TalkBack while either modal layer is up. */}
       <View style={StyleSheet.absoluteFill} importantForAccessibility={chatOpen || failed ? 'no-hide-descendants' : 'auto'}>
+        {/* The film never sees a touch. expo-video's Android view swallows touches and only re-sends
+            them to JS through a workaround, so a Pressable WRAPPING it could miss taps: the chrome
+            would auto-hide and never come back. The tap target is a transparent sibling ABOVE the
+            film (and below every overlay), so a tap reaches JS directly. */}
+        <View style={StyleSheet.absoluteFill} pointerEvents="none" importantForAccessibility="no-hide-descendants">
+          <VideoView style={StyleSheet.absoluteFill} player={player} contentFit="contain" nativeControls={false} />
+        </View>
         <Pressable
           style={StyleSheet.absoluteFill}
           onPress={onFilmPress}
           accessibilityRole="button"
           accessibilityLabel={chromeOpen ? 'Hide controls' : 'Show controls'}
-        >
-          <VideoView style={StyleSheet.absoluteFill} player={player} contentFit="contain" nativeControls={false} />
-        </Pressable>
+        />
 
         <PlayerStatusOverlay
           state={buffering && !ended ? 'loading' : 'ok'}
