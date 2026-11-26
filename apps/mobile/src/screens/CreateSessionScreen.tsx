@@ -92,8 +92,11 @@ export function CreateSessionScreen() {
     // way out of this function (attached, rejected, failed) — never the user's original.
     let tempUri: string | null = null
     try {
+      // The picker copies the file into cache on the UI thread BEFORE we can check it, so the filter
+      // must keep movies out: a mis-tapped multi-GB video would freeze the app and fill the disk.
+      // Providers label .srt as one of these (MimeTypeMap says application/x-subrip).
       const res = await DocumentPicker.getDocumentAsync({
-        type: ['*/*'],
+        type: ['application/x-subrip', 'text/*', 'application/octet-stream'],
         copyToCacheDirectory: true,
       })
       if (res.canceled || !res.assets[0]) return
