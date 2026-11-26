@@ -36,11 +36,14 @@ const makeEntry = (name: RouteName, params?: NavParams): Entry => ({
  * Back runs the same exit logic as the on-screen back button; an outgoing screen is untouchable,
  * hidden from TalkBack and never receives Back.
  *
- * A transition always SETTLES: the settled top screen drops its animated style for a static, fully
- * visible one, and a fallback (a timer just past the animation, plus the app coming back to the
- * foreground) finishes a transition whose animation never reported completion. Without that, a
- * system activity opening mid-fade (the movie picker) could leave a screen mounted at opacity ~0 —
- * a blank window with only the atmosphere showing — with Back swallowed as "mid-transition".
+ * A transition always SETTLES: a fallback (a timer just past the animation, plus the app coming back
+ * to the foreground) drives the transition value to its end on the UI thread and releases the lock
+ * when the animation never reported completion. Without that, a system activity opening mid-fade
+ * (the movie picker) could leave a screen mounted at opacity ~0 — a blank window with only the
+ * atmosphere showing — with Back swallowed as "mid-transition". The screen keeps its animated style
+ * throughout (Reanimated's values win over static ones, so the value itself is what must land), and
+ * every navigation has a generation: a completion from an earlier transition that lands after a
+ * newer one began (a session-ending reset() right as a fade finishes) never settles the newer one.
  *
  * v1 note: only the top route stays mounted once a transition settles — going back remounts the
  * previous screen (Home replays its intro; no form/discovery state is retained).
@@ -56,8 +59,8 @@ export function Navigator({ routes, initial }: { routes: Routes; initial: RouteN
   const anim = useSharedValue(1)
   const dirSv = useSharedValue<1 | -1>(1) // 1 = forward (push), -1 = back (pop)
   const transitioning = useRef(false)
-  // False from a navigation until its transition settles; the settled top screen renders static.
-  const [settled, setSettled] = useState(true)
+  // Bumped by every navigation; a transition's completion only counts for its own generation.
+  const generation = useRef(0)
   const [backRegistry] = useState(createBackRegistry)
 
   const top = stack[stack.length - 1]!
@@ -67,7 +70,7 @@ export function Navigator({ routes, initial }: { routes: Routes; initial: RouteN
     (next: Entry[], d: 1 | -1, kind: TransitionKind = 'step') => {
       const prevTop = stackRef.current[stackRef.current.length - 1]
       transitioning.current = true
-      setSettled(false)
+      generation.current++
       dirSv.value = d
       if (!reduced) anim.value = 0 // reset BEFORE the new screen paints (no flash)
       stackRef.current = next
@@ -78,18 +81,25 @@ export function Navigator({ routes, initial }: { routes: Routes; initial: RouteN
     },
     [reduced, anim, dirSv],
   )
-  const endTransition = useCallback(() => {
+  const settle = useCallback(() => {
     transitioning.current = false
     setLeaving(null)
-    setSettled(true)
   }, [])
-  // Finish the current transition now, wherever its animation is (idempotent).
+  // The animation's own completion: ignored when a newer navigation has begun since it started.
+  const endTransition = useCallback(
+    (gen: number) => {
+      if (gen === generation.current) settle()
+    },
+    [settle],
+  )
+  // Finish the CURRENT transition now, wherever its animation is (idempotent): land the value
+  // first, then release the lock.
   const forceSettle = useCallback(() => {
     if (!transitioning.current) return
     cancelAnimation(anim)
     anim.value = 1
-    endTransition()
-  }, [anim, endTransition])
+    settle()
+  }, [anim, settle])
 
   // One navigation at a time — blocks double-tap double-push and rapid multi-pop.
   const navigate = useCallback(
@@ -142,22 +152,23 @@ export function Navigator({ routes, initial }: { routes: Routes; initial: RouteN
   useEffect(() => {
     if (reduced) {
       anim.value = 1
-      endTransition()
+      settle()
       return
     }
+    const gen = generation.current
     anim.value = 0
     anim.value = withTiming(
       1,
       { duration: motion.slow, easing: Easing.bezier(...motion.expoOut) },
       (finished) => {
-        if (finished) runOnJS(endTransition)()
+        if (finished) runOnJS(endTransition)(gen)
       },
     )
     // Fallback: an animation that never reports completion (paused under a system activity, or
     // cancelled) must not strand the screen half-faded.
     const fallback = setTimeout(forceSettle, motion.slow + SETTLE_GRACE_MS)
     return () => clearTimeout(fallback)
-  }, [top.key, reduced, anim, endTransition, forceSettle])
+  }, [top.key, reduced, anim, settle, endTransition, forceSettle])
 
   // Returning from another activity (the document picker, the share sheet) settles any transition
   // that was cut off when the app left the foreground.
@@ -197,7 +208,7 @@ export function Navigator({ routes, initial }: { routes: Routes; initial: RouteN
             return (
               <Animated.View
                 key={entry.key}
-                style={[StyleSheet.absoluteFill, isTop ? (settled ? styles.settled : enterStyle) : leaveStyle]}
+                style={[StyleSheet.absoluteFill, isTop ? enterStyle : leaveStyle]}
                 pointerEvents={isTop ? 'auto' : 'none'}
                 importantForAccessibility={isTop ? 'auto' : 'no-hide-descendants'}
               >
@@ -219,6 +230,4 @@ const SETTLE_GRACE_MS = 250
 const styles = StyleSheet.create({
   // The window's own base colour, for the moments it is unmounted (behind the Player).
   root: { flex: 1, backgroundColor: palette.base },
-  // A settled top screen: explicit, static values, so no animated prop can linger at a mid-fade.
-  settled: { opacity: 1, transform: [{ translateX: 0 }] },
 })
