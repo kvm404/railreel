@@ -17,6 +17,12 @@ export type MediaProbeResult = {
   audioMime: string
   /** All tracks the extractor found (video + audio + text/other). */
   trackCount: number
+  /**
+   * The mimes reflect every track in the file. Only false for an MKV whose own track list couldn't
+   * be read: the platform extractor hides codecs it can't decode (AC-3, DTS…), so "no audio" there
+   * is unproven.
+   */
+  tracksVerified: boolean
   audioTrackCount: number
   /** Container hint sniffed from the first bytes: "mp4" | "quicktime" | "matroska" | "unknown". */
   container: string

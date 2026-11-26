@@ -60,7 +60,9 @@ Unit tests can't cover hotspots, decoders or the Android lifecycle. For anything
 networking, sync, playback or the host module, test on **two physical phones** (one host, one guest):
 
 1. Install the same build on both. Host: enable the hotspot. Guest: join its Wi-Fi.
-2. Host picks an H.264 + AAC MP4 (a silent H.264 file is also accepted) (also try an HEVC or MKV file: it must be rejected with a hint).
+2. Host picks an H.264 + AAC MP4 (a silent H.264 file is also accepted). Also try an HEVC MP4 (e.g. a
+   Galaxy camera clip with "High efficiency video" on) and an H.264/AAC MKV: both must host, and the
+   MKV must wait for the full download. An AC-3 MKV or a VP9 WebM must be rejected with a hint.
 3. Guest joins by mDNS tap, QR scan and the invite link. Confirm the host sees a **request** and the
    guest gets nothing until the host **approves** (deny once to check the dead-end screen).
 4. Lobby: download progress shows and reaches ready. Try a fast-start and a non-fast-start file.

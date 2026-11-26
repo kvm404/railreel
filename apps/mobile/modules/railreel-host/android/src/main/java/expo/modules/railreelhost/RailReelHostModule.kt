@@ -198,11 +198,18 @@ class RailReelHostModule : Module() {
         // fall back to reading the sample-entry fourccs straight out of the moov box.
         val extractorTracks = try { readTracks(ctx, fileUri) } catch (e: Exception) { null }
         var tracks = extractorTracks ?: TrackSummary("", "", 0, 0, 0, 0, 0L)
-        if ((container == "mp4" || container == "quicktime") &&
-          (tracks.videoMime.isEmpty() || tracks.audioMime.isEmpty())
-        ) {
-          val iso = readIsoTracks(ctx, fileUri)
-          if (iso != null) tracks = mergeTracks(tracks, iso)
+        val iso = container == "mp4" || container == "quicktime"
+        if (iso && (tracks.videoMime.isEmpty() || tracks.audioMime.isEmpty())) {
+          val isoTracks = readIsoTracks(ctx, fileUri)
+          if (isoTracks != null) tracks = mergeTracks(tracks, isoTracks)
+        }
+        // Matroska: the platform extractor drops tracks it can't decode (AC-3, DTS, TrueHD…), so
+        // an MKV with Dolby sound would look silent. The file's own track list is the truth for
+        // audio; when it can't be found the JS verdict refuses to call the file silent.
+        var tracksVerified = true
+        if (container == "matroska") {
+          val mkv = readMatroskaTracks(ctx, fileUri)
+          if (mkv != null) tracks = mergeMatroska(tracks, mkv) else tracksVerified = false
         }
         // Nothing could be read by either route (and it isn't a Matroska file we can name) → the
         // JS side reports "unreadable".
@@ -216,7 +223,9 @@ class RailReelHostModule : Module() {
         val durationMs = if (retrieverDurationMs > 0) retrieverDurationMs else tracks.durationMs
         val width = if (retrieverWidth > 0) retrieverWidth else tracks.width
         val height = if (retrieverHeight > 0) retrieverHeight else tracks.height
-        val fastStart = runCatching {
+        // Only an ISO file has the moov/mdat boxes this scan reads; any other container's bytes would be
+        // misread as box sizes (an MKV's EBML magic reads as a ~420 MB box to skip).
+        val fastStart = if (!iso) false else runCatching {
           openMediaStream(ctx.contentResolver, fileUri).use { isFastStart(it) }
         }.getOrNull()
         // Undeterminable layout (odd container, read error) → treat as NOT faststart: the cost of
@@ -229,6 +238,7 @@ class RailReelHostModule : Module() {
           "videoMime" to tracks.videoMime,
           "audioMime" to tracks.audioMime,
           "trackCount" to tracks.trackCount,
+          "tracksVerified" to tracksVerified,
           "audioTrackCount" to tracks.audioTrackCount,
           "container" to container,
         )
@@ -488,7 +498,8 @@ class RailReelHostModule : Module() {
         "mdat" -> return false
       }
       val skip = size - headerLen
-      if (size < headerLen || !skipFully(s, skip)) return null
+      // Stay inside the scan budget BEFORE skipping: on a non-seekable stream a skip is a read.
+      if (size < headerLen || size > FASTSTART_SCAN_CAP - walked || !skipFully(s, skip)) return null
       walked += size
     }
     return null
@@ -794,6 +805,36 @@ class RailReelHostModule : Module() {
   }
 
   /** Prefer the extractor's findings; fill only what it missed from the moov fallback. */
+  /** Read a bounded head of the file and find its Matroska track list (null: not found / unreadable). */
+  private fun readMatroskaTracks(ctx: android.content.Context, fileUri: String): MatroskaTracks.Result? =
+    runCatching {
+      openMediaStream(ctx.contentResolver, fileUri).use { s ->
+        val buf = ByteArray(MatroskaTracks.PREFIX_BYTES)
+        var got = 0
+        while (got < buf.size) {
+          val n = s.read(buf, got, buf.size - got)
+          if (n <= 0) break
+          got += n
+        }
+        MatroskaTracks.parse(buf, got)
+      }
+    }.getOrNull()
+
+  /**
+   * The extractor's view of an MKV corrected by its own track list: audio comes from the track list
+   * (the extractor hides codecs it can't decode); video keeps the extractor's more specific mime
+   * when it has one (it tells Dolby Vision from plain HEVC), else the track list's.
+   */
+  private fun mergeMatroska(a: TrackSummary, mkv: MatroskaTracks.Result): TrackSummary = TrackSummary(
+    if (a.videoMime.isNotEmpty()) a.videoMime else MatroskaTracks.videoMime(mkv.videoCodecId),
+    if (mkv.audioTrackCount > 0) MatroskaTracks.audioMime(mkv.audioCodecId) else a.audioMime,
+    maxOf(a.trackCount, mkv.trackCount),
+    maxOf(a.audioTrackCount, mkv.audioTrackCount),
+    a.width,
+    a.height,
+    a.durationMs,
+  )
+
   private fun mergeTracks(a: TrackSummary, b: TrackSummary): TrackSummary = TrackSummary(
     if (a.videoMime.isNotEmpty()) a.videoMime else b.videoMime,
     if (a.audioMime.isNotEmpty()) a.audioMime else b.audioMime,

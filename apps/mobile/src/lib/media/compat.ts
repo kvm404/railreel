@@ -1,14 +1,20 @@
 /**
- * Media compatibility verdict (pure). PRD §7 / architecture §7: v1 shares ONLY already-compatible
- * H.264 (AVC) video + AAC audio in an MP4 — every guest phone downloads its own copy, so a file
- * the host can play but a guest can't is a multi-GB download that ends in a player error. The
- * native probe reports the REAL container + track mimes; this turns them into either "go" or the
- * exact sentence the host sees. Copy lives here so it is tested and the screens stay dumb.
+ * Media compatibility verdict (pure). PRD §7 / architecture §7: RailReel shares only video every
+ * guest phone can decode — H.264 (AVC) or HEVC (H.265) video, with AAC audio or none, in an MP4,
+ * MOV or MKV container. Every guest downloads its own copy, so a file the host can play but a
+ * guest can't is a multi-GB download that ends in a player error. The native probe reports the
+ * REAL container + track mimes; this turns them into either "go" or the exact sentence the host
+ * sees. Copy lives here so it is tested and the screens stay dumb.
+ *
+ * Why these: Android ships an H.264 and an HEVC decoder on every phone RailReel targets, and AAC
+ * is the one compressed audio format every phone plays. MKV only changes the wrapper (Media3
+ * reads it), but it can't play while downloading — guests pre-cache it (no `fastStart`). How well
+ * a given phone handles a big HEVC frame is a per-guest question: each guest checks its own
+ * decoder (lib/media/preflight decodeWarning) and the host's lobby flags anyone who can't.
  */
 
-/** The slice of the native probe result the verdict reads. */
 export interface MediaProbeFacts {
-  /** "mp4" | "quicktime" | "matroska" | "unknown" — sniffed from the first bytes. */
+  /** "mp4" | "quicktime" | "matroska" | "unknown" — sniffed from the first bytes (WebM is matroska). */
   container: string
   /** Mime of the first video track ("" = none), e.g. "video/avc". */
   videoMime: string
@@ -16,14 +22,24 @@ export interface MediaProbeFacts {
   audioMime: string
   /** Every track the extractor found. */
   trackCount: number
+  /**
+   * false: the mimes may be missing tracks — an MKV whose own track list the native probe couldn't
+   * read, where the platform extractor silently drops codecs it can't decode (AC-3, DTS, TrueHD).
+   * Absent (an older native build) counts as unverified for an MKV.
+   */
+  tracksVerified?: boolean
 }
 
-export type MediaRejection = 'not-mp4' | 'video-codec' | 'audio-codec' | 'no-video' | 'unreadable'
+export type MediaRejection = 'container' | 'video-codec' | 'audio-codec' | 'no-video' | 'unreadable'
 
 export type MediaVerdict = { ok: true } | { ok: false; reason: MediaRejection; message: string }
 
-export const ACCEPTED_VIDEO_MIME = 'video/avc'
+export const ACCEPTED_VIDEO_MIMES: readonly string[] = ['video/avc', 'video/hevc']
 export const ACCEPTED_AUDIO_MIME = 'audio/mp4a-latm'
+export const ACCEPTED_CONTAINERS: readonly string[] = ['mp4', 'quicktime', 'matroska']
+
+/** What the host is told RailReel can share — one phrase, reused by every rejection. */
+const SUPPORTED = 'RailReel shares H.264 or HEVC video with AAC sound (MP4, MOV or MKV) so every phone can play it'
 
 const VIDEO_NAMES: Record<string, string> = {
   'video/hevc': 'HEVC (H.265)',
@@ -93,35 +109,41 @@ export function mediaVerdict(probe: MediaProbeFacts | null | undefined): MediaVe
   const audioMime = norm(probe.audioMime)
   const trackCount = Number.isFinite(probe.trackCount) ? probe.trackCount : 0
 
-  if (container === 'matroska') {
-    return {
-      ok: false,
-      reason: 'not-mp4',
-      message: `This is an MKV/WebM file. RailReel shares H.264 MP4s so every phone can play them — convert it first (${CONVERT_HINT}).`,
-    }
-  }
-  if (container !== 'mp4' && container !== 'quicktime') {
+  if (!ACCEPTED_CONTAINERS.includes(container)) {
     // Nothing parsed and nothing recognisable: damaged/empty rather than "wrong format".
     if (trackCount <= 0) return UNREADABLE
     return {
       ok: false,
-      reason: 'not-mp4',
-      message: `This file isn't an MP4. RailReel shares H.264 MP4s so every phone can play them — convert it first (${CONVERT_HINT}).`,
+      reason: 'container',
+      message: `This file isn't an MP4, MOV or MKV. ${SUPPORTED} — convert it first (${CONVERT_HINT}).`,
     }
   }
 
+  // The native probe names a Matroska file by its magic even when the platform extractor then
+  // fails on it (it has no moov fallback like ISO files do): nothing read is unreadable, not
+  // "audio only".
+  if (container === 'matroska' && trackCount <= 0) return UNREADABLE
   if (!videoMime.startsWith('video/')) {
     return {
       ok: false,
       reason: 'no-video',
-      message: "There's no video in this file — it looks like audio only. Pick a movie MP4 instead.",
+      message: "There's no video in this file — it looks like audio only. Pick a movie instead.",
     }
   }
-  if (videoMime !== ACCEPTED_VIDEO_MIME) {
+  if (!ACCEPTED_VIDEO_MIMES.includes(videoMime)) {
     return {
       ok: false,
       reason: 'video-codec',
-      message: `This file uses ${videoCodecName(videoMime)}. RailReel shares H.264 MP4s so every phone can play them — convert it first (${CONVERT_HINT}).`,
+      message: `This file uses ${videoCodecName(videoMime)}. ${SUPPORTED} — convert it first (${CONVERT_HINT}).`,
+    }
+  }
+  // "No audio" in an MKV is only believed when its own track list said so: otherwise a Dolby/DTS
+  // track the extractor dropped would pass as a silent film.
+  if (container === 'matroska' && audioMime === '' && probe.tracksVerified !== true) {
+    return {
+      ok: false,
+      reason: 'audio-codec',
+      message: `RailReel couldn't read this MKV's sound track — it may be Dolby or DTS, which not every phone can play. ${SUPPORTED} — convert it first (${CONVERT_HINT}, with AAC audio).`,
     }
   }
   // No audio track at all is fine (see above); an audio track in the wrong codec is not.
@@ -129,7 +151,7 @@ export function mediaVerdict(probe: MediaProbeFacts | null | undefined): MediaVe
     return {
       ok: false,
       reason: 'audio-codec',
-      message: `This file's sound is ${audioCodecName(audioMime)}. RailReel shares AAC audio so every phone can play it — convert it first (${CONVERT_HINT}, with AAC audio).`,
+      message: `This file's sound is ${audioCodecName(audioMime)}. ${SUPPORTED} — convert it first (${CONVERT_HINT}, with AAC audio).`,
     }
   }
   return { ok: true }

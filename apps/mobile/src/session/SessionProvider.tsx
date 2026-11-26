@@ -1296,7 +1296,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // whether a partial copy is even playable. A file without a readable duration still hosts:
       // the gate then degrades to "start after full pre-cache".
       const durationSec = Number.isFinite(probed.durationSec) && probed.durationSec > 0 ? probed.durationSec : 0
-      const fastStart = probed.fastStart === true
+      // Progressive start reads an MP4's moov-first layout; any other container is pre-cached in full
+      // whatever the native layout scan guessed from bytes it doesn't understand.
+      const fastStart = probed.fastStart === true && probed.container !== 'matroska'
       const sizeBytes = asset.size ?? 0
       const title = cleanTitle(asset.name)
       mediaRef.current = {
@@ -2185,13 +2187,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
               }
               // Rosters arrive on every download percent: keep the same object when nothing changed.
               setMovie((prev) => (sameMovie(prev, summary) ? prev : summary))
-              // Decode preflight: can THIS phone's hardware handle the movie's frame size?
-              // (PRD accepts H.264 only, so video/avc.) Warn here, and flag the host via beats.
+              // Decode preflight: can THIS phone's decoder handle the movie's codec at its frame size?
+              // (H.264 or HEVC; an older host sends no mime → H.264.) Warn here, flag the host via beats.
               const w = m.media.width ?? 0
               const h = m.media.height ?? 0
-              const ok = w > 0 && h > 0 ? RailReelHost.canDecode(m.media.videoMime || 'video/avc', w, h) : true
+              const videoMime = m.media.videoMime || 'video/avc'
+              const ok = w > 0 && h > 0 ? RailReelHost.canDecode(videoMime, w, h) : true
               decodeOkRef.current = ok
-              setDecodeCaution(decodeWarning(ok, h))
+              setDecodeCaution(decodeWarning(ok, h, videoMime))
             }
             // Subtitles: the roster names the current revision; the body is pulled when ours
             // differs (identity is the content revision, so a same-name replacement reloads).
