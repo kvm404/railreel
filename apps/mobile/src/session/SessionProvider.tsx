@@ -1299,7 +1299,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // Progressive start reads an MP4's moov-first layout; any other container is pre-cached in full
       // whatever the native layout scan guessed from bytes it doesn't understand.
       const fastStart = probed.fastStart === true && probed.container !== 'matroska'
-      const sizeBytes = asset.size ?? 0
+      // The size the server actually serves (some providers report no size to the picker).
+      const sizeBytes = ports.sizeBytes > 0 ? ports.sizeBytes : (asset.size ?? 0)
       const title = cleanTitle(asset.name)
       mediaRef.current = {
         title,

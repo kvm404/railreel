@@ -1,7 +1,8 @@
 import { NativeModule, requireNativeModule } from 'expo'
 import { Platform } from 'react-native'
 
-export type HostPorts = { httpPort: number; wsPort: number }
+/** `sizeBytes`: the movie's length as the file server resolved it (the picker's size can be missing). */
+export type HostPorts = { httpPort: number; wsPort: number; sizeBytes: number }
 
 /** What `probe` reports about the picked file (see the native module for how each is derived). */
 export type MediaProbeResult = {
