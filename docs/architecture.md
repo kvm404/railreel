@@ -212,8 +212,11 @@ type ClientMsg =
   container**. It inspects the first video and first audio track, and rejects everything else
   *before the servers start*, with the exact sentence the host sees (what was found, plus a
   HandBrake "Fast 1080p30" hint). WebM shares Matroska's magic, so it is judged by its codecs
-  (VP9/AV1 video is rejected). An MKV is never progressive: the fast-start scan reads MP4 boxes, so
-  guests pre-cache it in full. Remux and transcoding are out of scope: they break on real files
+  (VP9/AV1 video is rejected). Android's MKV extractor silently drops tracks it can't decode
+  (AC-3, E-AC-3, DTS, TrueHD), so the native probe reads the file's own Matroska track list
+  (`MatroskaTracks.kt`) for the real audio codec; an MKV whose track list can't be found is never
+  taken for a silent film. An MKV is never progressive: the fast-start scan reads MP4 boxes (and
+  only runs on MP4/MOV), so guests pre-cache it in full. Remux and transcoding are out of scope: they break on real files
   (AC-3/DTS audio, multi-audio, Annex B, VFR, edit lists, 2× temporary storage). Guests
   additionally check *their* decoder against the real codec and frame size and warn when it can't
   keep up (HEVC is decodable on current phones, but a big HEVC frame can outrun an older one).

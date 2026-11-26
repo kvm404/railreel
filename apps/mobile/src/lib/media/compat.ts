@@ -22,6 +22,12 @@ export interface MediaProbeFacts {
   audioMime: string
   /** Every track the extractor found. */
   trackCount: number
+  /**
+   * false: the mimes may be missing tracks — an MKV whose own track list the native probe couldn't
+   * read, where the platform extractor silently drops codecs it can't decode (AC-3, DTS, TrueHD).
+   * Absent (an older native build) counts as unverified for an MKV.
+   */
+  tracksVerified?: boolean
 }
 
 export type MediaRejection = 'container' | 'video-codec' | 'audio-codec' | 'no-video' | 'unreadable'
@@ -129,6 +135,15 @@ export function mediaVerdict(probe: MediaProbeFacts | null | undefined): MediaVe
       ok: false,
       reason: 'video-codec',
       message: `This file uses ${videoCodecName(videoMime)}. ${SUPPORTED} — convert it first (${CONVERT_HINT}).`,
+    }
+  }
+  // "No audio" in an MKV is only believed when its own track list said so: otherwise a Dolby/DTS
+  // track the extractor dropped would pass as a silent film.
+  if (container === 'matroska' && audioMime === '' && probe.tracksVerified !== true) {
+    return {
+      ok: false,
+      reason: 'audio-codec',
+      message: `RailReel couldn't read this MKV's sound track — it may be Dolby or DTS, which not every phone can play. ${SUPPORTED} — convert it first (${CONVERT_HINT}, with AAC audio).`,
     }
   }
   // No audio track at all is fine (see above); an audio track in the wrong codec is not.

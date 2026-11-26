@@ -36,8 +36,26 @@ describe('mediaVerdict — accepted', () => {
     expect(mediaVerdict(probe({ container: 'matroska', videoMime: 'video/hevc' }))).toEqual({ ok: true })
   })
 
-  it('accepts a silent MKV', () => {
-    expect(mediaVerdict(probe({ container: 'matroska', audioMime: '', trackCount: 1 }))).toEqual({ ok: true })
+  it('accepts a silent MKV when its own track list confirmed there is no audio', () => {
+    expect(mediaVerdict(probe({ container: 'matroska', audioMime: '', trackCount: 1, tracksVerified: true }))).toEqual({ ok: true })
+  })
+
+  it('refuses to call an MKV silent when its track list could not be read (the extractor hides Dolby/DTS)', () => {
+    for (const tracksVerified of [false, undefined]) {
+      const v = mediaVerdict(probe({ container: 'matroska', audioMime: '', trackCount: 1, tracksVerified }))
+      expect(v).toMatchObject({ ok: false, reason: 'audio-codec' })
+      if (!v.ok) expect(v.message).toMatch(/couldn't read this MKV's sound track/)
+    }
+  })
+
+  it('takes an MKV the track list read as AC-3 / DTS for what it is (rejected by name)', () => {
+    expect(mediaVerdict(probe({ container: 'matroska', audioMime: 'audio/ac3', tracksVerified: true }))).toMatchObject({ reason: 'audio-codec' })
+    const v = mediaVerdict(probe({ container: 'matroska', audioMime: 'audio/vnd.dts', tracksVerified: true }))
+    if (!v.ok) expect(v.message).toContain('sound is DTS.')
+  })
+
+  it('an unverified MKV that does report AAC is still fine (the extractor only hides, never invents)', () => {
+    expect(mediaVerdict(probe({ container: 'matroska', tracksVerified: false }))).toEqual({ ok: true })
   })
 
   it('is case- and whitespace-insensitive about mimes and the container hint', () => {
@@ -84,7 +102,7 @@ describe('mediaVerdict — container', () => {
   })
 
   it('judges a WebM (a Matroska file) by its codecs: VP9 video is rejected as a codec, not a container', () => {
-    const v = mediaVerdict(probe({ container: 'matroska', videoMime: 'video/x-vnd.on2.vp9', audioMime: 'audio/opus' }))
+    const v = mediaVerdict(probe({ container: 'matroska', videoMime: 'video/x-vnd.on2.vp9', audioMime: 'audio/opus', tracksVerified: true }))
     expect(v).toMatchObject({ ok: false, reason: 'video-codec' })
     if (!v.ok) expect(v.message).toContain('uses VP9.')
   })
