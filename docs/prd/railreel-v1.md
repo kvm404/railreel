@@ -96,11 +96,13 @@ See [`docs/architecture.md`](../architecture.md) for the full networking, sync, 
   after reconnect; "Keep & Leave" keeps the movie and reuses it later via a content fingerprint.
 - **Protocol version gate**: phones on different versions refuse to join with a clear message.
 - **Floating emoji reactions** over the video + group chat.
-- Media: **H.264 (AVC) video in MP4/MOV, with AAC audio or none**, validated against the real container and track
-  codecs **before** any server starts. Container remux and any transcoding are **deferred** (too
-  many edge cases for v1: MKV+AC3/DTS, multi-track, Annex B, VFR, edit lists, storage). Others
-  are rejected with a clear message and a conversion hint. A fast-start layout enables
-  progressive start; otherwise guests pre-cache fully.
+- Media: **H.264 (AVC) or HEVC (H.265) video in MP4/MOV/MKV, with AAC audio or none**, validated
+  against the real container and track codecs **before** any server starts. Each guest checks its
+  own decoder against the codec and frame size, and the host's lobby flags anyone who can't keep
+  up. Container remux and any transcoding are **deferred** (too many edge cases for v1: AC3/DTS
+  audio, multi-track, Annex B, VFR, edit lists, storage). Others are rejected with a clear message
+  and a conversion hint. A fast-start MP4/MOV enables progressive start; anything else (including
+  every MKV) is pre-cached fully.
 - **Preflight checks:** the start gate uses each guest's measured throughput to pick
   progressive-start vs. full pre-cache; the host sees battery warnings while hosting, and each guest checks free space before downloading (neither blocks startup).
 - Reconnection: a dropped client rejoins and resyncs to the host's timestamp.

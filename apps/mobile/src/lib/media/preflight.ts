@@ -4,6 +4,8 @@
  * and the screens stay dumb. PRD §8: surface constraints honestly, before they ruin the show.
  */
 
+import { videoCodecName } from './compat'
+
 /** Extra room demanded beyond the movie itself — the OS, other apps, and the download need air. */
 export const STORAGE_MARGIN_BYTES = 200 * 1024 * 1024
 
@@ -15,9 +17,16 @@ export function storageWarning(freeBytes: number, movieBytes: number): string | 
   return `Not enough space — the movie needs ~${needGb} GB free, this phone has ${freeGb} GB.`
 }
 
-export function decodeWarning(canDecode: boolean, height: number): string | null {
+/**
+ * The guest's own decoder verdict for the shared movie. H.264 keeps the plain wording; any other
+ * codec (HEVC) is named, since "this phone can't do 2160p" reads as a resolution problem when the
+ * real gap is the codec at that size.
+ */
+export function decodeWarning(canDecode: boolean, height: number, videoMime = 'video/avc'): string | null {
   if (canDecode || !(height > 0)) return null
-  return `This phone's decoder can't smoothly play ${height}p — expect heavy lag.`
+  const mime = videoMime.trim().toLowerCase()
+  if (mime === '' || mime === 'video/avc') return `This phone's decoder can't smoothly play ${height}p — expect heavy lag.`
+  return `This phone's decoder can't smoothly play ${height}p ${videoCodecName(mime)} video — expect heavy lag.`
 }
 
 /** Below this (discharging), hosting a whole movie is a gamble. */

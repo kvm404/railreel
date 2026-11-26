@@ -51,7 +51,7 @@ The APK is **universal**: it contains both `arm64-v8a` and `armeabi-v7a` native 
 ## 🚂 How a Movie Session Works
 
 ### 1. Pick & Host
-The host opens RailReel and chooses a local video file. RailReel checks it **before** anything is shared: it must be **H.264 video in an MP4 or MOV container**, and its audio, if it has any, must be **AAC**. Anything else (HEVC, AV1, MKV, AC-3/DTS audio, ...) is rejected up front with a message that tells you what was found and suggests converting it (for example with HandBrake's "Fast 1080p30" preset). The host can optionally attach a `.srt` subtitle file.
+The host opens RailReel and chooses a local video file. RailReel checks it **before** anything is shared: it must be **H.264 or HEVC (H.265) video in an MP4, MOV or MKV container**, and its audio, if it has any, must be **AAC**. Anything else (AV1, VP9/WebM, AC-3/DTS audio, ...) is rejected up front with a message that tells you what was found and suggests converting it (for example with HandBrake's "Fast 1080p30" preset). The host can optionally attach a `.srt` subtitle file.
 
 ### 2. Connect Your Friends
 The host turns on their phone's personal hotspot (Android does not let apps do this, so RailReel guides you). Friends connect their Wi-Fi to the hotspot, open RailReel, and join by tapping the room that shows up automatically, scanning the host's QR code, or opening/pasting the invite link.
@@ -80,7 +80,7 @@ When you leave, you choose: **delete** the downloaded movie and reclaim the stor
 - **Does it use any mobile data or internet?**  
   None. The hotspot is purely a local Wi-Fi link between devices. You can be in airplane mode in the middle of a desert and it will work.
 - **What video formats work?**  
-  DRM-free **H.264 video** with **AAC audio** (or no audio) in an **MP4 or MOV** container. The first video and first audio track are checked. Other codecs and containers are rejected before the session starts, with a hint on how to convert. A file with the metadata at the start (a "fast-start" MP4) lets guests begin watching before their download finishes; otherwise they wait for the full download.
+  DRM-free **H.264 or HEVC (H.265) video** with **AAC audio** (or no audio) in an **MP4, MOV or MKV** container. The first video and first audio track are checked. Other codecs and containers are rejected before the session starts, with a hint on how to convert. Each guest's phone checks that it can decode the video, and the host sees anyone who can't keep up (a 4K HEVC file can be too much for an older phone). A file with the metadata at the start (a "fast-start" MP4) lets guests begin watching before their download finishes; otherwise, and always for MKV, they wait for the full download.
 - **How tight is the sync?**  
   Every phone plays its own local copy and follows the host's clock, so it is *perceptually* in sync, not frame-locked. On our test devices we measured roughly **50-80 ms of steady-state drift**, which is not noticeable for watching together with your own headphones, but it is not frame-accurate and varies with the phone. See [how sync works](docs/architecture.md#5-sync-protocol-clock-alignment).
 - **What if a download is interrupted?**  

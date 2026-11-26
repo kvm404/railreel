@@ -30,6 +30,12 @@ describe('decodeWarning', () => {
   it('names the resolution when it will lag', () => {
     expect(decodeWarning(false, 2160)).toMatch(/2160p/)
   })
+
+  it('keeps the plain wording for H.264 and names any other codec', () => {
+    expect(decodeWarning(false, 2160, 'video/avc')).toBe("This phone's decoder can't smoothly play 2160p — expect heavy lag.")
+    expect(decodeWarning(false, 2160, 'video/hevc')).toBe("This phone's decoder can't smoothly play 2160p HEVC (H.265) video — expect heavy lag.")
+    expect(decodeWarning(true, 2160, 'video/hevc')).toBeNull()
+  })
 })
 
 describe('batteryWarning', () => {

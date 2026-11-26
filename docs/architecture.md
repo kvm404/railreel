@@ -207,13 +207,16 @@ type ClientMsg =
 ## 7. Media pipeline
 
 - **Validate before hosting.** The native probe reports the *real* container and track mimes.
-  `lib/media/compat.ts` accepts only **H.264 (`video/avc`) video, with AAC (`audio/mp4a-latm`)
-  audio or no audio at all, in an MP4 or MOV (QuickTime) container**. It inspects the first video
-  and first audio track, and rejects everything else *before the servers start*, with the
-  exact sentence the host sees (what was found, plus a HandBrake "Fast 1080p30" hint). Remux and
-  transcoding are out of scope: they break on real files (MKV with AC-3/DTS, multi-audio,
-  Annex B, VFR, edit lists, 2× temporary storage). Guests additionally check *their* decoder
-  against the real codec and frame size and warn when it can't keep up.
+  `lib/media/compat.ts` accepts only **H.264 (`video/avc`) or HEVC (`video/hevc`) video, with AAC
+  (`audio/mp4a-latm`) audio or no audio at all, in an MP4, MOV (QuickTime) or MKV (Matroska)
+  container**. It inspects the first video and first audio track, and rejects everything else
+  *before the servers start*, with the exact sentence the host sees (what was found, plus a
+  HandBrake "Fast 1080p30" hint). WebM shares Matroska's magic, so it is judged by its codecs
+  (VP9/AV1 video is rejected). An MKV is never progressive: the fast-start scan reads MP4 boxes, so
+  guests pre-cache it in full. Remux and transcoding are out of scope: they break on real files
+  (AC-3/DTS audio, multi-audio, Annex B, VFR, edit lists, 2× temporary storage). Guests
+  additionally check *their* decoder against the real codec and frame size and warn when it can't
+  keep up (HEVC is decodable on current phones, but a big HEVC frame can outrun an older one).
 - **Preflight** (`lib/media/preflight.ts`): guests check free space (movie + 200 MB) before
   downloading, the host sees a battery warning (< 30% while discharging) *while hosting*, and
   guests warn when their decoder can't handle the frame size. None of these block server startup.

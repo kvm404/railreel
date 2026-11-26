@@ -26,6 +26,20 @@ describe('mediaVerdict — accepted', () => {
     expect(mediaVerdict(probe({ trackCount: 5 }))).toEqual({ ok: true })
   })
 
+  it('accepts HEVC (H.265) + AAC — a Galaxy camera recording with "High efficiency video" on', () => {
+    expect(mediaVerdict(probe({ videoMime: 'video/hevc' }))).toEqual({ ok: true })
+    expect(mediaVerdict(probe({ container: 'quicktime', videoMime: 'video/hevc' }))).toEqual({ ok: true })
+  })
+
+  it('accepts an MKV with H.264 or HEVC video and AAC audio', () => {
+    expect(mediaVerdict(probe({ container: 'matroska' }))).toEqual({ ok: true })
+    expect(mediaVerdict(probe({ container: 'matroska', videoMime: 'video/hevc' }))).toEqual({ ok: true })
+  })
+
+  it('accepts a silent MKV', () => {
+    expect(mediaVerdict(probe({ container: 'matroska', audioMime: '', trackCount: 1 }))).toEqual({ ok: true })
+  })
+
   it('is case- and whitespace-insensitive about mimes and the container hint', () => {
     expect(mediaVerdict(probe({ container: ' MP4 ', videoMime: 'Video/AVC', audioMime: 'AUDIO/MP4A-LATM' }))).toEqual({ ok: true })
   })
@@ -54,24 +68,29 @@ describe('mediaVerdict — unreadable', () => {
   })
 })
 
-describe('mediaVerdict — not an MP4', () => {
-  it('rejects MKV/WebM even when its tracks are H.264 + AAC', () => {
-    const v = mediaVerdict(probe({ container: 'matroska' }))
-    expect(v).toMatchObject({ ok: false, reason: 'not-mp4' })
+describe('mediaVerdict — container', () => {
+  it('rejects other containers that did parse (AVI, TS, FLV…) and names what is supported', () => {
+    const v = mediaVerdict(probe({ container: 'unknown', trackCount: 2 }))
+    expect(v).toMatchObject({ ok: false, reason: 'container' })
     if (!v.ok) {
-      expect(v.message).toMatch(/MKV\/WebM/)
+      expect(v.message).toMatch(/isn't an MP4, MOV or MKV/)
+      expect(v.message).toMatch(/H\.264 or HEVC video with AAC sound/)
       expect(v.message).toMatch(/HandBrake: 'Fast 1080p30'/)
     }
   })
 
-  it('rejects other containers that did parse (AVI, TS, FLV…)', () => {
-    const v = mediaVerdict(probe({ container: 'unknown', trackCount: 2 }))
-    expect(v).toMatchObject({ ok: false, reason: 'not-mp4' })
-    if (!v.ok) expect(v.message).toMatch(/isn't an MP4/)
+  it('checks the container before the codecs', () => {
+    expect(mediaVerdict(probe({ container: 'unknown', videoMime: 'video/av01', trackCount: 2 }))).toMatchObject({ reason: 'container' })
   })
 
-  it('checks the container before the codecs', () => {
-    expect(mediaVerdict(probe({ container: 'matroska', videoMime: 'video/hevc' }))).toMatchObject({ reason: 'not-mp4' })
+  it('judges a WebM (a Matroska file) by its codecs: VP9 video is rejected as a codec, not a container', () => {
+    const v = mediaVerdict(probe({ container: 'matroska', videoMime: 'video/x-vnd.on2.vp9', audioMime: 'audio/opus' }))
+    expect(v).toMatchObject({ ok: false, reason: 'video-codec' })
+    if (!v.ok) expect(v.message).toContain('uses VP9.')
+  })
+
+  it('an MKV whose tracks the extractor could not read is unreadable, not "audio only"', () => {
+    expect(mediaVerdict({ container: 'matroska', videoMime: '', audioMime: '', trackCount: 0 })).toMatchObject({ ok: false, reason: 'unreadable' })
   })
 })
 
@@ -88,13 +107,13 @@ describe('mediaVerdict — no video', () => {
 })
 
 describe('mediaVerdict — video codec', () => {
-  it('explains HEVC with the friendly name and the conversion preset', () => {
-    const v = mediaVerdict(probe({ videoMime: 'video/hevc' }))
+  it('explains AV1 with the friendly name, what is supported and the conversion preset', () => {
+    const v = mediaVerdict(probe({ videoMime: 'video/av01' }))
     expect(v).toEqual({
       ok: false,
       reason: 'video-codec',
       message:
-        "This file uses HEVC (H.265). RailReel shares H.264 MP4s so every phone can play them — convert it first (HandBrake: 'Fast 1080p30').",
+        "This file uses AV1. RailReel shares H.264 or HEVC video with AAC sound (MP4, MOV or MKV) so every phone can play it — convert it first (HandBrake: 'Fast 1080p30').",
     })
   })
 
@@ -119,11 +138,18 @@ describe('mediaVerdict — video codec', () => {
   })
 
   it('reports the video codec first when both video and audio are wrong', () => {
-    expect(mediaVerdict(probe({ videoMime: 'video/hevc', audioMime: 'audio/ac3' }))).toMatchObject({ reason: 'video-codec' })
+    expect(mediaVerdict(probe({ videoMime: 'video/av01', audioMime: 'audio/ac3' }))).toMatchObject({ reason: 'video-codec' })
   })
 })
 
 describe('mediaVerdict — audio codec', () => {
+  it('judges HEVC and MKV files by their audio too (the common x265 MKV with AC-3 is rejected)', () => {
+    expect(mediaVerdict(probe({ container: 'matroska', videoMime: 'video/hevc', audioMime: 'audio/ac3' }))).toMatchObject({
+      ok: false,
+      reason: 'audio-codec',
+    })
+  })
+
   it('explains AC3 with the friendly name', () => {
     const v = mediaVerdict(probe({ audioMime: 'audio/ac3' }))
     expect(v).toMatchObject({ ok: false, reason: 'audio-codec' })
@@ -178,8 +204,12 @@ describe('mediaVerdict — facts from the native fallbacks', () => {
     expect(mediaVerdict(probe({ container: 'quicktime' }))).toEqual({ ok: true })
   })
 
-  it('still rejects hvc1/hev1 entries the fallback mapped to HEVC', () => {
-    expect(mediaVerdict(probe({ videoMime: 'video/hevc' }))).toMatchObject({ ok: false, reason: 'video-codec' })
+  it('accepts hvc1/hev1 entries the fallback mapped to HEVC', () => {
+    expect(mediaVerdict(probe({ videoMime: 'video/hevc', audioMime: '', trackCount: 1 }))).toEqual({ ok: true })
+  })
+
+  it('still rejects dvh1/dvhe entries the fallback mapped to Dolby Vision', () => {
+    expect(mediaVerdict(probe({ videoMime: 'video/dolby-vision' }))).toMatchObject({ ok: false, reason: 'video-codec' })
   })
 
   it.each([
