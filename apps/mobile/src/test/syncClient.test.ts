@@ -67,6 +67,70 @@ describe('openSyncSession and rolling NTP drift compensation', () => {
     globalThis.WebSocket = originalWebSocket
   })
 
+  it('stamps pings and pongs with the injected client clock (the host timebase), not performance.now', async () => {
+    // A clock far from performance.now: the offset is only right if every stamp uses it.
+    const clock = vi.fn(() => 5_000_000)
+    const session = await openSyncSession('127.0.0.1', 8081, 'token123', vi.fn(), undefined, 3, undefined, clock)
+    const pings = activeSocket!.sent.map((d) => JSON.parse(d)).filter((m) => m.t === 'syncPing')
+    expect(pings.length).toBeGreaterThan(0)
+    for (const p of pings) expect(p.t1).toBe(5_000_000)
+    // t2/t3 = t1 + 1005, t4 = t1 (frozen clock) → offset ≈ 1005, and toHostTime maps on that timebase.
+    expect(Math.abs(session.estimate.offsetMs - 1005)).toBeLessThan(1)
+    expect(Math.abs(session.toHostTime(5_000_000) - 5_001_005)).toBeLessThan(1)
+    session.close()
+  })
+
+  it('declares a silent host gone after three missed keepalives (half-open socket), once', async () => {
+    let now = 1_000
+    const onClose = vi.fn()
+    // Fake timers BEFORE the handshake: the keepalive interval is created when it settles.
+    vi.useFakeTimers()
+    const opening = openSyncSession('127.0.0.1', 8081, 'token123', vi.fn(), onClose, 3, undefined, () => now)
+    await vi.advanceTimersByTimeAsync(500)
+    const session = await opening
+    try {
+      // The host stops answering entirely; the socket never reports a close.
+      activeSocket!.send = () => {}
+      activeSocket!.close = () => {}
+      for (let i = 0; i < 3; i++) {
+        now += 10_000
+        vi.advanceTimersByTime(10_000)
+      }
+      expect(onClose).not.toHaveBeenCalled() // exactly 30 s of silence: still within the deadline
+      now += 10_000
+      vi.advanceTimersByTime(10_000)
+      expect(onClose).toHaveBeenCalledTimes(1)
+      now += 30_000
+      vi.advanceTimersByTime(30_000)
+      expect(onClose).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+      session.close()
+    }
+  })
+
+  it('keeps a session alive while the host keeps answering', async () => {
+    let now = 1_000
+    const onClose = vi.fn()
+    // Fake timers BEFORE the handshake: the keepalive interval is created when it settles.
+    vi.useFakeTimers()
+    const opening = openSyncSession('127.0.0.1', 8081, 'token123', vi.fn(), onClose, 3, undefined, () => now)
+    await vi.advanceTimersByTimeAsync(500)
+    const session = await opening
+    try {
+      for (let i = 0; i < 10; i++) {
+        now += 10_000
+        vi.advanceTimersByTime(10_000) // keepalive ping
+        now += 10
+        vi.advanceTimersByTime(10) // its pong lands
+      }
+      expect(onClose).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+      session.close()
+    }
+  })
+
   it('settles clock estimate initially and compensates for clock drift on keepalive pongs', async () => {
     const onMessage = vi.fn()
     const sessionPromise = openSyncSession('127.0.0.1', 8081, 'token123', onMessage, undefined, 3)
