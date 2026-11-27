@@ -117,7 +117,7 @@ class RailReelHostModule : Module() {
         }
         server = s
         ctrl = c
-        mapOf("httpPort" to s.listeningPort, "wsPort" to c.listeningPort)
+        mapOf("httpPort" to s.listeningPort, "wsPort" to c.listeningPort, "sizeBytes" to media.length.toDouble())
       }
     }
 

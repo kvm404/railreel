@@ -1299,7 +1299,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // Progressive start reads an MP4's moov-first layout; any other container is pre-cached in full
       // whatever the native layout scan guessed from bytes it doesn't understand.
       const fastStart = probed.fastStart === true && probed.container !== 'matroska'
-      const sizeBytes = asset.size ?? 0
+      // The size the server actually serves (some providers report no size to the picker).
+      const sizeBytes = ports.sizeBytes > 0 ? ports.sizeBytes : (asset.size ?? 0)
       const title = cleanTitle(asset.name)
       mediaRef.current = {
         title,
@@ -1407,7 +1408,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // measured offset from the sync handshake.
   const hostNowMs = useCallback((): number => {
     const c = clientRef.current
-    return c ? c.session.toHostTime(nowMs()) : RailReelHost.getMonotonicMs()
+    return c ? c.session.toHostTime(RailReelHost.getMonotonicMs()) : RailReelHost.getMonotonicMs()
   }, [])
 
   const approve = useCallback(
@@ -2264,6 +2265,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         },
         undefined,
         abort.signal,
+        RailReelHost.getMonotonicMs,
       )
       let session: SyncSession
       try {
@@ -2601,10 +2603,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 }
 
 const clamp01 = (n: number): number => (!Number.isFinite(n) || n < 0 ? 0 : n > 1 ? 1 : n)
-
-/** Client monotonic clock — must match openSyncSession's timebase so the offset maps correctly. */
-const nowMs = (): number =>
-  typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
 
 /** The invite's address right now (lib/net/hostNetwork ranks what the native side reports). */
 function currentHostNetwork(): HostNetwork | null {

@@ -123,6 +123,8 @@ export function PlayerScreen() {
 
   const player = useVideoPlayer(s.movieUri ?? null, (p) => {
     p.loop = false
+    // Drift correction nudges playbackRate; expo-video's Android default shifts pitch with it.
+    p.preservesPitch = true
   })
   const playhead = usePlayhead(player)
 

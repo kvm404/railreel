@@ -16,7 +16,7 @@ export type SyncSession = {
   close: () => void
 }
 
-const nowMs = (): number =>
+const defaultClock = (): number =>
   typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
 
 const isFiniteNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
@@ -24,6 +24,10 @@ const isFiniteNum = (v: unknown): v is number => typeof v === 'number' && Number
 /** Keepalive ping cadence. Must stay well under the host's WS read timeout (30s) so a missed
  *  ping does not drop the control channel. See RailReelHostModule WS_SOCKET_READ_TIMEOUT_MS. */
 const KEEPALIVE_MS = 10000
+/** Nothing at all from the host for this long (three missed pongs) = the host is gone. A host that
+ *  lost power or left the hotspot never sends a FIN, and Android keeps a half-open TCP socket
+ *  "connected" for minutes, so the drop is declared here instead of waiting for onclose. */
+const HOST_SILENCE_MS = 3 * KEEPALIVE_MS
 const ROLLING_WINDOW_SIZE = 8
 
 /** The handshake was abandoned through its AbortSignal (the caller moved on). */
@@ -51,6 +55,12 @@ export function openSyncSession(
   onClose?: () => void,
   rounds = 6,
   signal?: AbortSignal,
+  /**
+   * The client's monotonic clock in ms. It must run on the same timebase as the host's (Android's
+   * elapsedRealtime, which keeps counting through deep sleep): a clock that pauses while the phone
+   * sleeps (performance.now) shifts the offset by the time asleep. The app passes the native clock.
+   */
+  nowMs: () => number = defaultClock,
 ): Promise<SyncSession> {
   if (signal?.aborted) return Promise.reject(new SyncCancelledError())
   return new Promise((resolve, reject) => {
@@ -71,6 +81,7 @@ export function openSyncSession(
     let settled = false
     let keepalive: ReturnType<typeof setInterval> | undefined
     let pingTimeout: ReturnType<typeof setTimeout> | undefined
+    let lastHeardAt = 0 // client-clock ms of the last frame from the host (any kind)
     const ping = () => {
       try {
         ws.send(JSON.stringify({ t: 'syncPing', t1: nowMs() }))
@@ -123,6 +134,7 @@ export function openSyncSession(
 
     ws.onmessage = (e) => {
       if (silenced) return
+      lastHeardAt = nowMs()
       let msg: Record<string, unknown>
       try {
         msg = JSON.parse(String((e as MessageEvent).data))
@@ -161,6 +173,14 @@ export function openSyncSession(
           // ping keeps the channel alive through quiet stretches of a movie. Stay well under that
           // timeout so a single dropped ping still leaves the connection alive.
           keepalive = setInterval(() => {
+            if (nowMs() - lastHeardAt > HOST_SILENCE_MS) {
+              // Half-open: report the drop now (once) and let the caller reconnect.
+              silenced = true
+              clearTimers()
+              shut()
+              onClose?.()
+              return
+            }
             try {
               ws.send(JSON.stringify({ t: 'syncPing', t1: nowMs() }))
             } catch {
