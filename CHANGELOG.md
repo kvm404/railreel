@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/kvm404/railreel/compare/v0.2.0...v0.3.0) (2026-11-27)
+
+
+### Features
+
+* host HEVC and MKV, recover blank screens, bring back hidden player controls ([#47](https://github.com/kvm404/railreel/issues/47)) ([436e04c](https://github.com/kvm404/railreel/commit/436e04cfa8c5f5ae0c874b29a92a6e5da80e71db))
+
+
+### Bug Fixes
+
+* keep sync through sleep, detect a silent host, preserve pitch, guard the subtitle picker, publish the served size ([#49](https://github.com/kvm404/railreel/issues/49)) ([9e6a696](https://github.com/kvm404/railreel/commit/9e6a696f56aea4b3ecbf71153d1ab10892c476e6))
+
 ## [0.2.0](https://github.com/kvm404/railreel/compare/v0.1.0...v0.2.0) (2026-11-23)
 
 
