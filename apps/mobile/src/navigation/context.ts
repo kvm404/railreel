@@ -7,7 +7,7 @@ import type { BackHandlerFn, BackLayer, BackRegistry } from '@/lib/nav/backStack
  * — importantly — adds no native module, so the UI keeps hot-reloading without a rebuild.
  */
 
-export type RouteName = 'Home' | 'CreateSession' | 'JoinSession' | 'Lobby' | 'Player'
+export type RouteName = 'Home' | 'CreateSession' | 'JoinSession' | 'Lobby' | 'Player' | 'About'
 export type NavParams = Record<string, unknown>
 
 export interface NavApi {

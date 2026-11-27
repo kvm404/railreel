@@ -78,7 +78,7 @@ When you leave, you choose: **delete** the downloaded movie and reclaim the stor
 ## 💡 Good to Know
 
 - **Does it use any mobile data or internet?**  
-  None. The hotspot is purely a local Wi-Fi link between devices. You can be in airplane mode in the middle of a desert and it will work.
+  Not for watching. The hotspot is purely a local Wi-Fi link between devices; you can be in airplane mode in the middle of a desert and a session works. The only internet use is the update check: when Home opens on a phone that has internet, RailReel quietly asks GitHub whether a newer release exists, and **About** (the info button on Home) checks on demand and downloads and installs it. No connection simply means no update news.
 - **What video formats work?**  
   DRM-free **H.264 or HEVC (H.265) video** with **AAC audio** (or no audio) in an **MP4, MOV or MKV** container. The first video and first audio track are checked. Other codecs and containers are rejected before the session starts, with a hint on how to convert. Each guest's phone checks that it can decode the video, and the host sees anyone who can't keep up (a 4K HEVC file can be too much for an older phone). A file with the metadata at the start (a "fast-start" MP4) lets guests begin watching before their download finishes; otherwise, and always for MKV, they wait for the full download.
 - **How tight is the sync?**  

@@ -51,6 +51,61 @@ class RailReelHostModule : Module() {
     // own clock via the measured offset. Never wall-clock.
     Function("getMonotonicMs") { android.os.SystemClock.elapsedRealtimeNanos() / 1_000_000.0 }
 
+    // ── In-app update (lib/update/release, hooks/useAppUpdate) ──────────────────────────────
+    // The installed build's versionName ("0.3.0"), the truth the update check compares against.
+    Function("getAppVersion") {
+      val ctx = appContext.reactContext ?: return@Function ""
+      runCatching {
+        @Suppress("DEPRECATION")
+        ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
+      }.getOrNull() ?: ""
+    }
+
+    // Hex SHA-256 of a downloaded file (an APK is tens of MB: this runs off the UI thread).
+    AsyncFunction("sha256File") { path: String ->
+      val md = java.security.MessageDigest.getInstance("SHA-256")
+      FileInputStream(File(path.removePrefix("file://"))).use { s ->
+        val buf = ByteArray(256 * 1024)
+        while (true) {
+          val n = s.read(buf)
+          if (n < 0) break
+          md.update(buf, 0, n)
+        }
+      }
+      md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    // Android 8+ asks once per app before it may hand APKs to the installer.
+    Function("canInstallPackages") {
+      val ctx = appContext.reactContext ?: return@Function false
+      android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O ||
+        ctx.packageManager.canRequestPackageInstalls()
+    }
+
+    // The system "Install unknown apps" switch for RailReel.
+    AsyncFunction("openInstallSettings") {
+      val ctx = appContext.reactContext ?: throw CodedException("No app context")
+      val intent = android.content.Intent(
+        android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+        Uri.parse("package:${ctx.packageName}"),
+      ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+      ctx.startActivity(intent)
+    }
+
+    // Hand an APK (a content:// URI from expo-file-system's FileProvider) to the system installer.
+    // Android shows its own confirmation, verifies the signature matches this app, and replaces it.
+    AsyncFunction("installApk") { contentUri: String ->
+      val ctx = appContext.reactContext ?: throw CodedException("No app context")
+      val intent = android.content.Intent(android.content.Intent.ACTION_VIEW)
+        .setDataAndType(Uri.parse(contentUri), "application/vnd.android.package-archive")
+        .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+      try {
+        (appContext.currentActivity ?: ctx).startActivity(intent)
+      } catch (e: android.content.ActivityNotFoundException) {
+        throw CodedException("No installer is available on this phone")
+      }
+    }
+
     AsyncFunction("start") { fileUri: String, httpPort: Int, wsPort: Int, token: String ->
       if (token.isBlank()) throw CodedException("Session token must not be empty")
       synchronized(lock) {

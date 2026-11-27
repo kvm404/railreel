@@ -13,6 +13,7 @@ import { CreateSessionScreen } from '@/screens/CreateSessionScreen'
 import { JoinSessionScreen } from '@/screens/JoinSessionScreen'
 import { LobbyScreen } from '@/screens/LobbyScreen'
 import { PlayerScreen } from '@/screens/PlayerScreen'
+import { AboutScreen } from '@/screens/AboutScreen'
 import { InviteLinkProvider, withInviteBridge } from '@/hooks/inviteLinks'
 import { palette } from '@/theme/tokens'
 
@@ -27,6 +28,7 @@ const routes: Routes = {
   JoinSession: JoinSessionScreen,
   Lobby: withInviteBridge('Lobby', LobbyScreen),
   Player: withInviteBridge('Player', PlayerScreen),
+  About: withInviteBridge('About', AboutScreen),
 }
 
 export default function App() {
