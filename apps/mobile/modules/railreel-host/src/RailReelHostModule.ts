@@ -55,6 +55,16 @@ declare class RailReelHostModule extends NativeModule<RailReelHostEvents> {
   getNetworkCandidates?(): { iface: string; ip: string; transport: 'wifi' | 'cellular' | 'vpn' | 'ethernet' | 'other' | 'none' }[]
   /** The host's monotonic clock in ms (matches the WS sync timebase); for stamping PlaybackState. */
   getMonotonicMs(): number
+  /** The installed build's versionName ("0.3.0"); "" if unknown. */
+  getAppVersion(): string
+  /** Hex SHA-256 of a local file (off the UI thread). */
+  sha256File(path: string): Promise<string>
+  /** Whether Android lets RailReel hand APKs to the installer ("Install unknown apps"). */
+  canInstallPackages(): boolean
+  /** Open the system "Install unknown apps" switch for RailReel. */
+  openInstallSettings(): Promise<void>
+  /** Launch the system installer for an APK (a content:// URI from FileSystem.getContentUriAsync). */
+  installApk(contentUri: string): Promise<void>
   /** Start the HTTP (range) + WebSocket (control) servers. Ports 0 = OS-assigned.
    *  `fileUri` may be a file:// path or a content:// (SAF) URI from the document picker. */
   start(fileUri: string, httpPort: number, wsPort: number, token: string): Promise<HostPorts>
@@ -116,6 +126,11 @@ const androidOnly = (): RailReelHostModule => {
     getHostIpAddress: () => null,
     getNetworkCandidates: () => [],
     getMonotonicMs: () => Date.now(),
+    getAppVersion: () => '',
+    sha256File: unavailable,
+    canInstallPackages: () => false,
+    openInstallSettings: unavailable,
+    installApk: unavailable,
     start: unavailable,
     approve: async () => {},
     revoke: async () => {},

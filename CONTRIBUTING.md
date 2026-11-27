@@ -75,6 +75,10 @@ networking, sync, playback or the host module, test on **two physical phones** (
    (no re-download).
 9. Version gate: a phone speaking a different protocol version (`PROTOCOL_VERSION`) refuses to join with the "update both phones" message.
 10. Add a third phone and check that late-join and the buffer-floor "waiting for a friend" pause work.
+11. In-app update (needs a release newer than the installed build, and internet): Home shows the
+    dot on the info button; About offers the version with its notes; **Download and install** shows
+    progress, asks once for "Install unknown apps", then opens Android's installer. Cancel a download
+    once, and check About offline says it couldn't reach GitHub.
 
 Note the phone models and Android versions you tested in the PR.
 

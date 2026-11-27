@@ -265,6 +265,17 @@ apps/mobile/src/
 apps/mobile/modules/   native modules (mDNS, embedded servers) as needed
 ```
 
+**In-app updates.** The only internet use. Home quietly checks
+`api.github.com/repos/kvm404/railreel/releases/latest` (once per app run, at most every 6 h, never
+during a session, silent when offline); About checks on demand. `lib/update/release.ts` judges the
+untrusted response (newer published release, its `RailReel-vX.Y.Z.apk` asset at this repo's
+download path, size, SHA-256 `digest`, notes); `hooks/useAppUpdate.ts` downloads into
+`cache/updates/`, verifies size and digest (native `sha256File`), asks for Android's "Install unknown
+apps" switch if needed, and hands a FileProvider `content://` URI to the system installer
+(native `installApk`). Android itself rejects an APK signed with a different key, so every release
+must keep the same signing key (the debug key today; adding release-keystore secrets later means one
+manual reinstall).
+
 **Testing seam:** keep clock math, buffer/start-gate decisions, drift correction, and media
 probe rules as **pure functions** in `lib/`, tested against fixtures — same philosophy as the
 reference project's SMS-parser corpus.

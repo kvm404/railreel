@@ -9,12 +9,14 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { RadioTower, Radar, MoonStar, WifiOff } from 'lucide-react-native'
+import { Info, RadioTower, Radar, MoonStar, WifiOff } from 'lucide-react-native'
 import { Button, FlapText, Text } from '@/ui'
+import { IconButton } from '@/ui/IconButton'
 import { SyncDots } from '@/components/SyncDots'
 import { StatusScreen } from '@/components/StatusScreen'
 import { FilamentBloom } from '@/components/FilamentBloom'
 import { useReduceMotion } from '@/hooks/useReduceMotion'
+import { useAppUpdate, useQuietUpdateCheck } from '@/hooks/useAppUpdate'
 import { useBackHandler, useNavigation } from '@/navigation/context'
 import { useSession } from '@/session/SessionProvider'
 import { useTheme } from '@/theme/ThemeProvider'
@@ -98,6 +100,31 @@ export function HomeScreen() {
     transform: [{ translateY: (1 - rise.value) * 18 }],
   }))
 
+  // The one network touch: a quiet look at GitHub for a newer release (no news if offline), and a
+  // dot on About when there is one. Never while a session owns the phone.
+  const update = useAppUpdate()
+  useQuietUpdateCheck(s.role === 'none')
+  const updateReady = update.status === 'available'
+  const topRow = (
+    <View style={styles.topRow}>
+      <Text variant="eyebrow" tone="secondary" style={styles.topLabel}>
+        OFFLINE · IN SYNC · TOGETHER
+      </Text>
+      <View style={styles.about}>
+        <IconButton
+          variant="ghost"
+          size={40}
+          icon={(c) => <Info size={18} color={c} strokeWidth={2.25} />}
+          accessibilityLabel={updateReady ? 'About RailReel, update available' : 'About RailReel'}
+          onPress={() => nav.navigate('About')}
+        />
+        {updateReady ? (
+          <View pointerEvents="none" style={[styles.updateDot, { backgroundColor: t.palette.amber, borderColor: t.palette.base }]} />
+        ) : null}
+      </View>
+    </View>
+  )
+
   const hero = (
     <View style={[styles.hero, sideBySide && styles.heroSide]}>
       <FlapText value="RAILREEL" size={logoSize} tone="primary" stagger={55} />
@@ -171,16 +198,12 @@ export function HomeScreen() {
         >
           {sideBySide ? (
             <View style={styles.leftCol}>
-              <Text variant="eyebrow" tone="secondary">
-                OFFLINE · IN SYNC · TOGETHER
-              </Text>
+              {topRow}
               {hero}
             </View>
           ) : (
             <>
-              <Text variant="eyebrow" tone="secondary">
-                OFFLINE · IN SYNC · TOGETHER
-              </Text>
+              {topRow}
               {hero}
             </>
           )}
@@ -232,6 +255,11 @@ const styles = StyleSheet.create({
   hero: { flex: 1, justifyContent: 'center', gap: 18, minHeight: 120 },
   heroSide: { flex: 0 },
   tagline: { marginLeft: 4 },
+  topRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  topLabel: { flex: 1 },
+  // The 44dp touch box hangs past the eyebrow's line height instead of pushing the hero down.
+  about: { marginVertical: -14, marginRight: -10 },
+  updateDot: { position: 'absolute', top: 6, right: 6, width: 10, height: 10, borderRadius: 5, borderWidth: 2 },
   actions: { gap: 14 },
   actionsSide: { flex: 1, maxWidth: 360 },
   ctaBloom: { top: -34, bottom: -34, left: -26, right: -26 },
