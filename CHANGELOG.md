@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/kvm404/railreel/compare/v0.3.0...v0.4.0) (2026-11-27)
+
+
+### Features
+
+* in-app updates from GitHub releases on a new About screen ([#50](https://github.com/kvm404/railreel/issues/50)) ([21a908c](https://github.com/kvm404/railreel/commit/21a908c21fa53dbe64466061c83f5670d19750ee))
+
 ## [0.3.0](https://github.com/kvm404/railreel/compare/v0.2.0...v0.3.0) (2026-11-27)
 
 
