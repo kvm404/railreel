@@ -13,7 +13,8 @@ reactions and chat. No internet, no accounts. See `docs/prd/railreel-v1.md` and
   Claude/AI in commit messages, PR descriptions, or anywhere in git history.
 - One logical change per commit. Branch off `main`; never commit straight to `main` for
   feature work — open a PR.
-- The repo is **private for now** (will go public later); keep history portfolio-clean.
+- The repo is **public** (portfolio): keep history clean. Releases are public too; the in-app
+  updater reads them unauthenticated from the GitHub API.
 
 ## The one architecture rule to never break
 
