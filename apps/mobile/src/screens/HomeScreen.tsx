@@ -104,7 +104,7 @@ export function HomeScreen() {
   // dot on About when there is one. Never while a session owns the phone.
   const update = useAppUpdate()
   useQuietUpdateCheck(s.role === 'none')
-  const updateReady = update.status === 'available'
+  const updateReady = update.status === 'available' || update.status === 'ready'
   const topRow = (
     <View style={styles.topRow}>
       <Text variant="eyebrow" tone="secondary" style={styles.topLabel}>

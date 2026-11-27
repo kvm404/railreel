@@ -106,10 +106,11 @@ describe('evaluateRelease', () => {
     expect(evaluateRelease(release({}, { size: 0 }), '0.2.0')).toMatchObject({ kind: 'invalid' })
   })
 
-  it('keeps going without a digest (size is still checked) and ignores a malformed one', () => {
-    for (const digest of [undefined, 'md5:abc', 'sha256:xyz']) {
+  it('refuses a release whose checksum is missing or malformed (verification is never skipped)', () => {
+    for (const digest of [undefined, '', 'md5:abc', 'sha256:xyz', `sha256:${SHA}0`]) {
       const v = evaluateRelease(release({}, { digest }), '0.2.0')
-      expect(v.kind === 'available' && v.update.sha256).toBeNull()
+      expect(v).toMatchObject({ kind: 'invalid' })
+      if (v.kind === 'invalid') expect(v.reason).toMatch(/checksum/)
     }
   })
 
@@ -150,8 +151,8 @@ describe('downloadProblem', () => {
     expect(downloadProblem({ exists: true, sizeBytes: 100, sha256: 'f'.repeat(64) }, expected)).toMatch(/doesn't match/)
     expect(downloadProblem({ exists: true, sizeBytes: 100, sha256: null }, expected)).toMatch(/doesn't match/)
   })
-  it('checks size alone when GitHub published no digest', () => {
-    expect(downloadProblem({ exists: true, sizeBytes: 100, sha256: null }, { sizeBytes: 100, sha256: null })).toBeNull()
+  it('fails closed when the file could not be hashed', () => {
+    expect(downloadProblem({ exists: true, sizeBytes: 100, sha256: null }, expected)).toMatch(/doesn't match/)
   })
 })
 

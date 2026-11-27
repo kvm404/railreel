@@ -46,8 +46,8 @@ export type AvailableUpdate = {
   apkName: string
   apkUrl: string
   sizeBytes: number
-  /** Lowercase hex SHA-256 from GitHub's asset digest; null when GitHub didn't publish one. */
-  sha256: string | null
+  /** Lowercase hex SHA-256 from GitHub's asset digest (required: no digest, no install). */
+  sha256: string
   notes: string[]
   /** The release's page, for the full notes. */
   pageUrl: string
@@ -86,6 +86,8 @@ export function evaluateRelease(json: unknown, currentVersion: string): UpdateVe
     return { kind: 'invalid', reason: "The release file looks wrong, so RailReel won't download it." }
   }
   const digest = typeof asset.digest === 'string' ? /^sha256:([0-9a-f]{64})$/i.exec(asset.digest) : null
+  // Without GitHub's checksum the download can't be proven to be the release: refuse, don't skip.
+  if (!digest) return { kind: 'invalid', reason: "GitHub didn't publish a checksum for this release, so RailReel won't install it." }
   const pageUrl = typeof json.html_url === 'string' && json.html_url.startsWith(`https://github.com/${RELEASES_REPO}/releases/`)
     ? json.html_url
     : RELEASES_PAGE_URL
@@ -98,7 +100,7 @@ export function evaluateRelease(json: unknown, currentVersion: string): UpdateVe
       apkName,
       apkUrl: url,
       sizeBytes: size,
-      sha256: digest ? digest[1]!.toLowerCase() : null,
+      sha256: digest[1]!.toLowerCase(),
       notes: releaseNotes(json.body),
       pageUrl,
       publishedAt: typeof json.published_at === 'string' ? json.published_at : null,
@@ -134,7 +136,7 @@ export function downloadProblem(
   expected: Pick<AvailableUpdate, 'sizeBytes' | 'sha256'>,
 ): string | null {
   if (!got.exists || got.sizeBytes !== expected.sizeBytes) return "The download didn't finish. Try again."
-  if (expected.sha256 && got.sha256?.toLowerCase() !== expected.sha256) {
+  if (got.sha256?.toLowerCase() !== expected.sha256) {
     return "The downloaded file doesn't match the release, so it wasn't installed. Try again."
   }
   return null

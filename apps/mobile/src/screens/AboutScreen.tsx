@@ -1,5 +1,5 @@
-import type { ReactNode } from 'react'
-import { Linking, StyleSheet, View } from 'react-native'
+import { useEffect, type ReactNode } from 'react'
+import { AppState, Linking, StyleSheet, View } from 'react-native'
 import { CircleAlert, CircleCheck, Download, ExternalLink, RefreshCw, ShieldCheck } from 'lucide-react-native'
 import { Screen } from '@/components/Screen'
 import { SyncDots } from '@/components/SyncDots'
@@ -9,6 +9,7 @@ import { IconButton } from '@/ui/IconButton'
 import { useTheme } from '@/theme/ThemeProvider'
 import { radii } from '@/theme/tokens'
 import { useSession } from '@/session/SessionProvider'
+import RailReelHost from '../../modules/railreel-host'
 import { formatBytes } from '@/lib/storage'
 import { formatClock, formatReleaseDate, formatVersion, RELEASES_PAGE_URL, type AvailableUpdate } from '@/lib/update/release'
 import {
@@ -16,6 +17,7 @@ import {
   checkForUpdate,
   currentVersion,
   downloadUpdate,
+  getUpdateState,
   installUpdate,
   openInstallPermission,
   useAppUpdate,
@@ -25,7 +27,10 @@ import {
 /**
  * About: what this build is, and the way to the next one. The version flips in on the split-flap
  * board; below it a single berth carries the update, whose state (checked, available, downloading,
- * needs Android's install permission, installing, failed) is the whole job of the screen.
+ * ready, needs Android's install permission, failed) is the whole job of the screen.
+ *
+ * The install only ever starts from here, with no session running: a download that finishes while
+ * the person is elsewhere waits as `ready` (Home shows the dot) until they come back.
  */
 export function AboutScreen() {
   const t = useTheme()
@@ -34,6 +39,21 @@ export function AboutScreen() {
   const version = currentVersion()
   // Installing replaces the app (it restarts), so never mid-session.
   const inSession = s.role !== 'none'
+
+  // A verified download lands while About is open: go straight to Android's installer.
+  const freshReady = update.status === 'ready' && !update.launched
+  useEffect(() => {
+    if (freshReady && !inSession) void installUpdate()
+  }, [freshReady, inSession])
+
+  // Back from the "Install unknown apps" switch: carry on once it's allowed.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next !== 'active' || inSession) return
+      if (getUpdateState().status === 'permission' && RailReelHost.canInstallPackages()) void installUpdate()
+    })
+    return () => sub.remove()
+  }, [inSession])
 
   return (
     <Screen title="ABOUT" scroll>
@@ -53,7 +73,8 @@ export function AboutScreen() {
 
         <View style={styles.footer}>
           <Text variant="caption" tone="muted">
-            Updates come from RailReel's GitHub releases. Checking is the only time the app uses the internet.
+            Updates come from RailReel's GitHub releases. Checking for and downloading them are the only times the app uses
+            the internet.
           </Text>
           <IconButton
             variant="ghost"
@@ -154,20 +175,34 @@ function UpdateBerth({ state, version, inSession }: { state: UpdateState; versio
           detail={'Android asks once. Turn on "Allow from this source" for RailReel, then come back. The install carries on by itself.'}
           live
         >
-          <Button title="Open Android settings" intent="amber" height={56} onPress={() => void openInstallPermission()} />
+          {guard ?? <Button title="Open Android settings" intent="amber" height={56} onPress={() => void openInstallPermission()} />}
         </Row>
       )
-    case 'installing':
+    case 'ready': {
+      const v = formatVersion(state.update.version)
       return (
         <Row
-          icon={<Download size={18} color={t.palette.amber} strokeWidth={2.25} />}
-          title="Confirm in Android's installer"
-          detail={`RailReel closes while it updates to ${formatVersion(state.update.version)}. Open it again once Android says it's installed.`}
+          icon={<ShieldCheck size={18} color={t.palette.amber} strokeWidth={2.25} />}
+          title={state.launched ? "Confirm in Android's installer" : `Version ${v} is ready to install`}
+          detail={
+            state.launched
+              ? `RailReel closes while it updates to ${v}. Open it again once Android says it's installed. Backed out? Install it from here.`
+              : `Downloaded and checked. RailReel closes while it updates, so open it again once Android says it's installed.`
+          }
           live
         >
-          <Button title="Open the installer again" intent="neutral" compact onPress={() => void installUpdate()} style={styles.start} />
+          {guard ?? (
+            <Button
+              title="Install now"
+              intent="amber"
+              height={56}
+              icon={<Download size={20} color={t.palette.onAmber} strokeWidth={2.25} />}
+              onPress={() => void installUpdate()}
+            />
+          )}
         </Row>
       )
+    }
     case 'error':
       return (
         <Row icon={<CircleAlert size={18} color={t.palette.danger} strokeWidth={2.25} />} title="That didn't work" detail={state.message} live>
